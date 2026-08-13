@@ -38,7 +38,7 @@ jobs:
             package-verification.json
           if-no-files-found: error
           retention-days: 14
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8
         with:
           platforms: arm64
       - name: Set up Docker Buildx
