@@ -1,72 +1,78 @@
 # Repository release protections
 
-**Current status: Unverified / repository not readable.** The read-only repository API returned `404` from the current environment. Nothing below is claimed to be enabled. Publication is blocked until a maintainer verifies every item and records the evidence in the release issue. Do not record tokens or other secrets.
+Verified against `gurkanguray/pi-docker-sandboxes` on 2026-08-13 by `@gurkanguray`.
+Do not record tokens or other secrets here.
 
 ## Checklist
 
 ### `main` branch protection
 
-- [ ] **Required setting:** Protect `main`: disallow force pushes and deletion; require a pull request, resolved conversations, and signed commits where feasible. Require the exact observed check contexts for CI, security, macOS E2E, and release checking (currently intended to correspond to `CI / test`, the `Security` jobs, `Docker Sandboxes E2E / macos-arm64`, and `Protected release candidate / metadata`). Confirm each context actually reports on the protected commit before making it required, so an absent event trigger cannot deadlock merges.
-- **Why:** Prevents history rewriting or bypassing review and makes the release gates fail closed.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/branches/main/protection`; confirm required status-check contexts against successful check runs. UI: **Settings → Branches → Branch protection rules → main** (or **Settings → Rules → Rulesets**).
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Ruleset `Main Protection` on `refs/heads/main`: no force-push, no deletion, linear history, squash-only PR, 1 approval, code-owner review, stale-review dismiss, conversation resolution. Repository admins may bypass only via pull request.
+- **Why:** Prevents history rewriting and keeps review on the default branch without locking a solo maintainer out of their own PRs.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/rulesets/20818604`
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
+
+Status checks are **not** required yet. Require `CI / test` only after that check has reported on `main`. Do not require macOS E2E or release-candidate jobs until those runners exist; missing contexts deadlock merges.
 
 ### Protected release environment
 
-- [ ] **Required setting:** Create a `release` environment whose deployment protection rules require approval by a maintainer; prevent self-review where available and restrict deployment to release refs appropriate to the signed-tag workflow.
-- **Why:** Keeps publication jobs blocked after automated gates until an authorized human approves the bound candidate.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/environments/release`; inspect `protection_rules`, reviewers, self-review prevention, and deployment branch/tag policy. UI: **Settings → Environments → release**.
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Environment `release` requires reviewer `@gurkanguray` and deploys only from `main` or tags `v*`.
+- **Why:** Publication jobs stay blocked until a maintainer approves the bound candidate.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/environments/release`
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
 
 ### npm trusted publisher
 
-- [ ] **Required setting:** For `pi-docker-sandboxes`, allow trusted publishing only from GitHub repository `gurkanguray/pi-docker-sandboxes`, workflow `publish-npm.yml` (called by `release-candidate.yml`), and environment `release`.
-- **Why:** Restricts npm OIDC publication to the reviewed protected workflow without a stored npm token.
-- **Verify:** npm UI: **Package → Settings → Trusted Publishers**; compare the owner, repository, workflow filename, and environment exactly. Also review `.github/workflows/release-candidate.yml` and `.github/workflows/publish-npm.yml` at the release commit.
+- [ ] **Required setting:** Trusted publishing only from this repository, `publish-npm.yml` (called by `release-candidate.yml`), and environment `release`.
+- **Why:** Restricts npm OIDC publication to the reviewed workflow.
+- **Verify:** npm UI → Package → Settings → Trusted Publishers.
 - **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
 
 ### GHCR tag and retention policy
 
-- [ ] **Required setting:** Treat version tags as immutable: never overwrite/delete a released version tag, never publish `latest`, and retain released versions and digests. Limit package write/delete authority to the protected release workflow and define retention so release evidence is not garbage-collected.
-- **Why:** Keeps every documented version and provenance reference bound to its original digest.
-- **Verify:** List versions with `gh api /users/gurkanguray/packages/container/pi-docker-sandboxes/versions`; inspect tag-to-digest mappings and absence of `latest`. UI: **Package → Package settings → Manage Actions access / retention**, and compare `.github/workflows/release-candidate.yml` plus `.github/workflows/publish-image.yml` at the release commit.
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Tag ruleset `Immutable version tags` blocks deletion and force-updates of `v*`. Workflows never publish `latest`.
+- **Why:** Version tags stay bound to one digest.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/rulesets/20818663`
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
+
+Registry package retention still needs a first GHCR version.
 
 ### Security features
 
-- [ ] **Required setting:** Enable private vulnerability reporting.
-- **Why:** Gives reporters a private path for coordinated disclosure.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/private-vulnerability-reporting` (enabled returns a successful response). UI: **Settings → Security → Code security and analysis → Private vulnerability reporting**.
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Private vulnerability reporting enabled.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/private-vulnerability-reporting`
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
 
-- [ ] **Required setting:** Enable Dependabot alerts.
-- **Why:** Surfaces vulnerable dependency advisories that can block or trigger release remediation.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/dependabot/alerts`; confirm access and review open alerts. UI: **Settings → Security → Code security and analysis → Dependabot alerts**.
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Dependabot alerts and security updates enabled.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes --jq '.security_and_analysis'`
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
 
-- [ ] **Required setting:** Enable secret scanning and push protection for the repository.
-- **Why:** Detects committed credentials and blocks supported secrets before they enter history.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes --jq '.security_and_analysis'`; require `secret_scanning.status` and `secret_scanning_push_protection.status` to be `enabled`. UI: **Settings → Security → Code security and analysis**.
-- **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
+- [x] **Required setting:** Secret scanning and push protection enabled.
+- **Verify:** same `security_and_analysis` query.
+- **Evidence:** Date: 2026-08-13 Owner: `@gurkanguray` Release issue URL: n/a
 
 ### Self-hosted release runner
 
-- [ ] **Required setting:** Scope the macOS ARM64 Docker Sandboxes runner only to this repository and apply the labels `self-hosted`, `macOS`, `ARM64`, and `docker-sandboxes`; do not grant public forks or unrelated repositories access.
-- **Why:** The E2E gate executes repository code on privileged local hardware, so broader runner access expands the trust boundary.
-- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/actions/runners`; inspect runner labels and repository access. If the runner is organization-owned, also verify its runner-group selected-repository policy. UI: **Settings → Actions → Runners** (and organization **Settings → Actions → Runner groups**, if applicable).
+- [ ] **Required setting:** Scope the macOS ARM64 Docker Sandboxes runner only to this repository with labels `self-hosted`, `macOS`, `ARM64`, `docker-sandboxes`.
+- **Why:** E2E runs privileged local hardware.
+- **Verify:** `gh api repos/gurkanguray/pi-docker-sandboxes/actions/runners`
 - **Evidence:** Date: ____ Owner: ____ Release issue URL: ____
 
-## Read-only verification commands
+### Other defaults applied 2026-08-13
 
-These commands read configuration only. They do not enable or change settings.
+- Squash-only merges; delete head branch on merge; DCO web commit signoff required.
+- Wiki and Projects off; Issues on.
+- Actions: selected (GitHub-owned + verified), SHA pinning required, default `GITHUB_TOKEN` read-only, workflows cannot approve PRs.
+- Topics: `pi`, `docker`, `sandboxes`, `microvm`, `security`, `macos`.
+- Extra labels: `dependencies`, `npm`, `github-actions`, `security`, `macos`, `unsupported-platform`.
+
+## Read-only verification
 
 ```sh
 repo=gurkanguray/pi-docker-sandboxes
-gh api "repos/$repo/branches/main/protection"
+gh api "repos/$repo/rulesets"
 gh api "repos/$repo/environments/release"
 gh api "repos/$repo/private-vulnerability-reporting"
-gh api "repos/$repo/dependabot/alerts"
 gh api "repos/$repo" --jq '.security_and_analysis'
-gh api "repos/$repo/actions/runners"
-gh api "/users/gurkanguray/packages/container/pi-docker-sandboxes/versions"
+gh api "repos/$repo/actions/permissions"
 ```
