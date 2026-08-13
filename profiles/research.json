@@ -1,0 +1,5 @@
+{
+  "name": "research",
+  "allow": ["registry.npmjs.org", "github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "docs.docker.com", "pi.dev"],
+  "deny": []
+}

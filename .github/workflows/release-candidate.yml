@@ -1,0 +1,359 @@
+name: Protected release candidate
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Signed prerelease tag (vX.Y.Z-prerelease)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-candidate-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: source
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/tags/$TAG"
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          key=docs/release-signing.asc
+          export GNUPGHOME="$RUNNER_TEMP/release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          test -s "$key" || {
+            echo "missing committed release signing key: $key" >&2
+            exit 1
+          }
+          gpg --batch --import "$key"
+          test -n "$(gpg --batch --with-colons --list-keys \
+            | awk -F: '$1 == "pub" { print $5; exit }')"
+          git verify-tag "$TAG"
+          test "$(git cat-file -t "$TAG")" = tag
+          sha="$(git rev-list -n 1 "$TAG")"
+          git checkout --detach "$sha"
+          version="$(node -p 'require("./package.json").version')"
+          test "$TAG" = "v$version"
+          node -e 'if (!require("node:util").parseArgs) process.exit(1)'
+          node --input-type=module - "$version" <<'NODE'
+          import { parseArgs } from "node:util";
+          const version = process.argv[2];
+          if (!version.includes("-"))
+            throw new Error("alpha releases must be prereleases");
+          NODE
+          npm run release:check -- --allow-unreleased --tag "$TAG"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - name: Build and verify package once
+        id: package
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir dist
+          npm pack --pack-destination dist
+          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          npm run package:verify -- "$tarball" \
+            --receipt package-verification.json
+          integrity="$(node -p \
+            'require("./package-verification.json").integrity')"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "integrity=$integrity" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-package-${{ needs.metadata.outputs.sha }}
+          path: |
+            ${{ steps.package.outputs.tarball }}
+            package-verification.json
+          if-no-files-found: error
+          retention-days: 90
+
+  image-candidate:
+    needs: [metadata, package]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      digest: ${{ steps.receipt.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: npm-package-${{ needs.metadata.outputs.sha }}
+          path: candidate-package
+      - id: image
+        run: |
+          set -euo pipefail
+          tarball="$(node scripts/assert-one-tarball.mjs candidate-package)"
+          cp "$tarball" docker/pi-docker-sandboxes.tgz
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import { readFile } from "node:fs/promises";
+          const lock = JSON.parse(await readFile("docker/image-lock.json"));
+          for (const [name, value] of Object.entries({
+            base_image: lock.baseImage, pi_version: lock.piVersion,
+            package_version: lock.packageVersion,
+            fd_version: lock.tools.fdDebianVersion,
+            rg_version: lock.tools.rgDebianVersion,
+            git_version: lock.tools.gitDebianVersion,
+          })) console.log(`${name}=${value}`);
+          NODE
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: >-
+          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: build
+        name: Build the exact OCI candidate once
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: docker
+          platforms: linux/arm64
+          push: false
+          provenance: mode=max
+          outputs: type=oci,dest=${{ runner.temp }}/candidate-image.oci.tar
+          tags: pi-docker-sandboxes:${{ needs.metadata.outputs.sha }}
+          build-args: |
+            BASE_IMAGE=${{ steps.image.outputs.base_image }}
+            PI_VERSION=${{ steps.image.outputs.pi_version }}
+            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
+            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
+            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
+            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
+          cache-from: type=gha,scope=release-candidate-arm64
+          cache-to: type=gha,mode=max,scope=release-candidate-arm64
+      - id: receipt
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir oci
+          tar -xf "$RUNNER_TEMP/candidate-image.oci.tar" -C oci index.json
+          digest="$(node -p 'require("./oci/index.json").manifests[0].digest')"
+          test "$digest" = "$BUILD_DIGEST"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          const receipt = {
+            sourceSha: process.env.SOURCE_SHA,
+            ociDigest: process.env.BUILD_DIGEST,
+            image: `pi-docker-sandboxes:${process.env.SOURCE_SHA}`,
+          };
+          await writeFile(
+            "image-verification.json",
+            `${JSON.stringify(receipt, null, 2)}\n`,
+          );
+          NODE
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oci-candidate-${{ needs.metadata.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/candidate-image.oci.tar
+            image-verification.json
+          if-no-files-found: error
+          retention-days: 90
+
+  security:
+    needs: [metadata, image-candidate]
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/security.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.sha }}
+      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
+      image_digest: ${{ needs.image-candidate.outputs.digest }}
+
+  e2e:
+    needs: [metadata, package, image-candidate, security]
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/e2e.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.sha }}
+      package_artifact: npm-package-${{ needs.metadata.outputs.sha }}
+      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
+      image_digest: ${{ needs.image-candidate.outputs.digest }}
+
+  receipt:
+    needs: [metadata, package, image-candidate, security, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: npm-package-${{ needs.metadata.outputs.sha }}
+          path: evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: oci-candidate-${{ needs.metadata.outputs.sha }}
+          path: evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: image-security-${{ needs.metadata.outputs.sha }}
+          path: evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: macos-e2e-${{ needs.metadata.outputs.sha }}
+          path: evidence
+      - name: Join and verify candidate evidence
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          IMAGE_DIGEST: ${{ needs.image-candidate.outputs.digest }}
+          SCAN_REF: ${{ needs.security.outputs.scan_ref }}
+          SBOM_REF: ${{ needs.security.outputs.sbom_ref }}
+          PROVENANCE_REF: oci-candidate-${{ needs.metadata.outputs.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const packageReceipt = JSON.parse(
+            await readFile("evidence/package-verification.json"),
+          );
+          const imageReceipt = JSON.parse(
+            await readFile("evidence/image-verification.json"),
+          );
+          const e2eReceipt = JSON.parse(
+            await readFile("evidence/e2e-receipt.json"),
+          );
+          const expected = process.env;
+          if (imageReceipt.sourceSha !== expected.SOURCE_SHA ||
+              imageReceipt.ociDigest !== expected.IMAGE_DIGEST ||
+              e2eReceipt.sourceSha !== expected.SOURCE_SHA ||
+              e2eReceipt.candidateDigest !== expected.IMAGE_DIGEST ||
+              e2eReceipt.packageIntegrity !== packageReceipt.integrity ||
+              e2eReceipt.status !== "passed" || !e2eReceipt.passedAt)
+            throw new Error(
+              "candidate evidence does not bind to one candidate",
+            );
+          const receipt = {
+            sourceSha: expected.SOURCE_SHA,
+            tag: expected.TAG,
+            version: expected.VERSION,
+            tarballIntegrity: packageReceipt.integrity,
+            imageDigest: expected.IMAGE_DIGEST,
+            scanRef: expected.SCAN_REF, sbomRef: expected.SBOM_REF,
+            provenanceRef:
+              `${expected.PROVENANCE_REF}#${expected.IMAGE_DIGEST}`,
+            e2eReceipt,
+          };
+          await writeFile(
+            "release-candidate-receipt.json",
+            `${JSON.stringify(receipt, null, 2)}\n`,
+          );
+          NODE
+          cp evidence/candidate-image.cdx.json candidate-image.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-candidate-${{ needs.metadata.outputs.sha }}
+          path: |
+            release-candidate-receipt.json
+            candidate-image.cdx.json
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-npm:
+    needs: [metadata, receipt]
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-npm.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      package_artifact: npm-package-${{ needs.metadata.outputs.sha }}
+      candidate_receipt: release-candidate-${{ needs.metadata.outputs.sha }}
+
+  finalize-image:
+    needs: [metadata, receipt]
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    uses: ./.github/workflows/publish-image.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
+      candidate_receipt: release-candidate-${{ needs.metadata.outputs.sha }}
+
+  verify-publication:
+    needs: [metadata, publish-npm, finalize-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          registry-url: https://registry.npmjs.org
+      - name: Verify published npm package from a clean prefix
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d)"
+          npm view "pi-docker-sandboxes@$VERSION" version --json \
+            | grep -F "\"$VERSION\""
+          npm install --ignore-scripts --prefix "$prefix" \
+            "pi-docker-sandboxes@$VERSION"
+          "$prefix/node_modules/.bin/pi-dsbx" --help
+      - name: Verify immutable GHCR digest, SBOM, and provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.finalize-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE@$DIGEST"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY"
+          gh attestation verify "oci://$IMAGE@$DIGEST" \
+            --repo "$GITHUB_REPOSITORY" \
+            --predicate-type https://cyclonedx.org/bom

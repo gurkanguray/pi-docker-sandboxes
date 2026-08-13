@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src"
+  },
+  "include": ["src/cli.ts", "src/image.ts", "src/sbx/inherited-runner.mjs"],
+  "exclude": ["extensions", "test"]
+}

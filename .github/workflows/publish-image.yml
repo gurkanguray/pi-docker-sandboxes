@@ -1,0 +1,113 @@
+name: Finalize verified OCI candidate
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      image_artifact:
+        required: true
+        type: string
+      candidate_receipt:
+        required: true
+        type: string
+    outputs:
+      digest:
+        value: ${{ jobs.publish.outputs.digest }}
+permissions:
+  contents: read
+jobs:
+  publish:
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: image
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.candidate_receipt }}
+          path: candidate
+      - name: Install digest-pinned Skopeo
+        run: |
+          image="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          docker create --name skopeo-bin "$image"
+          docker cp skopeo-bin:/usr/bin/skopeo "$RUNNER_TEMP/skopeo"
+          docker rm skopeo-bin
+          chmod +x "$RUNNER_TEMP/skopeo"
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: publish
+        name: Push the verified archive without rebuilding
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test -s image/candidate-image.oci.tar
+          VERSION="${TAG#v}"
+          test "$TAG" = "v$VERSION"
+          node --input-type=module <<'NODE' > expected-digest
+          import { readFile } from "node:fs/promises";
+          const receipt = JSON.parse(
+            await readFile("candidate/release-candidate-receipt.json"),
+          );
+          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
+              receipt.tag !== process.env.TAG ||
+              receipt.e2eReceipt?.status !== "passed" ||
+              !/^sha256:[0-9a-f]{64}$/.test(receipt.imageDigest))
+            throw new Error("OCI candidate receipt is invalid");
+          console.log(receipt.imageDigest);
+          NODE
+          expected="$(cat expected-digest)"
+          for ref in "$SOURCE_SHA" "$VERSION"; do
+            if "$RUNNER_TEMP/skopeo" inspect \
+              "docker://$IMAGE:$ref" >/dev/null 2>&1; then
+              actual="$(docker buildx imagetools inspect "$IMAGE:$ref" \
+                --format '{{json .Manifest.Digest}}' | tr -d '"')"
+              test "$actual" = "$expected" || {
+                echo "immutable image tag has unexpected digest: $ref" >&2
+                exit 1
+              }
+              continue
+            fi
+            "$RUNNER_TEMP/skopeo" copy \
+              oci-archive:image/candidate-image.oci.tar:candidate \
+              "docker://$IMAGE:$ref"
+            actual="$(docker buildx imagetools inspect "$IMAGE:$ref" \
+              --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            test "$actual" = "$expected"
+          done
+          echo "digest=$actual" >> "$GITHUB_OUTPUT"
+      - name: Require the downloaded candidate SBOM
+        run: test -f candidate/candidate-image.cdx.json
+      - name: Attest the immutable published digest
+        uses: >-
+          actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the candidate SBOM to the same digest
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: candidate/candidate-image.cdx.json
+          push-to-registry: true

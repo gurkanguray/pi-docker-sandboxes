@@ -1,0 +1,98 @@
+name: Bug report
+description: >-
+  Report a reproducible problem on the supported public-alpha platform.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include credentials, private source,
+        raw environment dumps, or sensitive patch contents. Report undisclosed
+        vulnerabilities through private vulnerability reporting instead.
+  - type: input
+    id: package_version
+    attributes:
+      label: Package version
+      description: Output of `pi-dsbx --version`, if available.
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: pi_version
+    attributes:
+      label: Pi version
+      placeholder: 0.84.1
+    validations:
+      required: true
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      placeholder: 24.12.0
+    validations:
+      required: true
+  - type: input
+    id: sbx_version
+    attributes:
+      label: Docker Sandboxes (`sbx`) version
+      placeholder: 0.38.x
+    validations:
+      required: true
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      description: Give only the version number; do not paste system reports.
+      placeholder: "26.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      options:
+        - Apple Silicon (ARM64)
+        - Other (use the unsupported-platform form)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List sanitized steps and commands that reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only sanitized errors and relevant output.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Reviewed `pi-dsbx doctor` output
+      description: >-
+        Paste only output you have reviewed and redacted. Never include secrets,
+        credentials, environment dumps, private source, or sensitive patches.
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: >-
+            I reviewed and redacted all output and included no secrets,
+            credentials, private source, or sensitive patch contents.
+          required: true

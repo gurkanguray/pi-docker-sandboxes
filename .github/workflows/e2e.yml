@@ -1,0 +1,324 @@
+name: Docker Sandboxes E2E
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact source commit to test
+        required: true
+        type: string
+      package_artifact:
+        description: Artifact containing the verified npm tarball and receipt
+        required: true
+        type: string
+      image_artifact:
+        description: Artifact containing the exact OCI candidate archive
+        required: true
+        type: string
+      image_digest:
+        description: OCI manifest digest bound to the candidate receipt
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source commit to test
+        required: true
+        type: string
+      package_artifact:
+        description: Artifact name, normally npm-package-<source_sha>
+        required: true
+        type: string
+      image_artifact:
+        description: Artifact containing the exact OCI candidate archive
+        required: true
+        type: string
+      image_digest:
+        description: OCI manifest digest bound to the candidate receipt
+        required: true
+        type: string
+      run_id:
+        description: Completed CI run that uploaded the package artifact
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: read
+jobs:
+  macos-arm64:
+    runs-on: [self-hosted, macOS, ARM64, docker-sandboxes]
+    timeout-minutes: 30
+    steps:
+      - name: Initialize fallback E2E evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          E2E_LOG: ${{ runner.temp }}/pi-dsbx-e2e.log
+          E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
+          E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          : > "$E2E_LOG"
+          : > "$E2E_NAMES"
+          node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          const receipt = {
+            sourceSha: process.env.SOURCE_SHA,
+            packageIntegrity: null,
+            imageDigest: process.env.IMAGE_DIGEST,
+            selectedImage: null,
+            platform: process.platform,
+            macosVersion: null,
+            architecture: process.arch,
+            sbxVersion: null,
+            piVersion: null,
+            packageVersion: null,
+            tests: ["E2E setup"],
+            testsCount: 0,
+            status: "failed",
+            passedAt: null,
+          };
+          await writeFile(
+            process.env.E2E_RECEIPT,
+            `${JSON.stringify(receipt, null, 2)}\n`,
+          );
+          NODE
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Download called-workflow package artifact
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.package_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
+      - name: Download dispatched package artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.package_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+      - name: Download called-workflow OCI candidate
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-image
+      - name: Download dispatched OCI candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-image
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+      - name: Load and bind the exact OCI candidate
+        id: image
+        env:
+          EXPECTED_DIGEST: ${{ inputs.image_digest }}
+          IMAGE_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-image
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          archive="$IMAGE_ARTIFACT/candidate-image.oci.tar"
+          test -s "$archive"
+          mkdir "$IMAGE_ARTIFACT/oci"
+          tar -xf "$archive" -C "$IMAGE_ARTIFACT/oci" index.json
+          actual="$(node -p \
+            'require(process.argv[1]).manifests[0].digest' \
+            "$IMAGE_ARTIFACT/oci/index.json")"
+          test "$actual" = "$EXPECTED_DIGEST"
+          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          docker run --rm --volume "$IMAGE_ARTIFACT:/candidate:ro" \
+            --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
+            oci-archive:/candidate/candidate-image.oci.tar:candidate \
+            "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
+          image_id="$(docker image inspect "pi-docker-sandboxes:$SOURCE_SHA" \
+            --format '{{.Id}}')"
+          content="${image_id#sha256:}"
+          selected="docker.io/pi-docker-sandboxes/pi:local-$content"
+          docker tag "$image_id" "$selected"
+          docker save --output "$IMAGE_ARTIFACT/sbx-candidate.tar" "$selected"
+          sbx template load "$IMAGE_ARTIFACT/sbx-candidate.tar"
+          sbx template ls --json | grep -F "${selected##*:}" >/dev/null
+          {
+            echo "candidate_digest=$actual"
+            echo "selected_image=$selected"
+            echo "selected_image_id=$image_id"
+          } >> "$GITHUB_OUTPUT"
+      - name: Bind candidate inputs and install in a clean prefix
+        id: candidate
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          E2E_PREFIX: ${{ runner.temp }}/pi-dsbx-e2e-prefix
+          E2E_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-artifact
+          E2E_LOG: ${{ runner.temp }}/pi-dsbx-e2e.log
+        run: |
+          set -euo pipefail
+          exec > >(tee -a "$E2E_LOG") 2>&1
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          expected_artifact="npm-package-$SOURCE_SHA"
+          test "${{ inputs.package_artifact }}" = "$expected_artifact"
+          tarball="$(node scripts/assert-one-tarball.mjs "$E2E_ARTIFACT")"
+          test -f "$E2E_ARTIFACT/package-verification.json"
+          rm -rf "$E2E_PREFIX"
+          mkdir -p "$E2E_PREFIX"
+          npm install --ignore-scripts --prefix "$E2E_PREFIX" "$tarball"
+          receipt="$E2E_ARTIFACT/package-verification.json"
+          node --input-type=module - "$receipt" <<'NODE' >> "$GITHUB_OUTPUT"
+          import { readFile } from "node:fs/promises";
+          const receipt = JSON.parse(await readFile(process.argv[2], "utf8"));
+          if (!receipt.integrity || !receipt.binVersion) process.exit(1);
+          console.log(`integrity=${receipt.integrity}`);
+          console.log(`package_version=${receipt.binVersion}`);
+          NODE
+          test "${{ steps.image.outputs.candidate_digest }}" = "$IMAGE_DIGEST"
+          installed="$E2E_PREFIX/node_modules/pi-docker-sandboxes/package.json"
+          {
+            printf 'tarball=%s\n' "$tarball"
+            printf 'installed_package=%s\n' "$installed"
+          } >> "$GITHUB_OUTPUT"
+      - name: Run complete real E2E
+        id: e2e
+        env:
+          E2E_PREFIX: ${{ runner.temp }}/pi-dsbx-e2e-prefix
+          E2E_LOG: ${{ runner.temp }}/pi-dsbx-e2e.log
+          PI_DOCKER_SANDBOX_E2E: "1"
+          PI_DOCKER_SANDBOX_E2E_IMAGE: >-
+            ${{ steps.image.outputs.selected_image }}
+          PI_DOCKER_SANDBOX_E2E_NAMES: >-
+            ${{ runner.temp }}/e2e-sandboxes.txt
+          PI_DOCKER_SANDBOX_E2E_PACKAGE: ${{ steps.candidate.outputs.tarball }}
+          PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION: >-
+            ${{ steps.candidate.outputs.package_version }}
+        run: |
+          export PATH="$E2E_PREFIX/node_modules/.bin:$PATH"
+          npm run test:e2e 2>&1 | tee -a "$E2E_LOG"
+      - name: Write artifact-bound E2E receipt
+        if: always()
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          SELECTED_IMAGE: ${{ steps.image.outputs.selected_image }}
+          SELECTED_IMAGE_ID: ${{ steps.image.outputs.selected_image_id }}
+          CANDIDATE_DIGEST: ${{ steps.image.outputs.candidate_digest }}
+          PACKAGE_INTEGRITY: ${{ steps.candidate.outputs.integrity }}
+          PACKAGE_VERSION: ${{ steps.candidate.outputs.package_version }}
+          TARBALL: ${{ steps.candidate.outputs.tarball }}
+          INSTALLED_PACKAGE: ${{ steps.candidate.outputs.installed_package }}
+          E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
+          E2E_OUTCOME: ${{ steps.e2e.outcome }}
+        run: |
+          count="$(grep -c 'E2E_TEST_PASSED=1' \
+            "$RUNNER_TEMP/pi-dsbx-e2e.log" || true)"
+          if test "$E2E_OUTCOME" = success && test "$count" -eq 6; then
+            status=passed
+          else
+            status=failed
+          fi
+          sbx_version="$(sbx --version | awk '{print $NF}' || true)"
+          pi_version="$(pi --version | awk '{print $NF}' || true)"
+          set +e
+          node scripts/e2e-receipt.mjs \
+            --source-sha "$SOURCE_SHA" \
+            --package "$TARBALL" \
+            --package-integrity "$PACKAGE_INTEGRITY" \
+            --package-version "$PACKAGE_VERSION" \
+            --installed-package "$INSTALLED_PACKAGE" \
+            --image-digest "$SELECTED_IMAGE_ID" \
+            --selected-image "$SELECTED_IMAGE" \
+            --selected-image-id "$SELECTED_IMAGE_ID" \
+            --status "$status" \
+            --tests-count "$count" \
+            --platform "$(uname -s | tr '[:upper:]' '[:lower:]')" \
+            --macos-version "$(sw_vers -productVersion)" \
+            --architecture "$(uname -m)" \
+            --sbx-version "$sbx_version" \
+            --pi-version "$pi_version" \
+            --receipt "$E2E_RECEIPT" \
+            --test "clone boundary, daemon isolation, network denial" \
+            --test "binary patch round trip and host staging cleanup" \
+            --test "preserve, export, discard, and signal recovery" \
+            --test "empty Git onboarding" \
+            --test "installed extension re-exec" \
+            --test "proxy credential secrecy and no-model guidance"
+          receipt_status=$?
+          set -e
+          if test "$receipt_status" -eq 0; then
+            node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const path = process.env.E2E_RECEIPT;
+          const receipt = JSON.parse(await readFile(path));
+          receipt.candidateDigest = process.env.CANDIDATE_DIGEST || null;
+          receipt.imageDigest = receipt.candidateDigest;
+          await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
+          NODE
+          fi
+          if test ! -s "$E2E_RECEIPT"; then
+            node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          const receipt = {
+            sourceSha: process.env.SOURCE_SHA,
+            packageIntegrity: process.env.PACKAGE_INTEGRITY || null,
+            imageDigest: process.env.IMAGE_DIGEST,
+            selectedImage: process.env.SELECTED_IMAGE || null,
+            platform: process.platform,
+            macosVersion: null,
+            architecture: process.arch,
+            sbxVersion: null,
+            piVersion: null,
+            packageVersion: process.env.PACKAGE_VERSION || null,
+            tests: ["E2E receipt generation"],
+            testsCount: 0,
+            status: "failed",
+            passedAt: null,
+          };
+          await writeFile(
+            process.env.E2E_RECEIPT,
+            `${JSON.stringify(receipt, null, 2)}\n`,
+          );
+          NODE
+          fi
+          exit "$receipt_status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: macos-e2e-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/pi-dsbx-e2e.log
+            ${{ runner.temp }}/e2e-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Clean only sandboxes recorded by this run
+        if: always()
+        env:
+          E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+        run: |
+          failures="$RUNNER_TEMP/e2e-cleanup-failures"
+          : > "$failures"
+          sort -u "$E2E_NAMES" | while IFS= read -r name; do
+            case "$name" in
+              pi-dsbx-e2e-*|pi-dsbx-reexec-*|pi-dsbx-proxy-*)
+                if ! sbx rm --force "$name"; then
+                  printf '%s\n' "$name" >> "$failures"
+                fi
+                ;;
+              *)
+                echo "refusing to clean unrecognized sandbox: $name" >&2
+                exit 1
+                ;;
+            esac
+          done
+          if test -s "$failures"; then
+            echo "failed to remove recorded E2E sandboxes:" >&2
+            cat "$failures" >&2
+            exit 1
+          fi

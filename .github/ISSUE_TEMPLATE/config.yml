@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private vulnerability report
+    url: >-
+      https://github.com/gurkanguray/pi-docker-sandboxes/security/advisories/new
+    about: >-
+      Report undisclosed vulnerabilities privately, not in a public issue.

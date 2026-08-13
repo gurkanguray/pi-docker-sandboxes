@@ -1,0 +1,231 @@
+name: Security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      image_artifact:
+        required: true
+        type: string
+      image_digest:
+        required: true
+        type: string
+    outputs:
+      scan_ref:
+        value: ${{ jobs.candidate-image.outputs.scan_ref }}
+      sbom_ref:
+        value: ${{ jobs.candidate-image.outputs.sbom_ref }}
+permissions:
+  contents: read
+jobs:
+  audit:
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+  filesystem:
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Scan repository
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-filesystem.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Upload filesystem scan
+        if: always()
+        uses: >-
+          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          sarif_file: trivy-filesystem.sarif
+          category: trivy-filesystem
+  image:
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: mkdir dist && npm pack --pack-destination dist
+      - id: image
+        run: |
+          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          npm run package:verify -- "$tarball" \
+            --receipt package-verification.json
+          cp "$tarball" docker/pi-docker-sandboxes.tgz
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import { readFile } from "node:fs/promises";
+          const lock = JSON.parse(await readFile("docker/image-lock.json"));
+          for (const [name, value] of Object.entries({
+            base_image: lock.baseImage,
+            pi_version: lock.piVersion,
+            package_version: lock.packageVersion,
+            fd_version: lock.tools.fdDebianVersion,
+            rg_version: lock.tools.rgDebianVersion,
+            git_version: lock.tools.gitDebianVersion,
+          })) console.log(`${name}=${value}`);
+          NODE
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: >-
+          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Build and load scan candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: docker
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: pi-docker-sandboxes:${{ github.sha }}
+          build-args: |
+            BASE_IMAGE=${{ steps.image.outputs.base_image }}
+            PI_VERSION=${{ steps.image.outputs.pi_version }}
+            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
+            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
+            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
+            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
+          cache-from: type=gha,scope=candidate-arm64
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: pi-docker-sandboxes:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Upload image scan
+        if: always()
+        uses: >-
+          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: pi-docker-sandboxes:${{ github.sha }}
+          format: cyclonedx
+          output: candidate-image.cdx.json
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-sbom-${{ github.sha }}
+          path: candidate-image.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+  candidate-image:
+    if: github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    outputs:
+      scan_ref: ${{ steps.refs.outputs.scan_ref }}
+      sbom_ref: ${{ steps.refs.outputs.sbom_ref }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.image_artifact }}
+          path: candidate
+      - name: Import and bind the candidate archive
+        env:
+          IMAGE_DIGEST: ${{ inputs.image_digest }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test -s candidate/candidate-image.oci.tar
+          mkdir oci
+          tar -xf candidate/candidate-image.oci.tar -C oci index.json
+          test "$(node -p 'require("./oci/index.json").manifests[0].digest')" \
+            = "$IMAGE_DIGEST"
+          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          docker run --rm --volume "$PWD/candidate:/candidate:ro" \
+            --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
+            oci-archive:/candidate/candidate-image.oci.tar:candidate \
+            "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
+      - name: Scan exact candidate image
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: pi-docker-sandboxes:${{ inputs.source_sha }}
+          format: sarif
+          output: candidate-image.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+      - name: Generate exact candidate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          image-ref: pi-docker-sandboxes:${{ inputs.source_sha }}
+          format: cyclonedx
+          output: candidate-image.cdx.json
+      - name: Upload candidate scan
+        if: always()
+        uses: >-
+          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          sarif_file: candidate-image.sarif
+          category: release-candidate-image
+      - id: refs
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          echo "scan_ref=$SERVER_URL/$REPOSITORY/security/code-scanning" \
+            >> "$GITHUB_OUTPUT"
+          echo "sbom_ref=image-security-$SOURCE_SHA/candidate-image.cdx.json" \
+            >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-security-${{ inputs.source_sha }}
+          path: |
+            candidate-image.sarif
+            candidate-image.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+  codeql:
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: github/codeql-action/init@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          languages: javascript-typescript
+      - name: Analyze with CodeQL
+        uses: >-
+          github/codeql-action/analyze@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e

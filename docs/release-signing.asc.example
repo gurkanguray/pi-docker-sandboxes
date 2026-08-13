@@ -1,0 +1,13 @@
+No maintainer secret key was available to export in this checkout.
+
+Before the first protected release, export the armored public key:
+
+```sh
+gpg --armor --export <maintainer-release-key-fingerprint> \
+  > docs/release-signing.asc
+gpg --show-keys --with-fingerprint docs/release-signing.asc
+```
+
+Commit `docs/release-signing.asc`. Never commit the private key. The release
+workflow deliberately fails closed while that required public-key file is
+absent, empty, invalid, or cannot populate the job's GPG keyring.

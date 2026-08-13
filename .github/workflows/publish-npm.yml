@@ -1,0 +1,75 @@
+name: Publish verified npm candidate
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      package_artifact:
+        required: true
+        type: string
+      candidate_receipt:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  publish:
+    environment: release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.package_artifact }}
+          path: package
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.candidate_receipt }}
+          path: candidate
+      - name: Verify protected candidate receipt and npm configuration
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tarball="$(node scripts/assert-one-tarball.mjs package)"
+          node --input-type=module - "$tarball" <<'NODE'
+          import { execFileSync } from "node:child_process";
+          import { readFileSync } from "node:fs";
+          const tarball = process.argv[2];
+          const receipt = JSON.parse(
+            readFileSync("candidate/release-candidate-receipt.json"),
+          );
+          const verification = JSON.parse(
+            readFileSync("package/package-verification.json"),
+          );
+          const pkg = JSON.parse(
+            execFileSync("npm", ["pack", "--dry-run", "--json", tarball]),
+          )[0];
+          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
+              receipt.tag !== process.env.TAG ||
+              receipt.e2eReceipt?.status !== "passed" ||
+              receipt.tarballIntegrity !== verification.integrity ||
+              receipt.tarballIntegrity !== pkg.integrity ||
+              !pkg.version.includes("-"))
+            throw new Error("npm candidate receipt is invalid");
+          NODE
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          echo "tarball=$tarball" >> "$GITHUB_ENV"
+      - name: Publish the verified tarball with the prerelease dist-tag
+        run: npm publish "$tarball" --provenance --access public --tag alpha

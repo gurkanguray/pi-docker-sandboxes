@@ -1,0 +1,41 @@
+name: Feature request
+description: >-
+  Propose an improvement within the supported public-alpha boundary.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user need without credentials, private source, or other
+        sensitive data. Use private vulnerability reporting for security issues.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What supported workflow is difficult or unavailable?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the smallest useful behavior, not an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security boundary and data-preservation impact
+      description: >-
+        Note effects on isolation, credentials, networking, export, cleanup, or
+        retained work. Write "none identified" when not applicable.
+    validations:
+      required: true

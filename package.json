@@ -1,0 +1,88 @@
+{
+  "name": "pi-docker-sandboxes",
+  "version": "0.1.0-alpha.1",
+  "description": "Run Pi inside a Docker Sandboxes microVM",
+  "type": "module",
+  "bin": {
+    "pi-dsbx": "./bin/pi-dsbx.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gurkanguray/pi-docker-sandboxes.git"
+  },
+  "homepage": "https://github.com/gurkanguray/pi-docker-sandboxes#readme",
+  "bugs": {
+    "url": "https://github.com/gurkanguray/pi-docker-sandboxes/issues"
+  },
+  "author": "Guray Gurkan",
+  "packageManager": "npm@11.6.2",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "docker",
+    "docker-sandboxes",
+    "microvm",
+    "sandbox",
+    "security"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/docker-sandboxes/index.ts"
+    ]
+  },
+  "scripts": {
+    "build:cli": "rm -rf dist && tsc --project tsconfig.cli.json",
+    "prepack": "if [ -f .source-checkout ]; then npm run build:cli; fi",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:e2e": "PI_DOCKER_SANDBOX_E2E=1 node --experimental-strip-types --test test/e2e.test.ts",
+    "test:e2e-receipt": "node --experimental-strip-types --test test/e2e-receipt.test.ts",
+    "check": "npm run typecheck && npm test",
+    "image:build": "if [ -f .source-checkout ]; then npm run build:cli; fi; node bin/pi-dsbx.mjs image build",
+    "image:verify": "node scripts/verify-image.mjs",
+    "release:check": "node scripts/check-release.mjs",
+    "package:verify": "node scripts/verify-package.mjs",
+    "smoke:fresh-install": "node scripts/fresh-install-smoke.mjs",
+    "pack:dry": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": ">=0.84.1 <0.85.0",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@types/node": "24.13.3",
+    "ajv": "8.20.0",
+    "typescript": "7.0.2",
+    "yaml": "2.9.0"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "docker/",
+    "extensions/",
+    "profiles/",
+    "scripts/",
+    "src/",
+    "docs/*.md",
+    "README.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "COMPATIBILITY.md",
+    "CONTRIBUTING.md",
+    "GOVERNANCE.md",
+    "LICENSE",
+    "RELEASE.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "THREAT_MODEL.md"
+  ]
+}

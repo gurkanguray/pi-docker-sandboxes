@@ -1,0 +1,13 @@
+{
+  "packageVersion": "0.1.0-alpha.1",
+  "piVersion": "0.84.1",
+  "platform": "linux/arm64",
+  "baseImage": "docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299",
+  "localImage": "docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1",
+  "publishedImage": null,
+  "tools": {
+    "fdDebianVersion": "10.3.0-2ubuntu1",
+    "rgDebianVersion": "15.1.0-1ubuntu1",
+    "gitDebianVersion": "1:2.53.0-1ubuntu1"
+  }
+}

@@ -1,0 +1,119 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm audit --audit-level=high
+      - run: mkdir dist
+      - run: npm pack --pack-destination dist
+      # Ignore compiled leftovers; require exactly one npm tarball.
+      - id: tarball
+        run: |
+          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          echo "path=$tarball" >> "$GITHUB_OUTPUT"
+      - run: >-
+          npm run package:verify -- "${{ steps.tarball.outputs.path }}"
+          --receipt package-verification.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-package-${{ github.sha }}
+          path: |
+            ${{ steps.tarball.outputs.path }}
+            package-verification.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: arm64
+      - name: Set up Docker Buildx
+        uses: >-
+          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: image
+        run: |
+          cp "${{ steps.tarball.outputs.path }}" docker/pi-docker-sandboxes.tgz
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import { readFile } from "node:fs/promises";
+          const lock = JSON.parse(await readFile("docker/image-lock.json"));
+          for (const [name, value] of Object.entries({
+            base_image: lock.baseImage,
+            pi_version: lock.piVersion,
+            package_version: lock.packageVersion,
+            fd_version: lock.tools.fdDebianVersion,
+            rg_version: lock.tools.rgDebianVersion,
+            git_version: lock.tools.gitDebianVersion,
+          })) console.log(`${name}=${value}`);
+          NODE
+      - name: Build and load one arm64 candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: docker
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: pi-docker-sandboxes:${{ github.sha }}
+          build-args: |
+            BASE_IMAGE=${{ steps.image.outputs.base_image }}
+            PI_VERSION=${{ steps.image.outputs.pi_version }}
+            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
+            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
+            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
+            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
+          cache-from: type=gha,scope=candidate-arm64
+          cache-to: type=gha,mode=max,scope=candidate-arm64
+      - name: Verify and export the same candidate
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          image="pi-docker-sandboxes:${{ github.sha }}"
+          image_id="$(docker image inspect "$image" --format '{{.Id}}')"
+          npm run image:verify -- "$image_id" | tee image-verification.log
+          tail -n 1 image-verification.log > image-verification.json
+          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume /tmp:/tmp "$skopeo" copy "docker-daemon:$image" \
+            oci-archive:/tmp/candidate-image.oci.tar:candidate
+          mkdir /tmp/candidate-oci
+          tar -xf /tmp/candidate-image.oci.tar \
+            -C /tmp/candidate-oci index.json
+          node --input-type=module - "$image_id" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const path = "image-verification.json";
+          const receipt = JSON.parse(await readFile(path));
+          const index = JSON.parse(
+            await readFile("/tmp/candidate-oci/index.json", "utf8"),
+          );
+          const ociDigest = index.manifests?.[0]?.digest;
+          if (
+            receipt.platform !== "linux/arm64" ||
+            receipt.imageId !== process.argv[2] ||
+            index.manifests?.length !== 1 ||
+            !/^sha256:[0-9a-f]{64}$/.test(ociDigest)
+          ) process.exit(1);
+          receipt.sourceSha = process.env.SOURCE_SHA;
+          receipt.ociDigest = ociDigest;
+          await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oci-candidate-${{ github.sha }}
+          path: |
+            /tmp/candidate-image.oci.tar
+            image-verification.json
+          if-no-files-found: error
+          retention-days: 14
