@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parseConfig, type ConfigOverride } from "./config.ts";
+import { assertDigestReference } from "./image-lock.ts";
 import { assertLocalTemplateAttestation } from "./local-template.ts";
 import type { SandboxImageAttestation, SandboxState } from "./workspace.ts";
 
@@ -12,43 +13,17 @@ export interface Migration<T> {
 	migrated: boolean;
 }
 
-const SAFE_SYNC = {
-	settings: true,
-	models: true,
-	packages: false,
-	skills: false,
-	prompts: false,
-	themes: false,
-	extensions: false,
-	sessions: "managed" as const,
-};
-
 export function migrateConfig(
 	value: unknown,
 	source: string,
 ): Migration<ConfigOverride> {
 	const parsed = parseConfig(value, source);
 	const sourceVersion = parsed.version ?? 1;
-	const warnings: string[] = [];
-	const normalized = structuredClone(parsed);
-	if (normalized.syncProfile === "balanced") {
-		normalized.syncProfile = "custom";
-		if (normalized.sync === undefined) normalized.sync = { ...SAFE_SYNC };
-		warnings.push(
-			`${source}: migrated balanced defaults to safe personalization (settings and models only); packages and resources now require explicit opt-in`,
-		);
-	}
-	if (normalized.sandbox?.keep === true) {
-		normalized.sandbox.keep = false;
-		warnings.push(
-			`${source}: migrated sandbox persistence to remove clean sandboxes by default`,
-		);
-	}
 	return {
-		value: normalized,
-		warnings,
+		value: structuredClone(parsed),
+		warnings: [],
 		sourceVersion,
-		migrated: warnings.length > 0,
+		migrated: false,
 	};
 }
 
@@ -94,8 +69,8 @@ export function migrateSandboxState(
 		input.workspaceMode,
 		`${path}.workspaceMode`,
 	);
-	if (workspaceMode !== "clone" && workspaceMode !== "direct")
-		throw new TypeError(`${path}.workspaceMode is unsupported`);
+	if (workspaceMode !== "clone")
+		throw new TypeError(`${path}.workspaceMode is unsupported; ${preserve}`);
 	let imageAttestation: SandboxImageAttestation | undefined;
 	if (input.imageAttestation !== undefined) {
 		const attestation = record(
@@ -112,14 +87,24 @@ export function migrateSandboxState(
 			);
 		if (attestation.status !== "pending" && attestation.status !== "verified")
 			throw new TypeError(`${path}.imageAttestation.status is unsupported`);
-		assertLocalTemplateAttestation(
+		const image = requiredString(
 			attestation.image,
-			attestation.templateStoreId,
+			`${path}.imageAttestation.image`,
 		);
+		const templateStoreId = attestation.templateStoreId;
+		if (templateStoreId === undefined)
+			assertDigestReference(image, `${path}.imageAttestation.image`);
+		else {
+			requiredString(
+				templateStoreId,
+				`${path}.imageAttestation.templateStoreId`,
+			);
+			assertLocalTemplateAttestation(image, templateStoreId);
+		}
 		imageAttestation = {
 			status: attestation.status,
-			image: attestation.image,
-			templateStoreId: attestation.templateStoreId as string,
+			image,
+			...(typeof templateStoreId === "string" ? { templateStoreId } : {}),
 		};
 	}
 	return {
@@ -186,11 +171,17 @@ function atomicWriteFlags(): {
 export async function writeJsonAtomic(
 	path: string,
 	value: unknown,
+	options: {
+		directoryPrepared?: boolean;
+		validateDirectory?: () => Promise<void>;
+	} = {},
 ): Promise<void> {
 	const flags = atomicWriteFlags();
 	const directory = dirname(path);
 	const temporary = join(directory, `${basename(path)}.${process.pid}.tmp`);
-	await mkdir(directory, { recursive: true, mode: 0o700 });
+	if (!options.directoryPrepared)
+		await mkdir(directory, { recursive: true, mode: 0o700 });
+	await options.validateDirectory?.();
 	const directoryHandle = await open(directory, flags.directory);
 	let file: Awaited<ReturnType<typeof open>> | undefined;
 	let identity: FileIdentity | undefined;
@@ -199,9 +190,11 @@ export async function writeJsonAtomic(
 		identity = await directoryHandle.stat();
 		const openedIdentity = identity;
 		const validateDirectory = async (): Promise<void> => {
+			await options.validateDirectory?.();
 			if (!sameFileIdentity(openedIdentity, await lstat(directory)))
 				throw new Error("State directory changed during atomic write");
 		};
+		await validateDirectory();
 		await directoryHandle.chmod(0o700);
 		const content = `${JSON.stringify(value, null, 2)}\n`;
 		await validateDirectory();

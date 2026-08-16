@@ -14,12 +14,11 @@ import { deriveLocalTemplateImage } from "../src/local-template.ts";
 const digest = "a".repeat(64);
 const id = `sha256:${digest}`;
 const lock: ImageLock = {
-	packageVersion: "0.1.0-alpha.1",
+	packageVersion: "0.1.0",
 	piVersion: "0.84.1",
 	platform: "linux/arm64",
 	baseImage: `docker/sandbox-templates@sha256:${digest}`,
-	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1",
-	publishedImage: null,
+	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0",
 	tools: {
 		fdDebianVersion: "10.3.0-2ubuntu1",
 		rgDebianVersion: "15.1.0-1ubuntu1",

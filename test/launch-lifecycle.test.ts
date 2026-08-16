@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
 	access,
+	mkdir,
 	mkdtemp,
 	readFile,
 	readdir,
@@ -15,7 +16,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { OperationError } from "../src/errors.ts";
 import { launch, type LaunchResult } from "../src/launch.ts";
-import type { SbxClient } from "../src/sbx/client.ts";
+import { SbxCommandError, type SbxClient } from "../src/sbx/client.ts";
+import { sessionBackupRoot } from "../src/sessions.ts";
 import {
 	inspectRepository,
 	loadSandboxState,
@@ -81,6 +83,8 @@ interface FakeOptions {
 	finalExistsError?: Error;
 	removeError?: Error;
 	backupError?: Error;
+	restoreError?: Error;
+	missingSessions?: boolean;
 	exitCode?: number;
 }
 
@@ -116,7 +120,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		},
 		inspect: async () => {
 			log.push("inspect");
-			return options.inspection ?? {};
+			return options.inspection ?? { image: baseConfig.sandbox.image };
 		},
 		attach: async () => {
 			log.push("attach");
@@ -125,6 +129,8 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		exec: async (_name: string, argv: readonly string[]) => {
 			const operation = argv.join(" ");
 			log.push(`exec:${operation}`);
+			if (argv[0] === "test" && argv[1] === "-e" && options.missingSessions)
+				throw new SbxCommandError(["exec", ...argv], 1);
 			if (argv[0] === "git" && argv[1] === "status") {
 				if (options.statusError) throw options.statusError;
 				return { stdout: options.status ?? "", stderr: "", code: 0 };
@@ -148,6 +154,10 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		copyFrom: async () => {
 			log.push("backup-sessions");
 			if (options.backupError) throw options.backupError;
+		},
+		copyTo: async (_name: string, source: string, destination: string) => {
+			log.push(`restore-sessions:${source}:${destination}`);
+			if (options.restoreError) throw options.restoreError;
 		},
 		remove: async () => {
 			log.push("remove");
@@ -174,18 +184,31 @@ async function runCase(
 		confirm?: boolean;
 		cleanupError?: unknown;
 		stateCleanupError?: Error;
-		noSyncBack?: boolean;
-		workspaceMode?: "clone" | "direct";
 		managedSessions?: boolean;
+		fresh?: boolean;
+		configuredName?: boolean;
 		discardChanges?: boolean;
 		yes?: boolean;
 		resolvedImage?: { image: string; templateStoreId?: string };
 		imageAttestation?: SandboxState["imageAttestation"];
 		saveStateErrorAfter?: number;
 		repositoryInspectionErrorAfter?: number;
+		sessionBackup?: boolean;
 	},
 ) {
 	const fixture = await repository();
+	if (options.sessionBackup) {
+		const backup = join(
+			sessionBackupRoot(
+				join(process.env.HOME!, ".pi", "agent"),
+				fixture.state.hostRepoIdentity,
+				fixture.name,
+			),
+			"2026-08-14T12-34-56-789Z",
+			"sessions",
+		);
+		await mkdir(backup, { recursive: true });
+	}
 	if (options.imageAttestation)
 		fixture.state.imageAttestation = options.imageAttestation;
 	if (options.existed) await saveSandboxState(fixture.state);
@@ -213,9 +236,12 @@ async function runCase(
 		client: fake.client,
 		config: {
 			...baseConfig,
-			syncProfile: options.managedSessions ? "balanced" : "clean",
-			workspaceMode: options.workspaceMode ?? "clone",
-			sandbox: { ...baseConfig.sandbox, keep: options.keep ?? false },
+			syncProfile: options.managedSessions ? "custom" : "clean",
+			sandbox: {
+				...baseConfig.sandbox,
+				keep: options.keep ?? false,
+				...(options.configuredName ? { name: fixture.name } : {}),
+			},
 			export: {
 				onExit: options.onExit ?? "never",
 				directory: ".git/pi-docker-sandbox/patches",
@@ -223,9 +249,10 @@ async function runCase(
 		},
 		cleanup,
 		stateCleanup,
-		noSyncBack: options.noSyncBack,
+		noHostAuth: true,
+		fresh: options.fresh,
 		discardChanges: options.discardChanges,
-		yes: options.yes ?? options.workspaceMode === "direct",
+		yes: options.yes ?? false,
 		confirm: async () => {
 			log.push("confirm");
 			return options.confirm ?? false;
@@ -259,6 +286,105 @@ async function runCase(
 	});
 	return { fixture, log, fake, operation };
 }
+
+test("fresh launch rejects a configured sandbox name before sbx access", async () => {
+	const subject = await runCase({
+		fresh: true,
+		configuredName: true,
+		keep: true,
+	});
+	await assert.rejects(subject.operation, /--fresh cannot be combined with sandbox\.name/);
+	assert.deepEqual(subject.log, []);
+});
+
+test("fresh launch fails closed on a generated-name collision", async () => {
+	const subject = await runCase({ fresh: true, existed: true, keep: true });
+	await assert.rejects(subject.operation, /fresh sandbox name collision/i);
+	assert.deepEqual(subject.log, ["capabilities", "exists"]);
+	assert.equal(subject.fake.present(), true);
+});
+
+test("new managed clone restores sessions before attach", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-lifecycle-home-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		const subject = await runCase({
+			keep: true,
+			managedSessions: true,
+			sessionBackup: true,
+		});
+		await subject.operation;
+		const restore = subject.log.findIndex((entry) =>
+			entry.startsWith("restore-sessions:"),
+		);
+		assert.ok(restore > subject.log.indexOf("create"));
+		assert.ok(restore < subject.log.indexOf("attach"));
+		assert.match(
+			subject.log[restore]!,
+			/2026-08-14T12-34-56-789Z\/sessions:\/home\/agent\/\.pi\/agent\/$/,
+		);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("managed restore does not overwrite existing sandboxes or run in non-managed mode", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-lifecycle-home-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		for (const options of [
+			{ existed: true, managedSessions: true },
+			{ existed: false, managedSessions: false },
+			{ existed: false, managedSessions: true, fresh: true },
+		]) {
+			const subject = await runCase({
+				...options,
+				keep: true,
+				sessionBackup: true,
+			});
+			await subject.operation;
+			assert.equal(
+				subject.log.some((entry) => entry.startsWith("restore-sessions:")),
+				false,
+			);
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("managed restore failure fails closed and preserves new sandbox and state", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-lifecycle-home-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		const subject = await runCase({
+			managedSessions: true,
+			sessionBackup: true,
+			restoreError: new Error("injected restore failure"),
+		});
+		await assert.rejects(subject.operation, (error: unknown) => {
+			assert.equal((error as { phase?: string }).phase, "create");
+			assert.match(String(error), /restore managed sessions/i);
+			assert.match(String(error), /injected restore failure/i);
+			return true;
+		});
+		assert.equal(subject.log.includes("attach"), false);
+		assert.equal(subject.log.includes("remove"), false);
+		assert.equal(subject.fake.present(), true);
+		assert.equal(
+			await pathExists(statePath(subject.fixture.root, subject.fixture.name)),
+			true,
+		);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
 
 test("new local template is inspected before attach and mismatch preserves it", async () => {
 	const hex = "a".repeat(64);
@@ -307,80 +433,29 @@ test("new local template is inspected before attach and mismatch preserves it", 
 	);
 });
 
-test("direct sandboxes attest the current resolved image before every attach", async () => {
-	const localImage = `docker.io/pi-docker-sandboxes/pi:local-${"a".repeat(64)}`;
-	const storeId = "abc123def456";
-	for (const existed of [false, true]) {
-		const matching = await runCase({
-			existed,
-			workspaceMode: "direct",
-			keep: true,
-			yes: true,
-			resolvedImage: { image: localImage, templateStoreId: storeId },
-			inspection: {
-				image: localImage,
-				image_digest: `sha256:${storeId}7890`,
-			},
-		});
-		await matching.operation;
-		assert.ok(matching.log.indexOf("inspect") < matching.log.indexOf("attach"));
-		assert.equal(matching.log.filter((entry) => entry === "inspect").length, 1);
+test("clone sandboxes attest configured remote images before attach", async () => {
+	const image = `example.invalid/image@sha256:${"b".repeat(64)}`;
+	const matching = await runCase({
+		keep: true,
+		resolvedImage: { image },
+		inspection: { image },
+	});
+	const result = await matching.operation;
+	assert.ok(matching.log.indexOf("inspect") > matching.log.indexOf("create"));
+	assert.ok(matching.log.indexOf("inspect") < matching.log.indexOf("attach"));
+	assert.deepEqual(result.state?.imageAttestation, {
+		status: "verified",
+		image,
+	});
 
-		const mismatch = await runCase({
-			existed,
-			workspaceMode: "direct",
-			keep: true,
-			yes: true,
-			resolvedImage: { image: localImage, templateStoreId: storeId },
-			inspection: {
-				image: `${localImage}-wrong`,
-				image_digest: `sha256:${storeId}7890`,
-			},
-		});
-		await assert.rejects(mismatch.operation, (error: unknown) => {
-			assert.equal(
-				(error as { phase?: string }).phase,
-				existed ? "prepare" : "create",
-			);
-			assert.deepEqual((error as { recovery?: string[] }).recovery, [
-				`pi-dsbx destroy --name '${mismatch.fixture.name}' --direct --discard-changes`,
-				`pi-dsbx run --name '${mismatch.fixture.name}' --direct`,
-			]);
-			return true;
-		});
-		assert.equal(mismatch.log.includes("attach"), false);
-		assert.equal(mismatch.log.includes("remove"), false);
-		assert.equal(mismatch.fake.present(), true);
-	}
-});
-
-test("direct preservation warnings omit clone-only export recovery", async () => {
-	for (const options of [
-		{ keep: true },
-		{ statusError: new Error("injected direct inspection failure") },
-	]) {
-		const subject = await runCase({
-			existed: true,
-			workspaceMode: "direct",
-			yes: true,
-			resolvedImage: { image: baseConfig.sandbox.image },
-			inspection: { image: baseConfig.sandbox.image },
-			...options,
-		});
-		const result = await subject.operation;
-		const warnings = result.warnings.join("\n");
-		assert.doesNotMatch(warnings, /pi-dsbx export/);
-		assert.match(
-			warnings,
-			new RegExp(
-				`pi-dsbx destroy --name '${subject.fixture.name}' --direct --discard-changes`,
-			),
-		);
-		assert.match(
-			warnings,
-			new RegExp(`pi-dsbx run --name '${subject.fixture.name}' --direct`),
-		);
-	}
+	const mismatch = await runCase({
+		keep: true,
+		resolvedImage: { image },
+		inspection: { image: `${image}-wrong` },
+	});
+	await assert.rejects(mismatch.operation, /created sandbox image/i);
+	assert.equal(mismatch.log.includes("attach"), false);
+	assert.equal(mismatch.fake.present(), true);
 });
 
 test("clone create state failures retain executable custody", async () => {
@@ -430,30 +505,6 @@ test("clone create state failures retain executable custody", async () => {
 		),
 		true,
 	);
-});
-
-test("direct image attestation checks local digest and explicit image equality", async () => {
-	const localImage = `docker.io/pi-docker-sandboxes/pi:local-${"a".repeat(64)}`;
-	const local = await runCase({
-		workspaceMode: "direct",
-		keep: true,
-		yes: true,
-		resolvedImage: { image: localImage, templateStoreId: "abc123def456" },
-		inspection: { image: localImage, image_digest: "sha256:def456abc123" },
-	});
-	await assert.rejects(local.operation, /digest/i);
-	assert.equal(local.log.includes("attach"), false);
-
-	const explicit = `example.invalid/image@sha256:${"b".repeat(64)}`;
-	const explicitMismatch = await runCase({
-		workspaceMode: "direct",
-		keep: true,
-		yes: true,
-		resolvedImage: { image: explicit },
-		inspection: { image: `${explicit}-wrong` },
-	});
-	await assert.rejects(explicitMismatch.operation, /selected image/i);
-	assert.equal(explicitMismatch.log.includes("attach"), false);
 });
 
 test("verified attestation state save failure preserves without attach", async () => {
@@ -531,6 +582,7 @@ test("newly created clean sandbox is removed with its state", async () => {
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -553,13 +605,14 @@ test("newly created clean sandbox is removed with its state", async () => {
 	);
 });
 
-test("existing sandbox with keep is preserved", async () => {
+test("existing sandbox without attestation is verified and preserved", async () => {
 	const subject = await runCase({ existed: true, keep: true });
 	const result = await subject.operation;
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
 		"validate",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -573,6 +626,7 @@ test("existing sandbox with keep is preserved", async () => {
 		preserved: true,
 		cleanupWarnings: [],
 	});
+	assert.equal(result.state?.imageAttestation?.status, "verified");
 	assert.equal(subject.fake.present(), true);
 	assert.equal(
 		await pathExists(statePath(subject.fixture.root, subject.fixture.name)),
@@ -588,6 +642,7 @@ test("new sandbox with keep remains classified as newly created", async () => {
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -615,6 +670,7 @@ test("changed sandbox is removed only after successful export", async () => {
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -655,6 +711,7 @@ test("changed sandbox with rejected export is preserved", async () => {
 		"capabilities",
 		"exists",
 		"validate",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -715,6 +772,7 @@ test("changed sandbox with export disabled is preserved", async () => {
 		"capabilities",
 		"exists",
 		"validate",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -764,6 +822,7 @@ test("export failure preserves sandbox and remains the primary error", async () 
 		"capabilities",
 		"exists",
 		"validate",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -796,6 +855,7 @@ test("host cleanup failure retains Pi exit code and reports warning", async () =
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -862,6 +922,7 @@ test("nonzero Pi exit survives final existence failure", async () => {
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"cleanup",
@@ -898,6 +959,7 @@ test("remove failure preserves sandbox and state after nonzero Pi exit", async (
 		"capabilities",
 		"exists",
 		"validate",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -1039,6 +1101,28 @@ test("cleanup warning is rendered without losing primary export cause", async ()
 	assert.equal(subject.fake.present(), true);
 });
 
+test("missing managed sessions continue through clean inspection and removal", async () => {
+	const subject = await runCase({
+		existed: true,
+		status: "",
+		managedSessions: true,
+		missingSessions: true,
+	});
+	const result = await subject.operation;
+	assert.equal(result.exitCode, 0);
+	assertLifecycle(result, { changed: false, preserved: false });
+	assert.deepEqual(subject.log.slice(5), [
+		"exists",
+		"exec:test -e /home/agent/.pi/agent/sessions",
+		"exec:git status --porcelain=v1",
+		"cleanup",
+		"remove",
+		"unlink-state",
+	]);
+	assert.equal(subject.log.includes("backup-sessions"), false);
+	assert.equal(subject.fake.present(), false);
+});
+
 test("managed session backup failure preserves sandbox and state", async () => {
 	for (const exitCode of [0, 43]) {
 		const cause = new Error("injected managed backup failure");
@@ -1091,36 +1175,6 @@ test("combined cleanup detail is sanitized while retaining primary cause", async
 	assert.match(result.warnings.join("\n"), /injected export primary/);
 });
 
-test("noSyncBack and direct mode preserve changed work without export", async () => {
-	for (const options of [
-		{
-			existed: true,
-			status: " M file.txt\n",
-			onExit: "always" as const,
-			noSyncBack: true,
-		},
-		{
-			workspaceMode: "direct" as const,
-			status: " M file.txt\n",
-			onExit: "always" as const,
-			inspection: { image: baseConfig.sandbox.image },
-		},
-	]) {
-		const subject = await runCase(options);
-		const result = await subject.operation;
-		assertLifecycle(result, {
-			changed: true,
-			exported: false,
-			preserved: true,
-		});
-		assert.equal(
-			subject.log.some((entry) => entry.startsWith("exec:git add")),
-			false,
-		);
-		assert.equal(subject.fake.present(), true);
-	}
-});
-
 test("interrupted run with unknown dirty state is preserved", async () => {
 	const subject = await runCase({
 		exitCode: 130,
@@ -1133,6 +1187,7 @@ test("interrupted run with unknown dirty state is preserved", async () => {
 		"exists",
 		"validate",
 		"create",
+		"inspect",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",

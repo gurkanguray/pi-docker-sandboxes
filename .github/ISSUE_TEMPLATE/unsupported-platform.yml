@@ -38,5 +38,5 @@ body:
     attributes:
       label: Support boundary acknowledgement
       options:
-        - label: I understand this platform is unsupported during public alpha.
+        - label: I understand this platform is unsupported during Early Access.
           required: true

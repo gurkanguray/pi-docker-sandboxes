@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { access, cp, mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { OperationError } from "./errors.ts";
-import { type ImageLock, IMAGE_LOCK, loadImageLock } from "./image-lock.ts";
+import { type ImageLock, loadImageLock } from "./image-lock.ts";
 import {
 	deriveLocalTemplateImage,
 	parseSbxTemplateImages,
@@ -14,7 +14,6 @@ import {
 } from "./local-template.ts";
 
 const execFileAsync = promisify(execFile);
-export const LOCAL_IMAGE = IMAGE_LOCK.localImage;
 
 interface CommandResult {
 	stdout: string;
@@ -458,15 +457,5 @@ export async function buildLocalImage(
 		if (!options.keepBuildDirectory)
 			await rm(directory, { recursive: true, force: true });
 		throw error;
-	}
-}
-
-export async function copyImageArtifacts(
-	buildDirectory: string,
-	destination: string,
-): Promise<void> {
-	for (const file of await readdir(buildDirectory)) {
-		if (file.endsWith(".tar") || file === "Dockerfile" || file.endsWith(".tgz"))
-			await cp(join(buildDirectory, file), join(destination, file));
 	}
 }

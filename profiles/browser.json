@@ -1,6 +1,0 @@
-{
-  "name": "browser",
-  "allow": ["registry.npmjs.org"],
-  "deny": [],
-  "note": "Browser destinations remain explicit; this profile never implies unrestricted egress."
-}

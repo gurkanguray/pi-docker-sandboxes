@@ -5,6 +5,7 @@ import {
 	mkdtemp,
 	readFile,
 	realpath,
+	symlink,
 	writeFile,
 	access,
 } from "node:fs/promises";
@@ -12,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createWarningReporter, main } from "../src/cli.ts";
+import {
+	createLaunchReporter,
+	createPausedConfirm,
+	main,
+} from "../src/cli.ts";
 import {
 	inspectRepository,
 	sandboxName,
@@ -64,15 +69,16 @@ async function fixture(
 	return { root: canonical, bin, log };
 }
 
-async function runDestroy(
+async function runCli(
 	subject: Awaited<ReturnType<typeof fixture>>,
+	command: "export" | "apply" | "destroy",
 	args: string[],
 	dirty: boolean,
 ): Promise<{ code: number; stderr: string; calls: string[][] }> {
 	try {
 		await exec(
 			process.execPath,
-			["--experimental-strip-types", cli, "destroy", ...args],
+			["--experimental-strip-types", cli, command, ...args],
 			{
 				cwd: subject.root,
 				env: {
@@ -108,12 +114,227 @@ async function runDestroy(
 	}
 }
 
-test("warning reporter prints delivered preflight warnings once and later warnings", () => {
+function runDestroy(
+	subject: Awaited<ReturnType<typeof fixture>>,
+	args: string[],
+	dirty: boolean,
+): ReturnType<typeof runCli> {
+	return runCli(subject, "destroy", args, dirty);
+}
+
+test("management commands reject trailing arguments", async () => {
+	const destroyed = await runCli(
+		await fixture(),
+		"destroy",
+		["--discard-changes", "trailing"],
+		false,
+	);
+	assert.equal(destroyed.code, 1);
+	assert.match(destroyed.stderr, /unexpected argument/i);
+
+	const exported = await runCli(await fixture(), "export", ["trailing"], false);
+	assert.equal(exported.code, 1);
+	assert.match(exported.stderr, /unexpected argument/i);
+
+	const appliedFixture = await fixture();
+	await writeFile(join(appliedFixture.root, "file.txt"), "changed\n");
+	const patch = join(appliedFixture.root, "change.patch");
+	await writeFile(
+		patch,
+		(await exec("git", ["diff", "--binary"], { cwd: appliedFixture.root }))
+			.stdout,
+	);
+	await exec("git", ["checkout", "--", "file.txt"], {
+		cwd: appliedFixture.root,
+	});
+	const applied = await runCli(
+		appliedFixture,
+		"apply",
+		[patch, "trailing", "--yes"],
+		false,
+	);
+	assert.equal(applied.code, 1);
+	assert.match(applied.stderr, /unexpected argument/i);
+});
+
+test("CLI help documents passing Pi session arguments after the separator", async () => {
 	const output: string[] = [];
-	const reporter = createWarningReporter((message) => output.push(message));
-	reporter.onWarning("provider warning");
-	reporter.reportRemaining(["provider warning", "later warning"]);
-	assert.deepEqual(output, ["! provider warning", "! later warning"]);
+	const originalLog = console.log;
+	console.log = (message?: unknown) => output.push(String(message));
+	try {
+		assert.equal(await main(["--help"]), 0);
+	} finally {
+		console.log = originalLog;
+	}
+	assert.match(output.join("\n"), /pi-dsbx run[^\n]*-- PI_ARGS/);
+	assert.match(output.join("\n"), /-- --session ID/);
+});
+
+test("symlinked CLI entry executes its main function", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-symlink-"));
+	const link = join(directory, "pi-dsbx.ts");
+	await symlink(await realpath(cli), link);
+	const { stdout } = await exec(
+		process.execPath,
+		["--experimental-strip-types", link, "--help"],
+	);
+	assert.match(stdout, /Usage:/);
+});
+
+test("status lines stop heartbeats at terminal handoff", () => {
+	const output: string[] = [];
+	const timers = new Map<number, { cb: () => void; ms: number }>();
+	let nextTimer = 0;
+	let now = 0;
+	const reporter = createLaunchReporter(
+		(message) => output.push(message),
+		{
+			now: () => now,
+			setInterval: (cb, ms) => {
+				const id = ++nextTimer;
+				timers.set(id, { cb: cb as () => void, ms });
+				return id as unknown as NodeJS.Timeout;
+			},
+			clearInterval: (id) => {
+				timers.delete(id as unknown as number);
+			},
+		},
+		true,
+	);
+	reporter.onStatus("installing compiler");
+	assert.equal(output.at(-1)?.startsWith("!"), false);
+	assert.match(output.at(-1) ?? "", /^pi-dsbx: installing compiler/);
+	now = 3000;
+	for (const timer of timers.values()) timer.cb();
+	assert.ok(output.some((line) => /\(3s\)/.test(line)));
+	reporter.onStatus("starting Pi");
+	assert.equal(timers.size, 0);
+	const outputAtHandoff = output.length;
+	now = 10_000;
+	for (const timer of timers.values()) timer.cb();
+	assert.equal(output.length, outputAtHandoff);
+	assert.ok(output.some((line) => /^pi-dsbx: starting Pi/.test(line)));
+	reporter.stop();
+});
+
+test("TTY warnings clear an active carriage-return status", (t) => {
+	const output: string[] = [];
+	const reporter = createLaunchReporter(
+		(message) => output.push(message),
+		undefined,
+		true,
+	);
+	t.after(() => reporter.stop());
+	reporter.onStatus("installing a-very-long-package-name");
+	reporter.onWarning("short warning");
+	assert.match(output.at(-2) ?? "", /^\r +\r$/);
+	assert.equal(output.at(-1), "! short warning");
+	reporter.onStatus("copying host profile");
+	reporter.reportRemaining(["later warning"]);
+	assert.match(output.at(-2) ?? "", /^\r +\r$/);
+	assert.equal(output.at(-1), "! later warning");
+	reporter.stop();
+});
+
+test("interactive confirmation clears and pauses TTY status", async () => {
+	const output: string[] = [];
+	const timers = new Map<number, () => void>();
+	let nextTimer = 0;
+	let now = 0;
+	let answer!: (accepted: boolean) => void;
+	const pendingAnswer = new Promise<boolean>((resolve) => {
+		answer = resolve;
+	});
+	const reporter = createLaunchReporter(
+		(message) => output.push(message),
+		{
+			now: () => now,
+			setInterval: (callback) => {
+				const id = ++nextTimer;
+				timers.set(id, callback as () => void);
+				return id as unknown as NodeJS.Timeout;
+			},
+			clearInterval: (id) => {
+				timers.delete(id as unknown as number);
+			},
+		},
+		true,
+	);
+	const confirm = createPausedConfirm(
+		reporter,
+		async (question) => {
+			output.push(`prompt:${question}`);
+			return pendingAnswer;
+		},
+		"syncing host credentials",
+	);
+	reporter.onStatus("syncing host credentials");
+	const result = confirm("Continue?");
+	assert.equal(timers.size, 0);
+	assert.match(output.at(-2) ?? "", /^\r +\r$/);
+	assert.equal(output.at(-1), "prompt:Continue?");
+	const outputWhilePending = output.length;
+	now = 5_000;
+	for (const callback of timers.values()) callback();
+	assert.equal(output.length, outputWhilePending);
+	answer(true);
+	assert.equal(await result, true);
+	assert.match(output.at(-1) ?? "", /^pi-dsbx: syncing host credentials/);
+	assert.equal(timers.size, 1);
+	assert.equal(
+		output.filter((line) => /^pi-dsbx: syncing host credentials/.test(line))
+			.length,
+		2,
+	);
+	now = 7_000;
+	for (const callback of timers.values()) callback();
+	assert.match(output.at(-1) ?? "", /syncing host credentials \(2s\)/);
+	reporter.stop();
+
+	const rejectedConfirm = createPausedConfirm(
+		reporter,
+		async () => false,
+		"checking Docker Sandboxes",
+	);
+	reporter.onStatus("checking Docker Sandboxes");
+	assert.equal(await rejectedConfirm("Continue?"), false);
+	assert.equal(timers.size, 0);
+	assert.equal(
+		output.filter((line) => /^pi-dsbx: checking Docker Sandboxes/.test(line))
+			.length,
+		1,
+	);
+	reporter.stop();
+});
+
+test("non-TTY heartbeat appends every five seconds", () => {
+	const output: string[] = [];
+	const timers: Array<{ cb: () => void; ms: number }> = [];
+	let now = 0;
+	const reporter = createLaunchReporter(
+		(message) => output.push(message),
+		{
+			now: () => now,
+			setInterval: (cb, ms) => {
+				timers.push({ cb: cb as () => void, ms });
+				return 1 as unknown as NodeJS.Timeout;
+			},
+			clearInterval: () => {},
+		},
+		false,
+	);
+	reporter.onStatus("installing compiler");
+	assert.equal(timers[0]?.ms, 5_000);
+	now = 5_000;
+	timers[0]?.cb();
+	now = 10_000;
+	timers[0]?.cb();
+	assert.deepEqual(output, [
+		"pi-dsbx: installing compiler",
+		"pi-dsbx: installing compiler… still working (5s)",
+		"pi-dsbx: installing compiler… still working (10s)",
+	]);
+	reporter.stop();
 });
 
 test("inline false destroy booleans strip without granting authority", async () => {
@@ -137,26 +358,16 @@ test("inline false destroy booleans strip without granting authority", async () 
 	assert.deepEqual(malformed.calls, []);
 });
 
-test("direct destroy recovery works without Git or clone state", async () => {
-	const subject = await fixture({ git: false, state: false });
-	const name = "pi-direct-recovery";
-	const removed = await runDestroy(
+test("destroy with --discard-changes removes a sandbox that has no clone state", async () => {
+	const subject = await fixture({ state: false });
+	const name = sandboxName(subject.root);
+	const result = await runDestroy(
 		subject,
-		["--name", name, "--direct", "--discard-changes"],
+		["--name", name, "--discard-changes"],
 		false,
 	);
-	assert.equal(removed.code, 0, removed.stderr);
-	assert.deepEqual(removed.calls, [["rm", "--force", name]]);
-
-	const yesOnly = await fixture({ git: false, state: false });
-	const rejected = await runDestroy(
-		yesOnly,
-		["--name", name, "--direct", "--yes"],
-		false,
-	);
-	assert.equal(rejected.code, 1);
-	assert.match(rejected.stderr, /--discard-changes/);
-	assert.deepEqual(rejected.calls, []);
+	assert.equal(result.code, 0, result.stderr);
+	assert.deepEqual(result.calls, [["rm", "--force", name]]);
 });
 
 test("--yes cannot discard dirty sandbox changes", async () => {

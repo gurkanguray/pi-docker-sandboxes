@@ -73,10 +73,12 @@ jobs:
           node-version: 24.12.0
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: mkdir dist && npm pack --pack-destination dist
       - id: image
         run: |
-          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          package_dir="$RUNNER_TEMP/npm-package"
+          mkdir "$package_dir"
+          npm pack --pack-destination "$package_dir"
+          tarball="$(node scripts/assert-one-tarball.mjs "$package_dir")"
           npm run package:verify -- "$tarball" \
             --receipt package-verification.json
           cp "$tarball" docker/pi-docker-sandboxes.tgz
@@ -160,15 +162,28 @@ jobs:
           path: candidate
       - name: Import and bind the candidate archive
         env:
+          IMAGE_ARTIFACT: ${{ inputs.image_artifact }}
           IMAGE_DIGEST: ${{ inputs.image_digest }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          expected_artifact="oci-candidate-$SOURCE_SHA"
+          test "$IMAGE_ARTIFACT" = "$expected_artifact"
           test -s candidate/candidate-image.oci.tar
+          test -s candidate/image-verification.json
           mkdir oci
           tar -xf candidate/candidate-image.oci.tar -C oci index.json
           test "$(node -p 'require("./oci/index.json").manifests[0].digest')" \
             = "$IMAGE_DIGEST"
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const receipt = JSON.parse(
+            await readFile("candidate/image-verification.json"),
+          );
+          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
+              receipt.ociDigest !== process.env.IMAGE_DIGEST)
+            throw new Error("candidate image receipt mismatch");
+          NODE
           skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
           docker run --rm --volume "$PWD/candidate:/candidate:ro" \
             --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \

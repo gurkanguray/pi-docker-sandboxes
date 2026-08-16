@@ -29,11 +29,8 @@ test("fresh defaults use the approved safe personalization and removal policy", 
 			extensions: false,
 			sessions: "managed",
 		},
-		workspaceMode: "clone",
-		shareSkills: false,
 		sandbox: { keep: false, dockerEngine: true },
 		providers: [],
-		services: [],
 		network: { allow: [], deny: [] },
 		export: {
 			onExit: "prompt",
@@ -47,7 +44,7 @@ test("config is strict and merges nested fields", () => {
 		version: 1,
 		profile: "hardened",
 		syncProfile: "custom",
-		sync: { extensions: true, sessions: "ephemeral" },
+		sync: { extensions: true, sessions: "sandbox" },
 		sandbox: { keep: false },
 		network: { allow: ["api.example.com:443"] },
 	});
@@ -58,30 +55,32 @@ test("config is strict and merges nested fields", () => {
 	assert.deepEqual(config.network.allow, ["api.example.com:443"]);
 	assert.equal(config.sync.extensions, true);
 	assert.equal(config.sync.settings, true);
-	assert.equal(config.sync.sessions, "ephemeral");
+	assert.equal(config.sync.sessions, "sandbox");
 	assert.throws(
 		() => parseConfig({ workspaecMode: "clone" }),
 		/Unknown configuration field/,
 	);
+	assert.throws(
+		() => parseConfig({ workspaceMode: "direct" }),
+		/Unknown configuration field/,
+	);
+	assert.throws(
+		() => parseConfig({ shareSkills: true }),
+		/Unknown configuration field/,
+	);
+	assert.throws(() => parseConfig({ profile: "research" }), /unsupported/);
+	assert.throws(() => parseConfig({ profile: "browser" }), /unsupported/);
+	assert.throws(() => parseConfig({ syncProfile: "balanced" }), /unsupported/);
+	assert.throws(
+		() => parseConfig({ sync: { sessions: "ephemeral" } }),
+		/unsupported/,
+	);
 	assert.throws(() => parseConfig({ version: 2 }), /must be 1/);
 });
 
-test("network profiles control egress only", async () => {
-	for (const name of [
-		"hardened",
-		"development",
-		"research",
-		"browser",
-	] as const) {
+test("network profiles control egress only", () => {
+	for (const name of ["hardened", "development"] as const)
 		assert.equal("runtimeInstall" in NETWORK_PROFILES[name], false);
-		const fixture = JSON.parse(
-			await readFile(
-				new URL(`../profiles/${name}.json`, import.meta.url),
-				"utf8",
-			),
-		);
-		assert.equal("runtimeInstall" in fixture, false);
-	}
 });
 
 test("sandbox images must be explicit immutable digest references", () => {
@@ -117,7 +116,7 @@ test("security-sensitive values reject injection and ambiguous domains", () => {
 					},
 				],
 			}),
-		/Invalid network domain/,
+		/Unknown configuration field/,
 	);
 	assert.throws(
 		() => parseConfig({ export: { directory: "../outside" } }),
@@ -125,12 +124,12 @@ test("security-sensitive values reject injection and ambiguous domains", () => {
 	);
 });
 
-test("legacy config is normalized in memory without changing source bytes", async () => {
+test("current config is loaded without changing source bytes", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-config-migration-"));
 	const home = join(root, "home");
 	const path = join(home, ".pi", "agent", "docker-sandboxes.json");
 	const original =
-		'{"version":1,"syncProfile":"balanced","sandbox":{"keep":true}}\n';
+		'{"version":1,"syncProfile":"custom","sandbox":{"keep":true}}\n';
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(path, original);
 	const loaded = await loadConfigResult(root, { home });
@@ -145,10 +144,8 @@ test("legacy config is normalized in memory without changing source bytes", asyn
 		extensions: false,
 		sessions: "managed",
 	});
-	assert.equal(loaded.value.sandbox.keep, false);
-	assert.ok(
-		loaded.warnings.some((warning) => /safe personalization/i.test(warning)),
-	);
+	assert.equal(loaded.value.sandbox.keep, true);
+	assert.deepEqual(loaded.warnings, []);
 	assert.equal(await readFile(path, "utf8"), original);
 });
 
@@ -164,13 +161,13 @@ test("project config applies only when explicitly trusted", async () => {
 	);
 	await writeFile(
 		join(cwd, ".pi", "docker-sandboxes.json"),
-		'{"version":1,"workspaceMode":"direct"}',
+		'{"version":1,"sandbox":{"keep":true}}',
 	);
 	assert.equal(
-		(await loadConfig(cwd, { home, projectTrusted: false })).workspaceMode,
-		DEFAULT_CONFIG.workspaceMode,
+		(await loadConfig(cwd, { home, projectTrusted: false })).sandbox.keep,
+		false,
 	);
 	const trusted = await loadConfig(cwd, { home, projectTrusted: true });
 	assert.equal(trusted.profile, "hardened");
-	assert.equal(trusted.workspaceMode, "direct");
+	assert.equal(trusted.sandbox.keep, true);
 });

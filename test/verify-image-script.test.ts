@@ -27,7 +27,7 @@ async function fixture(source: boolean): Promise<string> {
 
 const stale = `throw new Error("stale verifier imported");`;
 const fresh = `
-export async function verifyImageReceipt(image) { return { image, digest: "sha256:${"a".repeat(64)}", imageId: "sha256:${"a".repeat(64)}", registryDigest: null, platform: "linux/arm64", uid: 1000, user: "agent", entrypoint: [], versions: { package: "0.1.0-alpha.1", pi: "0.84.1", fd: "10.3.0-2ubuntu1", ripgrep: "15.1.0-1ubuntu1", git: "1:2.53.0-1ubuntu1", node: "v22.22.1", npm: "9.2.0" } }; }
+export async function verifyImageReceipt(image) { return { image, digest: "sha256:${"a".repeat(64)}", imageId: "sha256:${"a".repeat(64)}", registryDigest: null, platform: "linux/arm64", uid: 1000, user: "agent", entrypoint: [], versions: { package: "0.1.0", pi: "0.84.1", fd: "10.3.0-2ubuntu1", ripgrep: "15.1.0-1ubuntu1", git: "1:2.53.0-1ubuntu1", node: "v22.22.1", npm: "9.2.0" } }; }
 export function compareImageReceipts() { throw new Error("unexpected candidate"); }
 `;
 const lock = `export async function loadImageLock(path) { return { path }; }`;
