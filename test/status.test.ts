@@ -1,40 +1,60 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	attestSandbox,
 	formatDoctor,
-	getDockerSandboxStatus,
+	isSandboxAttested,
 	runDoctor,
 	sandboxStatus,
 } from "../src/status.ts";
 import type { SbxClient } from "../src/sbx/client.ts";
 
-test("status trusts only the exact active sentinel", () => {
-	assert.equal(sandboxStatus({}), "Docker SBX: host");
+const readOnlySourceMount =
+	"42 35 0:39 / /run/sandbox/source ro,nosuid,nodev - virtiofs source rw\n";
+
+test("sandbox attestation requires the exact sentinel and read-only source mount", () => {
+	assert.equal(isSandboxAttested({}, readOnlySourceMount), false);
 	assert.equal(
-		sandboxStatus({ PI_DOCKER_SANDBOX_ACTIVE: "true" }),
-		"Docker SBX: host",
+		isSandboxAttested(
+			{ PI_DOCKER_SANDBOX_ACTIVE: "true" },
+			readOnlySourceMount,
+		),
+		false,
 	);
 	assert.equal(
-		sandboxStatus({
-			PI_DOCKER_SANDBOX_ACTIVE: "1",
-			PI_DOCKER_SANDBOX_PROFILE: "hardened",
-			PI_DOCKER_SANDBOX_WORKSPACE_MODE: "clone",
-		}),
-		"SBX: clone · hardened",
+		isSandboxAttested(
+			{ PI_DOCKER_SANDBOX_ACTIVE: "1" },
+			readOnlySourceMount.replace(" ro,", " rw,"),
+		),
+		false,
+	);
+	assert.equal(
+		isSandboxAttested({ PI_DOCKER_SANDBOX_ACTIVE: "1" }, readOnlySourceMount),
+		true,
 	);
 });
 
-test("machine status does not promote sentinels into security attestation", () => {
-	const status = getDockerSandboxStatus({
+test("a spoofed host sentinel is not attested", async () => {
+	assert.equal(await attestSandbox({ PI_DOCKER_SANDBOX_ACTIVE: "1" }), false);
+});
+
+test("status uses attestation rather than the sentinel", () => {
+	const spoofed = {
 		PI_DOCKER_SANDBOX_ACTIVE: "1",
-		PI_DOCKER_SANDBOX_NAME: "safe",
-		PI_DOCKER_SANDBOX_WORKSPACE_MODE: "clone",
-	});
-	assert.equal(status.runningInsideSandbox, true);
-	assert.equal(status.sandboxName, "safe");
-	assert.equal(status.hostWorkspaceWritable, undefined);
-	assert.equal(status.sharedSkills, "unknown");
-	assert.equal(status.privateDockerEngine, "unknown");
+		PI_DOCKER_SANDBOX_PROFILE: "hardened",
+	};
+	assert.equal(sandboxStatus(false, spoofed), "Docker SBX: host");
+	assert.equal(sandboxStatus(true, spoofed), "SBX: clone · hardened");
+});
+
+test("sandbox doctor reports the clone-only workspace mode", async () => {
+	const results = await runDoctor(true);
+	assert.ok(
+		results.some(
+			(result) =>
+				result.level === "pass" && result.message === "workspace mode: clone",
+		),
+	);
 });
 
 test("doctor warns when proxy service discovery is unavailable", async () => {
@@ -50,7 +70,11 @@ test("doctor warns when proxy service discovery is unavailable", async () => {
 		}),
 		list: async () => [],
 	} as unknown as SbxClient;
-	const results = await runDoctor(client, "/definitely-not-a-repository");
+	const results = await runDoctor(
+		false,
+		client,
+		"/definitely-not-a-repository",
+	);
 	assert.ok(
 		results.some(
 			(result) =>
@@ -73,7 +97,11 @@ test("doctor reports discovered proxy credential services", async () => {
 		}),
 		list: async () => [],
 	} as unknown as SbxClient;
-	const results = await runDoctor(client, "/definitely-not-a-repository");
+	const results = await runDoctor(
+		false,
+		client,
+		"/definitely-not-a-repository",
+	);
 	assert.ok(
 		results.some(
 			(result) =>
@@ -101,7 +129,11 @@ test("doctor reports configured requested credentials and unsupported requests s
 			secretServices: async () => new Set(["openai"]),
 			list: async () => [],
 		} as unknown as SbxClient;
-		const results = await runDoctor(client, "/definitely-not-a-repository");
+		const results = await runDoctor(
+			false,
+			client,
+			"/definitely-not-a-repository",
+		);
 		assert.ok(
 			results.some(
 				(result) => result.message === "credential service openai: configured",

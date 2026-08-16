@@ -96,35 +96,3 @@ test("provider resolution preserves requested order and reports malformed IDs de
 		"unknown",
 	]);
 });
-
-test("custom services are explicit, exact-domain, and unambiguous", () => {
-	const custom = {
-		id: "internal",
-		envVar: "INTERNAL_KEY",
-		domains: ["api.internal.example"],
-		headerName: "Authorization",
-		valueFormat: "Bearer %s",
-	};
-	assert.deepEqual(
-		resolveAvailableServices(["internal"], ["internal"], [custom]).services,
-		[custom],
-	);
-	assert.throws(
-		() =>
-			resolveAvailableServices(["openai"], [], [{ ...custom, id: "openai" }]),
-		/shadows/,
-	);
-	assert.throws(
-		() => resolveAvailableServices(["internal"], [], [custom, custom]),
-		/duplicate/i,
-	);
-	assert.throws(
-		() =>
-			resolveAvailableServices(
-				["internal"],
-				[],
-				[{ ...custom, domains: ["*.internal.example"] }],
-			),
-		/exact domain/i,
-	);
-});

@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Lint GitHub workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.12.0
@@ -20,12 +22,12 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm audit --audit-level=high
-      - run: mkdir dist
-      - run: npm pack --pack-destination dist
-      # Ignore compiled leftovers; require exactly one npm tarball.
       - id: tarball
         run: |
-          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          package_dir="$RUNNER_TEMP/npm-package"
+          mkdir "$package_dir"
+          npm pack --pack-destination "$package_dir"
+          tarball="$(node scripts/assert-one-tarball.mjs "$package_dir")"
           echo "path=$tarball" >> "$GITHUB_OUTPUT"
       - run: >-
           npm run package:verify -- "${{ steps.tarball.outputs.path }}"

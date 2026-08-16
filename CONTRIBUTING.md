@@ -4,7 +4,7 @@ Thank you for contributing to pi-docker-sandboxes.
 
 ## Development setup
 
-The checked public-alpha environment uses Node.js 24.12.0+, Pi 0.84.1, Docker 29+, and Docker Sandboxes (`sbx`) 0.38.x on macOS Apple Silicon.
+The checked Early Access environment uses Node.js `>=24.12.0 <25`, Pi 0.84.1, Docker 29+, and Docker Sandboxes (`sbx`) 0.38.x on macOS Apple Silicon.
 
 ```bash
 npm ci --ignore-scripts

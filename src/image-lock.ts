@@ -8,7 +8,6 @@ export interface ImageLock {
 	platform: "linux/arm64";
 	baseImage: string;
 	localImage: string;
-	publishedImage: string | null;
 	tools: {
 		fdDebianVersion: string;
 		rgDebianVersion: string;
@@ -23,7 +22,6 @@ const LOCK_FIELDS = new Set([
 	"platform",
 	"baseImage",
 	"localImage",
-	"publishedImage",
 	"tools",
 ]);
 const TOOL_FIELDS = new Set([
@@ -95,13 +93,6 @@ export function parseImageLock(value: unknown): ImageLock {
 		throw new TypeError(
 			"localImage must be the package-versioned local build tag; resolve its RepoDigest before selection",
 		);
-	const publishedImage =
-		lock.publishedImage === null
-			? null
-			: assertDigestReference(
-					requiredString(lock.publishedImage, "publishedImage"),
-					"publishedImage",
-				);
 	const tools = object(lock.tools, "tools");
 	rejectUnknown(tools, TOOL_FIELDS, "tools");
 	return {
@@ -110,7 +101,6 @@ export function parseImageLock(value: unknown): ImageLock {
 		platform: "linux/arm64",
 		baseImage,
 		localImage,
-		publishedImage,
 		tools: {
 			fdDebianVersion: debianVersion(
 				tools.fdDebianVersion,

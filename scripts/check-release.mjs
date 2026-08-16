@@ -5,6 +5,20 @@ import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const root = process.cwd();
+const SAFE_GIT_ARGS = [
+	"-c",
+	"core.hooksPath=/dev/null",
+	"-c",
+	"core.fsmonitor=false",
+	"-c",
+	"commit.gpgSign=false",
+	"-c",
+	"tag.gpgSign=false",
+	"-c",
+	"gpg.format=openpgp",
+	"-c",
+	"gpg.program=gpg",
+];
 
 function fail(message) {
 	throw new Error(message);
@@ -16,7 +30,9 @@ async function json(path) {
 
 async function git(args, operation = `git ${args.join(" ")}`) {
 	try {
-		return (await exec("git", args, { cwd: root })).stdout.trim();
+		return (
+			await exec("git", [...SAFE_GIT_ARGS, ...args], { cwd: root })
+		).stdout.trim();
 	} catch (error) {
 		throw new Error(
 			`${operation} failed: ${String(error?.stderr ?? error?.message ?? error).trim()}`,
@@ -31,25 +47,21 @@ function escapeRegExp(value) {
 function argumentsFrom(argv) {
 	let tag;
 	let allowUnreleased = false;
-	let imageCandidate = false;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
 		if (argument === "--allow-unreleased") allowUnreleased = true;
-		else if (argument === "--image-candidate") imageCandidate = true;
 		else if (argument === "--tag") tag = argv[++index];
 		else fail(`Unknown argument: ${argument}`);
 	}
-	if (!tag || (allowUnreleased && imageCandidate))
+	if (!tag)
 		fail(
-			"Usage: node scripts/check-release.mjs [--allow-unreleased | --image-candidate] --tag vX.Y.Z[-prerelease][-oci.N]",
+			"Usage: node scripts/check-release.mjs [--allow-unreleased] --tag vX.Y.Z",
 		);
-	return { tag, allowUnreleased, imageCandidate };
+	return { tag, allowUnreleased };
 }
 
 try {
-	const { tag, allowUnreleased, imageCandidate } = argumentsFrom(
-		process.argv.slice(2),
-	);
+	const { tag, allowUnreleased } = argumentsFrom(process.argv.slice(2));
 	const [pkg, packageLock, imageLock, changelogText, compatibility] =
 		await Promise.all([
 			json("package.json"),
@@ -59,21 +71,15 @@ try {
 			readFile(`${root}/COMPATIBILITY.md`, "utf8"),
 		]);
 	if (
-		!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*)|(?:\d*[A-Za-z-][0-9A-Za-z-]*))(?:\.(?:(?:0|[1-9]\d*)|(?:\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(
+		!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
 			pkg.version,
 		)
 	)
 		fail(`Package version is not exact semver: ${pkg.version}`);
 	const expectedTag = `v${pkg.version}`;
-	const expectedCandidate = new RegExp(
-		`^${escapeRegExp(expectedTag)}-oci\\.(?:0|[1-9]\\d*)$`,
-	);
-	if (
-		(imageCandidate && !expectedCandidate.test(tag)) ||
-		(!imageCandidate && tag !== expectedTag)
-	)
+	if (tag !== expectedTag)
 		fail(
-			`Tag must ${imageCandidate ? `match ${expectedTag}-oci.N` : `exactly match package version: expected ${expectedTag}`}, received ${tag}`,
+			`Tag must exactly match package version: expected ${expectedTag}, received ${tag}`,
 		);
 	console.log(`✓ tag/version: ${tag}`);
 
@@ -111,16 +117,8 @@ try {
 		).test(compatibility)
 	)
 		fail(`COMPATIBILITY Pi version must match ${piVersion}`);
-	if (imageLock.publishedImage == null) {
-		if (!allowUnreleased && !imageCandidate)
-			fail("Published image must be present and pinned by sha256 digest");
-	} else if (
-		typeof imageLock.publishedImage !== "string" ||
-		!/@sha256:[0-9a-f]{64}$/.test(imageLock.publishedImage)
-	)
-		fail("Published image must be pinned by sha256 digest");
 	console.log(
-		`✓ image lock: package=${imageLock.packageVersion} pi=${imageLock.piVersion} image=${imageLock.publishedImage ?? "unreleased"}`,
+		`✓ image lock: package=${imageLock.packageVersion} pi=${imageLock.piVersion}`,
 	);
 
 	const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
@@ -142,8 +140,6 @@ try {
 			version: pkg.version,
 			commit,
 			changelog,
-			imageLock: imageLock.publishedImage,
-			imageCandidate,
 			clean: true,
 		}),
 	);

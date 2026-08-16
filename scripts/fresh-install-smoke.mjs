@@ -154,6 +154,7 @@ async function main() {
 		if (uninstall.exitCode !== 0) fail("fresh uninstall failed");
 
 		receipt = {
+			sourceSha: process.env.SOURCE_SHA ?? null,
 			artifact,
 			version: pkg.version,
 			integrity: packed.integrity,

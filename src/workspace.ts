@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
+	access,
 	lstat,
 	mkdir,
 	open,
@@ -33,6 +34,16 @@ import {
 import { type SbxClient, validateSandboxName } from "./sbx/client.ts";
 
 const execFileAsync = promisify(execFile);
+const SAFE_GIT_CONFIG = [
+	"-c",
+	"core.hooksPath=/dev/null",
+	"-c",
+	"core.fsmonitor=false",
+	"-c",
+	"commit.gpgSign=false",
+	"-c",
+	"tag.gpgSign=false",
+] as const;
 
 export interface GitResult {
 	stdout: string;
@@ -54,7 +65,7 @@ async function runGit(
 	args: readonly string[],
 ): Promise<GitResult> {
 	try {
-		const result = await execFileAsync("git", [...args], {
+		const result = await execFileAsync("git", [...SAFE_GIT_CONFIG, ...args], {
 			cwd,
 			encoding: "utf8",
 			maxBuffer: 32 * 1024 * 1024,
@@ -78,7 +89,7 @@ async function runGitInput(
 	return new Promise((resolveResult) => {
 		const child = execFile(
 			"git",
-			[...args],
+			[...SAFE_GIT_CONFIG, ...args],
 			{
 				cwd,
 				encoding: "buffer",
@@ -266,9 +277,18 @@ export async function createEmptyInitialCommit(
 	await git(
 		runner,
 		root,
-		["commit", "--allow-empty", "--only", "-m", "Initial commit"],
+		[
+			"-c",
+			"core.hooksPath=/dev/null",
+			"commit",
+			"--allow-empty",
+			"--only",
+			"--no-gpg-sign",
+			"-m",
+			"Initial commit",
+		],
 		"preflight",
-		'git commit --allow-empty --only -m "Initial commit"',
+		'git -c core.hooksPath=/dev/null commit --allow-empty --only --no-gpg-sign -m "Initial commit"',
 	);
 }
 
@@ -288,7 +308,7 @@ export function sandboxName(root: string, fresh = false): string {
 export interface SandboxImageAttestation {
 	status: "pending" | "verified";
 	image: string;
-	templateStoreId: string;
+	templateStoreId?: string;
 }
 
 export interface SandboxState {
@@ -298,7 +318,7 @@ export interface SandboxState {
 	hostBranch: string;
 	hostRepoIdentity: string;
 	hostRoot: string;
-	workspaceMode: "clone" | "direct";
+	workspaceMode: "clone";
 	createdAt: string;
 	imageAttestation?: SandboxImageAttestation;
 }
@@ -369,8 +389,62 @@ export async function removeSandboxState(
 	}
 }
 
+async function prepareStateDirectory(root: string): Promise<{
+	directory: string;
+	validate: () => Promise<void>;
+}> {
+	const canonicalRoot = await realpath(root);
+	const paths = [
+		join(canonicalRoot, ".git"),
+		join(canonicalRoot, ".git", "pi-docker-sandbox"),
+		join(canonicalRoot, ".git", "pi-docker-sandbox", "state"),
+	];
+	const identities: Array<{ dev: number | bigint; ino: number | bigint }> = [];
+	const validate = async (): Promise<void> => {
+		for (let index = 0; index < identities.length; index++) {
+			const path = paths[index]!;
+			const current = await lstat(path);
+			if (
+				!current.isDirectory() ||
+				current.isSymbolicLink() ||
+				!sameIdentity(identities[index]!, current) ||
+				(await realpath(path)) !== path
+			)
+				throw new Error("Sandbox state directory containment changed");
+		}
+	};
+	for (let index = 0; index < paths.length; index++) {
+		await validate();
+		const path = paths[index]!;
+		if (index > 0)
+			await mkdir(path, { mode: 0o700 }).catch((cause) => {
+				if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+			});
+		const current = await lstat(path);
+		if (
+			!current.isDirectory() ||
+			current.isSymbolicLink() ||
+			(await realpath(path)) !== path
+		)
+			throw new Error("Sandbox state directory must not use symlinks");
+		identities.push(current);
+	}
+	await validate();
+	return { directory: paths.at(-1)!, validate };
+}
+
 export async function saveSandboxState(state: SandboxState): Promise<void> {
-	await writeJsonAtomic(statePath(state.hostRoot, state.name), state);
+	const reportedPath = statePath(state.hostRoot, state.name);
+	const value = migrateSandboxState(state, reportedPath).value;
+	const prepared = await prepareStateDirectory(state.hostRoot);
+	await writeJsonAtomic(
+		join(prepared.directory, basename(reportedPath)),
+		value,
+		{
+			directoryPrepared: true,
+			validateDirectory: prepared.validate,
+		},
+	);
 }
 
 function shellArg(value: string): string {
@@ -430,6 +504,19 @@ export async function loadSandboxState(
 	name: string,
 ): Promise<SandboxState> {
 	return (await loadSandboxStateResult(root, name)).value;
+}
+
+export async function sandboxStateExists(
+	root: string,
+	name: string,
+): Promise<boolean> {
+	try {
+		await access(statePath(root, name));
+		return true;
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw cause;
+	}
 }
 
 export interface PatchExport {
@@ -958,8 +1045,6 @@ export async function exportPatch(
 	directory: string,
 	options: PatchExportOptions = {},
 ): Promise<PatchExport> {
-	if (state.workspaceMode !== "clone")
-		throw new Error("Patch export is only available in clone mode");
 	try {
 		await client.exec(state.name, ["git", "add", "-A"], {
 			workdir: state.hostRoot,

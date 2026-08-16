@@ -27,9 +27,8 @@ const freshInstallSmoke = new URL(
 	"../scripts/fresh-install-smoke.mjs",
 	import.meta.url,
 );
-const version = "1.2.3-alpha.1";
+const version = "1.2.3";
 const piVersion = "0.84.1";
-const digest = `sha256:${"a".repeat(64)}`;
 const packageRoot = new URL("../", import.meta.url);
 
 test("public package metadata and packed CLI are release-ready", async () => {
@@ -49,11 +48,13 @@ test("public package metadata and packed CLI are release-ready", async () => {
 		"https://github.com/gurkanguray/pi-docker-sandboxes/issues",
 	);
 	assert.equal(pkg.author, "Guray Gurkan");
-	assert.equal(
-		pkg.description,
-		"Run Pi inside a Docker Sandboxes microVM",
-	);
+	assert.equal(pkg.description, "Run Pi inside a Docker Sandboxes microVM");
 	assert.equal(pkg.packageManager, "npm@11.6.2");
+	assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+	assert.ok(pkg.keywords.includes("pi-package"));
+	assert.deepEqual(pkg.pi.extensions, [
+		"./extensions/docker-sandboxes/index.ts",
+	]);
 	assert.equal(pkg.exports, undefined);
 	assert.equal(
 		pkg.peerDependencies["@earendil-works/pi-coding-agent"],
@@ -78,6 +79,13 @@ test("public package metadata and packed CLI are release-ready", async () => {
 	);
 	assert.ok(bin, "npm pack must include bin/pi-dsbx.mjs");
 	assert.notEqual(bin.mode & 0o111, 0, "packed bin must be executable");
+	assert.ok(
+		packed.files.some(
+			(file: { path: string }) =>
+				file.path === "extensions/docker-sandboxes/index.ts",
+		),
+		"npm pack must include the Pi extension",
+	);
 });
 
 async function git(
@@ -126,7 +134,6 @@ async function fixture(fixtureVersion = version): Promise<string> {
 		JSON.stringify({
 			packageVersion: fixtureVersion,
 			piVersion,
-			publishedImage: `ghcr.io/example/pi@${digest}`,
 		}),
 	);
 	await git(directory, ["init", "--quiet"]);
@@ -168,6 +175,20 @@ async function withFixture(
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
+}
+
+async function executableCanary(
+	directory: string,
+	name: string,
+): Promise<{ executable: string; marker: string }> {
+	const executable = join(directory, `${name}.mjs`);
+	const marker = join(directory, `${name}.invoked`);
+	await writeFile(
+		executable,
+		`#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, "invoked\\n");\nprocess.exit(1);\n`,
+	);
+	await chmod(executable, 0o755);
+	return { executable, marker };
 }
 
 async function signedTag(
@@ -408,7 +429,7 @@ test("fresh install smoke isolates Pi, exercises the CLI, and cleans up", async 
 			join(source, "package.json"),
 			JSON.stringify({
 				name: "pi-docker-sandboxes",
-				version: "9.8.7-alpha.1",
+				version: "9.8.7",
 				bin: { "pi-dsbx": "bin/pi-dsbx.mjs" },
 				pi: { extensions: ["extensions/fixture/index.js"] },
 				files: ["bin/", "extensions/"],
@@ -443,6 +464,7 @@ if (command === "doctor") process.exitCode = 1;
 				cwd: directory,
 				env: {
 					...process.env,
+					SOURCE_SHA: "a".repeat(40),
 					OPENAI_API_KEY: "must-not-reach-smoke",
 					PI_HOST_SECRET: "must-not-reach-smoke",
 				},
@@ -450,7 +472,8 @@ if (command === "doctor") process.exitCode = 1;
 		);
 		assert.equal(stderr, "");
 		const receipt = JSON.parse(stdout.trim().split("\n").at(-1)!);
-		assert.equal(receipt.version, "9.8.7-alpha.1");
+		assert.equal(receipt.sourceSha, "a".repeat(40));
+		assert.equal(receipt.version, "9.8.7");
 		assert.match(receipt.integrity, /^sha512-/);
 		assert.deepEqual(receipt.platform, {
 			os: process.platform,
@@ -546,10 +569,10 @@ test("rejects a tag that does not exactly match the package version", () =>
 		const result = await run(directory, [
 			"--allow-unreleased",
 			"--tag",
-			"v1.2.3-alpha.2",
+			"v1.2.4",
 		]);
 		assert.equal(result.code, 1);
-		assert.match(result.stderr, /tag.*v1\.2\.3-alpha\.1/i);
+		assert.match(result.stderr, /tag.*v1\.2\.3/i);
 	}));
 
 test("rejects package-lock root version mismatches", () =>
@@ -559,14 +582,14 @@ test("rejects package-lock root version mismatches", () =>
 			const lock = JSON.parse(await readFile(path, "utf8"));
 			lock.version = version;
 			lock.packages[""].version = version;
-			if (field === "version") lock.version = "1.2.3";
-			else lock.packages[""].version = "1.2.3";
+			if (field === "version") lock.version = "1.2.4";
+			else lock.packages[""].version = "1.2.4";
 			await writeFile(path, JSON.stringify(lock));
 			await git(directory, ["add", path]);
 			await git(directory, ["commit", "--quiet", "-m", `mismatched ${field}`]);
 			const result = await run(directory);
 			assert.equal(result.code, 1);
-			assert.match(result.stderr, /package-lock.*1\.2\.3-alpha\.1/i);
+			assert.match(result.stderr, /package-lock.*1\.2\.3/i);
 		}
 	}));
 
@@ -583,6 +606,18 @@ test("rejects invalid SemVer leading zeros", async () => {
 		}, invalid);
 });
 
+test("rejects prerelease versions because major zero already signals development", () =>
+	withFixture(async (directory) => {
+		const prerelease = "1.2.3-rc.1";
+		const result = await run(directory, [
+			"--allow-unreleased",
+			"--tag",
+			`v${prerelease}`,
+		]);
+		assert.equal(result.code, 1);
+		assert.match(result.stderr, /not exact semver/i);
+	}, "1.2.3-rc.1"));
+
 test("rejects a changelog without the package version and date", () =>
 	withFixture(async (directory) => {
 		const path = join(directory, "CHANGELOG.md");
@@ -598,7 +633,7 @@ test("rejects image-lock package and Pi version mismatches", () =>
 	withFixture(async (directory) => {
 		const path = join(directory, "docker", "image-lock.json");
 		for (const [field, value, message] of [
-			["packageVersion", "1.2.3", /image lock package.*1\.2\.3-alpha\.1/i],
+			["packageVersion", "1.2.4", /image lock package.*1\.2\.3/i],
 			["piVersion", "0.83.0", /image lock Pi.*0\.84\.1/i],
 		] as const) {
 			const lock = JSON.parse(await readFile(path, "utf8"));
@@ -625,92 +660,42 @@ test("rejects a dirty tracked worktree", () =>
 		assert.match(result.stderr, /tracked worktree.*clean/i);
 	}));
 
-test("release mode rejects missing and mutable published image references", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		for (const publishedImage of [null, "ghcr.io/example/pi:1.2.3-alpha.1"]) {
-			const lock = JSON.parse(await readFile(path, "utf8"));
-			lock.publishedImage = publishedImage;
-			await writeFile(path, JSON.stringify(lock));
-			await git(directory, ["add", path]);
-			await git(directory, ["commit", "--quiet", "-m", "bad image reference"]);
-			const result = await run(directory, ["--tag", `v${version}`]);
-			assert.equal(result.code, 1);
-			assert.match(result.stderr, /published image.*digest/i);
-		}
-	}));
-
-test("allow-unreleased permits a missing published image digest", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		const lock = JSON.parse(await readFile(path, "utf8"));
-		lock.publishedImage = null;
-		await writeFile(path, JSON.stringify(lock));
-		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "unreleased image"]);
-		const result = await run(directory);
-		assert.equal(result.code, 0, result.stderr);
-	}));
-
-test("allow-unreleased rejects a mutable published image", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		const lock = JSON.parse(await readFile(path, "utf8"));
-		lock.publishedImage = "ghcr.io/example/pi:latest";
-		await writeFile(path, JSON.stringify(lock));
-		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "mutable image"]);
-		const result = await run(directory);
-		assert.equal(result.code, 1);
-		assert.match(result.stderr, /published image.*digest/i);
-	}));
-
-test("image candidate accepts its signed suffix with a missing image", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		const lock = JSON.parse(await readFile(path, "utf8"));
-		lock.publishedImage = null;
-		await writeFile(path, JSON.stringify(lock));
-		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "image candidate"]);
-		const tag = `v${version}-oci.1`;
-		const signing = await signedTag(directory, tag);
-		try {
-			const result = await run(
-				directory,
-				["--image-candidate", "--tag", tag],
-				signing.env,
-			);
-			assert.equal(result.code, 0, result.stderr);
-			assert.match(result.stdout, /✓ signed tag:/);
-		} finally {
-			await signing.cleanup();
-		}
-	}));
-
-test("image candidate rejects a mutable published image", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		const lock = JSON.parse(await readFile(path, "utf8"));
-		lock.publishedImage = "ghcr.io/example/pi:latest";
-		await writeFile(path, JSON.stringify(lock));
-		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "mutable candidate"]);
-		const result = await run(directory, [
-			"--image-candidate",
-			"--tag",
-			`v${version}-oci.1`,
-		]);
-		assert.equal(result.code, 1);
-		assert.match(result.stderr, /published image.*digest/i);
-	}));
-
 test("release mode rejects an unsigned tag", () =>
 	withFixture(async (directory) => {
 		await git(directory, ["tag", `v${version}`]);
 		const result = await run(directory, ["--tag", `v${version}`]);
 		assert.equal(result.code, 1);
 		assert.match(result.stderr, /git tag -v/);
+	}));
+
+test("release check never executes a repository fsmonitor", () =>
+	withFixture(async (directory) => {
+		const canary = await executableCanary(directory, "fsmonitor-canary");
+		await git(directory, ["config", "core.fsmonitor", canary.executable]);
+		const result = await run(directory);
+		assert.equal(result.code, 0, result.stderr);
+		await assert.rejects(readFile(canary.marker, "utf8"));
+	}));
+
+test("release mode verifies signed tags without a repository verifier", () =>
+	withFixture(async (directory) => {
+		const signing = await signedTag(directory);
+		const canary = await executableCanary(directory, "verifier-canary");
+		try {
+			await git(directory, ["config", "gpg.format", "ssh"]);
+			await git(directory, ["config", "gpg.program", canary.executable]);
+			await git(directory, ["config", "gpg.ssh.program", canary.executable]);
+			const result = await run(
+				directory,
+				["--tag", `v${version}`],
+				signing.env,
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.match(result.stdout, /✓ signed tag:/);
+			await assert.rejects(readFile(canary.marker, "utf8"));
+		} finally {
+			await signing.cleanup();
+		}
 	}));
 
 test("release mode accepts a signed tag at HEAD", () =>
@@ -762,16 +747,12 @@ test("succeeds without mutating tracked fixture files", () =>
 			"version",
 			"commit",
 			"changelog",
-			"imageLock",
-			"imageCandidate",
 			"clean",
 		]);
-		assert.equal(receipt.imageCandidate, false);
 		assert.equal(receipt.tag, `v${version}`);
 		assert.equal(receipt.version, version);
 		assert.match(receipt.commit, /^[0-9a-f]{40}$/);
 		assert.equal(receipt.changelog, `${version} — 2026-08-12`);
-		assert.equal(receipt.imageLock, `ghcr.io/example/pi@${digest}`);
 		assert.equal(receipt.clean, true);
 		const after = await exec("git", ["diff", "HEAD", "--"], { cwd: directory });
 		assert.equal(after.stdout, before.stdout);

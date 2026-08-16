@@ -29,10 +29,12 @@ export function runInherited(
 		let shuttingDown = false;
 		let forwardedTerm = false;
 		let cleanedUp = false;
+		const handlers = new Map();
 		const cleanup = () => {
 			if (cleanedUp) return;
 			cleanedUp = true;
-			for (const signal of forwardedSignals) process.off(signal, forward);
+			for (const [signal, handler] of handlers)
+				process.off(signal, handler);
 		};
 		const forward = (signal) => {
 			shuttingDown = true;
@@ -51,7 +53,11 @@ export function runInherited(
 				return false;
 			}
 		};
-		for (const signal of forwardedSignals) process.on(signal, forward);
+		for (const signal of forwardedSignals) {
+			const handler = () => forward(signal);
+			handlers.set(signal, handler);
+			process.on(signal, handler);
+		}
 		try {
 			child = runtime.spawn(command, [...args], {
 				stdio: "inherit",
