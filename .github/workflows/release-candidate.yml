@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Signed prerelease tag (vX.Y.Z-prerelease)
+        description: Signed release tag (vX.Y.Z)
         required: true
         type: string
 permissions:
@@ -44,16 +44,17 @@ jobs:
           git verify-tag "$TAG"
           test "$(git cat-file -t "$TAG")" = tag
           sha="$(git rev-list -n 1 "$TAG")"
+          git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
+          git merge-base --is-ancestor "$sha" refs/remotes/origin/main
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$GITHUB_SHA" = "$sha"
           git checkout --detach "$sha"
           version="$(node -p 'require("./package.json").version')"
           test "$TAG" = "v$version"
-          node -e 'if (!require("node:util").parseArgs) process.exit(1)'
-          node --input-type=module - "$version" <<'NODE'
-          import { parseArgs } from "node:util";
-          const version = process.argv[2];
-          if (!version.includes("-"))
-            throw new Error("alpha releases must be prereleases");
-          NODE
+          node -e '
+            if (process.argv[1].includes("-"))
+              throw new Error("release versions must not be prereleases");
+          ' "$version"
           npm run release:check -- --allow-unreleased --tag "$TAG"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -81,11 +82,21 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          mkdir dist
-          npm pack --pack-destination dist
-          tarball="$(node scripts/assert-one-tarball.mjs dist)"
+          package_dir="$RUNNER_TEMP/npm-package"
+          mkdir "$package_dir"
+          npm pack --pack-destination "$package_dir"
+          tarball="$(node scripts/assert-one-tarball.mjs "$package_dir")"
           npm run package:verify -- "$tarball" \
             --receipt package-verification.json
+          npm run --silent smoke:fresh-install -- "$tarball" \
+            | tee fresh-install.log
+          tail -n 1 fresh-install.log > fresh-install-receipt.json
+          node -e '
+            const receipt = require("./fresh-install-receipt.json");
+            if (!receipt.cleanup?.packageRemoved ||
+                !receipt.cleanup?.prefixRemoved ||
+                !receipt.cleanup?.piHomeRemoved) process.exit(1);
+          '
           integrity="$(node -p \
             'require("./package-verification.json").integrity')"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
@@ -96,6 +107,7 @@ jobs:
           path: |
             ${{ steps.package.outputs.tarball }}
             package-verification.json
+            fresh-install-receipt.json
           if-no-files-found: error
           retention-days: 90
 
@@ -195,6 +207,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      security-events: write
     uses: ./.github/workflows/security.yml
     with:
       source_sha: ${{ needs.metadata.outputs.sha }}
@@ -254,14 +267,25 @@ jobs:
           const imageReceipt = JSON.parse(
             await readFile("evidence/image-verification.json"),
           );
+          const freshInstallReceipt = JSON.parse(
+            await readFile("evidence/fresh-install-receipt.json"),
+          );
           const e2eReceipt = JSON.parse(
             await readFile("evidence/e2e-receipt.json"),
           );
           const expected = process.env;
           if (imageReceipt.sourceSha !== expected.SOURCE_SHA ||
               imageReceipt.ociDigest !== expected.IMAGE_DIGEST ||
+              packageReceipt.binVersion !== expected.VERSION ||
+              freshInstallReceipt.sourceSha !== expected.SOURCE_SHA ||
+              freshInstallReceipt.version !== expected.VERSION ||
+              freshInstallReceipt.integrity !== packageReceipt.integrity ||
+              !freshInstallReceipt.cleanup?.packageRemoved ||
+              !freshInstallReceipt.cleanup?.prefixRemoved ||
+              !freshInstallReceipt.cleanup?.piHomeRemoved ||
               e2eReceipt.sourceSha !== expected.SOURCE_SHA ||
               e2eReceipt.candidateDigest !== expected.IMAGE_DIGEST ||
+              e2eReceipt.packageVersion !== expected.VERSION ||
               e2eReceipt.packageIntegrity !== packageReceipt.integrity ||
               e2eReceipt.status !== "passed" || !e2eReceipt.passedAt)
             throw new Error(
@@ -276,6 +300,7 @@ jobs:
             scanRef: expected.SCAN_REF, sbomRef: expected.SBOM_REF,
             provenanceRef:
               `${expected.PROVENANCE_REF}#${expected.IMAGE_DIGEST}`,
+            freshInstallReceipt,
             e2eReceipt,
           };
           await writeFile(
@@ -307,53 +332,38 @@ jobs:
       package_artifact: npm-package-${{ needs.metadata.outputs.sha }}
       candidate_receipt: release-candidate-${{ needs.metadata.outputs.sha }}
 
-  finalize-image:
-    needs: [metadata, receipt]
-    permissions:
-      actions: read
-      attestations: write
-      contents: read
-      id-token: write
-      packages: write
-    uses: ./.github/workflows/publish-image.yml
-    with:
-      source_sha: ${{ needs.metadata.outputs.sha }}
-      tag: ${{ inputs.tag }}
-      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
-      candidate_receipt: release-candidate-${{ needs.metadata.outputs.sha }}
-
   verify-publication:
-    needs: [metadata, publish-npm, finalize-image]
+    needs: [metadata, publish-npm]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.12.0
           registry-url: https://registry.npmjs.org
-      - name: Verify published npm package from a clean prefix
+      - name: Verify npm and Pi package gallery availability
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
           prefix="$(mktemp -d)"
-          npm view "pi-docker-sandboxes@$VERSION" version --json \
-            | grep -F "\"$VERSION\""
-          npm install --ignore-scripts --prefix "$prefix" \
-            "pi-docker-sandboxes@$VERSION"
+          test "$(npm view "pi-docker-sandboxes" version)" = "$VERSION"
+          npm install --ignore-scripts --prefix "$prefix" "pi-docker-sandboxes"
+          test "$(node -p \
+            "require('$prefix/node_modules/pi-docker-sandboxes/package.json').version")" \
+            = "$VERSION"
           "$prefix/node_modules/.bin/pi-dsbx" --help
-      - name: Verify immutable GHCR digest, SBOM, and provenance
-        env:
-          GH_TOKEN: ${{ github.token }}
-          IMAGE: ghcr.io/${{ github.repository }}
-          DIGEST: ${{ needs.finalize-image.outputs.digest }}
-        run: |
-          set -euo pipefail
-          docker buildx imagetools inspect "$IMAGE@$DIGEST"
-          gh attestation verify "oci://$IMAGE@$DIGEST" \
-            --repo "$GITHUB_REPOSITORY"
-          gh attestation verify "oci://$IMAGE@$DIGEST" \
-            --repo "$GITHUB_REPOSITORY" \
-            --predicate-type https://cyclonedx.org/bom
+          gallery=https://pi.dev/packages/pi-docker-sandboxes
+          for attempt in $(seq 1 20); do
+            if page="$(curl --fail --silent --show-error "$gallery")" &&
+              grep -F 'pi install npm:pi-docker-sandboxes' <<<"$page" &&
+              grep -F "$VERSION" <<<"$page"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 20 ]; then
+              echo "Pi package gallery did not index $VERSION" >&2
+              exit 1
+            fi
+            sleep 30
+          done

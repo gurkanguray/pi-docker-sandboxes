@@ -8,7 +8,6 @@ import type { ImageLock } from "../src/image-lock.ts";
 import type { runImageCommand } from "../src/image.ts";
 import { deriveLocalTemplateImage } from "../src/local-template.ts";
 import {
-	assertKitContainsNoSecrets,
 	buildKitSpec,
 	resolveKitImage,
 	writeKitDirectory,
@@ -18,12 +17,11 @@ import { BUILTIN_SERVICES } from "../src/providers.ts";
 const digest = "a".repeat(64);
 const explicitImage = `example.invalid/image@sha256:${digest}`;
 const lock: ImageLock = {
-	packageVersion: "0.1.0-alpha.1",
+	packageVersion: "0.1.0",
 	piVersion: "0.84.1",
 	platform: "linux/arm64",
 	baseImage: `example.invalid/base@sha256:${"b".repeat(64)}`,
-	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1",
-	publishedImage: null,
+	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0",
 	tools: {
 		fdDebianVersion: "10.3.0-2ubuntu1",
 		rgDebianVersion: "15.1.0-1ubuntu1",
@@ -54,7 +52,6 @@ test("Kit v2 generation is deterministic, strict, and secret-free", async () => 
 	assert.equal("setup" in spec, false);
 	assert.match(spec.sandbox.image, /@sha256:[0-9a-f]{64}$/);
 	const serialized = JSON.stringify(spec);
-	assertKitContainsNoSecrets(serialized, ["sk-test-never-copy"]);
 	assert.equal(serialized.includes("sk-test-never-copy"), false);
 	assert.equal(serialized.includes("npm install"), false);
 	assert.equal(serialized.includes("Downloading"), false);
@@ -67,7 +64,25 @@ test("Kit v2 generation is deterministic, strict, and secret-free", async () => 
 	);
 });
 
-test("image resolution fails closed or selects an immutable configured, published, or verified local image", async () => {
+test("Kit adds native install hosts only when explicitly supplied", () => {
+	const config = mergeConfig({
+		profile: "hardened",
+		sandbox: { image: explicitImage },
+	});
+	const defaults = buildKitSpec({ config, services: [] });
+	assert.deepEqual(defaults.permissions.network.allow, []);
+	const native = buildKitSpec({
+		config,
+		services: [],
+		extraAllow: ["archive.ubuntu.com", "registry.npmjs.org"],
+	});
+	assert.deepEqual(native.permissions.network.allow, [
+		"archive.ubuntu.com",
+		"registry.npmjs.org",
+	]);
+});
+
+test("image resolution fails closed or selects an immutable configured or verified local image", async () => {
 	const config = mergeConfig();
 	await assert.rejects(
 		() =>
@@ -94,16 +109,6 @@ test("image resolution fails closed or selects an immutable configured, publishe
 			},
 		),
 		{ image: explicitImage },
-	);
-	assert.equal(commands, 0);
-
-	const publishedImage = `ghcr.io/example/pi@sha256:${"d".repeat(64)}`;
-	assert.deepEqual(
-		await resolveKitImage(config, { ...lock, publishedImage }, async () => {
-			commands++;
-			return { stdout: "", stderr: "" };
-		}),
-		{ image: publishedImage },
 	);
 	assert.equal(commands, 0);
 
@@ -177,23 +182,15 @@ test("mutable or mutated image evidence is never selected", async () => {
 
 test("non-Docker-engine image resolution requires explicit digest without commands", async () => {
 	const config = mergeConfig({ sandbox: { dockerEngine: false } });
-	for (const candidateLock of [
-		lock,
-		{
-			...lock,
-			publishedImage: `ghcr.io/example/pi@sha256:${"d".repeat(64)}`,
-		},
-	]) {
-		let commands = 0;
-		await assert.rejects(
-			resolveKitImage(config, candidateLock, async () => {
-				commands++;
-				return { stdout: "", stderr: "" };
-			}),
-			/sandbox\.image.*digest-pinned/,
-		);
-		assert.equal(commands, 0);
-	}
+	let commands = 0;
+	await assert.rejects(
+		resolveKitImage(config, lock, async () => {
+			commands++;
+			return { stdout: "", stderr: "" };
+		}),
+		/sandbox\.image.*digest-pinned/,
+	);
+	assert.equal(commands, 0);
 });
 
 test("local fallback verifies Docker without pull and selects only its exact registered content tag", async () => {

@@ -52,50 +52,15 @@ export const BUILTIN_SERVICES = Object.freeze({
 
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]*$/;
 
-function registry(
-	custom: readonly CredentialService[],
-): Map<string, AuditedCredentialService> {
-	const services = new Map<string, AuditedCredentialService>(
-		Object.entries(BUILTIN_SERVICES),
-	);
-	const customIds = new Set<string>();
-	for (const service of custom) {
-		if (!SERVICE_ID.test(service.id))
-			throw new TypeError(
-				`Invalid custom credential service ID: ${service.id}`,
-			);
-		if (customIds.has(service.id))
-			throw new TypeError(`Duplicate custom credential service: ${service.id}`);
-		if (services.has(service.id))
-			throw new TypeError(
-				`Custom credential service shadows built-in service: ${service.id}`,
-			);
-		if (
-			service.domains.length === 0 ||
-			service.domains.some(
-				(domain) =>
-					domain.includes("*") ||
-					domain.includes("://") ||
-					domain.includes("/") ||
-					domain.includes("@") ||
-					/[\s\0]/.test(domain),
-			)
-		)
-			throw new TypeError(
-				`Custom credential service ${service.id} must use exact domains`,
-			);
-		customIds.add(service.id);
-		services.set(service.id, service as AuditedCredentialService);
-	}
-	return services;
-}
+const AUDITED_SERVICES: ReadonlyMap<string, AuditedCredentialService> = new Map(
+	Object.entries(BUILTIN_SERVICES),
+);
 
 export function resolveAvailableServices(
 	proxyIds: readonly string[],
 	requestedIds: readonly string[],
-	custom: readonly CredentialService[] = [],
 ): { services: CredentialService[]; unsupported: string[] } {
-	const audited = registry(custom);
+	const audited = AUDITED_SERVICES;
 	const proxied = new Set(proxyIds.filter((id) => SERVICE_ID.test(id)));
 	const services: CredentialService[] = [];
 	const unsupported: string[] = [];

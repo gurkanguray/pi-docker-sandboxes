@@ -1,0 +1,140 @@
+{
+  "vulnerabilities": [
+    {
+      "id": "CVE-2026-33818",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-34040",
+      "paths": [
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose"
+      ],
+      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-39821",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-39822",
+      "paths": [
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-41567",
+      "paths": [
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose"
+      ],
+      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-42306",
+      "paths": [
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose"
+      ],
+      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-46600",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-56853",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-56858",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-56859",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-56860",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    },
+    {
+      "id": "CVE-2026-56862",
+      "paths": [
+        "usr/bin/docker",
+        "usr/bin/docker-proxy",
+        "usr/bin/dockerd",
+        "usr/bin/pebble",
+        "usr/libexec/docker/cli-plugins/docker-buildx",
+        "usr/libexec/docker/cli-plugins/docker-compose",
+        "usr/local/bin/clipboard-bridge"
+      ],
+      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+    }
+  ]
+}

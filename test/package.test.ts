@@ -22,8 +22,6 @@ import { loadImageLock } from "../src/image-lock.ts";
 const exec = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const rootPath = fileURLToPath(root);
-const imageTestEnabled = process.env.PI_DOCKER_SANDBOX_IMAGE_TEST === "1";
-
 interface InstalledImageReceipt {
 	image: string;
 	digest: string;
@@ -267,62 +265,25 @@ test("packed CLI runs from node_modules", async () => {
 			"the package bin must not forward NODE_OPTIONS to its CLI child",
 		);
 
-		const { stdout: verifyHelp } = await exec(process.execPath, [
-			join(packageDirectory, "scripts", "verify-image.mjs"),
-			"--help",
-		]);
-		assert.match(verifyHelp, /^Usage: npm run image:verify/m);
 		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
-		await writeFile(
-			join(packageDirectory, "dist", "image.js"),
-			`export async function verifyImageReceipt(image) { return { image, digest: "sha256:${"a".repeat(64)}", imageId: "sha256:${"a".repeat(64)}", registryDigest: null, platform: "linux/arm64", uid: 1000, user: "agent", entrypoint: ["tini", "--"], versions: { package: "0.1.0-alpha.1", pi: "0.84.1", fd: "10.3.0-2ubuntu1", ripgrep: "15.1.0-1ubuntu1", git: "1:2.53.0-1ubuntu1", node: "v22.22.1", npm: "9.2.0" } }; } export function compareImageReceipts() { throw new Error("unexpected candidate"); }`,
-		);
-		await chmod(packageDirectory, 0o555);
-		const emptyPath = join(directory, "empty-path");
-		await mkdir(emptyPath);
-		const { stdout: offlineVerification } = await exec(
-			process.execPath,
-			[
-				join(packageDirectory, "scripts", "verify-image.mjs"),
-				"fake-local-image",
-			],
-			{ env: { ...process.env, PATH: emptyPath } },
-		);
-		const offlineReceipt = JSON.parse(
-			offlineVerification.trim().split("\n").at(-1)!,
-		) as InstalledImageReceipt;
-		assertInstalledImageReceipt(
-			offlineReceipt,
-			"fake-local-image",
-			await loadImageLock(join(packageDirectory, "docker", "image-lock.json")),
-		);
-		await chmod(packageDirectory, 0o755);
-		await exec("tar", [
-			"-xzf",
-			join(directory, stdout.trim()),
-			"--strip-components=1",
-			"-C",
-			packageDirectory,
-		]);
-		if (imageTestEnabled) {
-			const image =
-				process.env.PI_DOCKER_SANDBOX_IMAGE ??
-				"docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1";
-			const { stdout: verification } = await exec(process.execPath, [
-				join(packageDirectory, "scripts", "verify-image.mjs"),
-				image,
-			]);
-			const receipt = JSON.parse(
-				verification.trim().split("\n").at(-1)!,
-			) as InstalledImageReceipt;
-			assertInstalledImageReceipt(
-				receipt,
-				image,
-				await loadImageLock(
-					join(packageDirectory, "docker", "image-lock.json"),
-				),
+		await assert.rejects(access(join(packageDirectory, "scripts")));
+		for (const script of [
+			"build:cli",
+			"typecheck",
+			"test:e2e",
+			"docs:build",
+			"package:verify",
+		])
+			await assert.rejects(
+				exec("npm", ["run", script], { cwd: packageDirectory }),
+				(error: unknown) => {
+					assert.match(
+						(error as { stderr?: string }).stderr ?? "",
+						/source checkout only/,
+					);
+					return true;
+				},
 			);
-		}
 	} finally {
 		await chmod(
 			join(directory, "node_modules", "pi-docker-sandboxes"),
@@ -333,7 +294,7 @@ test("packed CLI runs from node_modules", async () => {
 	await assert.rejects(access(directory));
 });
 
-test("installed read-only package repacks without scripts or compiler", async () => {
+test("installed read-only package repacks without scripts or a compiler", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-installed-pack-"));
 	try {
 		const sourceArchive = join(directory, "source.tgz");
@@ -403,7 +364,11 @@ test("npm package includes the image lock contract", async () => {
 		assert.equal(files.has("package/dist/cli.js"), true);
 		assert.equal(files.has("package/dist/image.js"), true);
 		assert.equal(files.has("package/dist/sbx/inherited-runner.mjs"), true);
-		assert.equal(files.has("package/scripts/verify-image.mjs"), true);
+		assert.equal(files.has("package/scripts/verify-image.mjs"), false);
+		assert.equal(files.has("package/scripts/verify-package.mjs"), false);
+		assert.equal(files.has("package/scripts/fresh-install-smoke.mjs"), false);
+		assert.equal(files.has("package/docs/.vitepress/config.mts"), false);
+		assert.equal(files.has("package/docs/.vitepress/dist/index.html"), false);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

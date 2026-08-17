@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { sanitizeDetail } from "../errors.ts";
 import { runInherited, SbxNotInstalledError } from "./inherited-runner.mjs";
@@ -15,6 +15,8 @@ export interface CommandResult {
 
 export interface CommandOptions {
 	env?: NodeJS.ProcessEnv;
+	input?: string;
+	timeoutMs?: number;
 }
 export type CommandRunner = (
 	command: string,
@@ -47,8 +49,6 @@ export interface LaunchRequest {
 	name: string;
 	workspace: string;
 	kit: string;
-	workspaceMode: "clone" | "direct";
-	shareSkills?: boolean;
 	agentArgs?: string[];
 	env?: NodeJS.ProcessEnv;
 }
@@ -77,15 +77,58 @@ export class SbxCommandError extends Error {
 	}
 }
 
+function runPipedCommand(
+	command: string,
+	args: readonly string[],
+	options: CommandOptions,
+): Promise<CommandResult> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(command, [...args], {
+			env: options.env,
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		const timer =
+			options.timeoutMs === undefined
+				? undefined
+				: setTimeout(() => {
+						child.kill("SIGKILL");
+					}, options.timeoutMs);
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.on("error", (error) => {
+			if (timer) clearTimeout(timer);
+			if ((error as NodeJS.ErrnoException).code === "ENOENT")
+				reject(new SbxNotInstalledError(command));
+			else reject(error);
+		});
+		child.on("close", (code) => {
+			if (timer) clearTimeout(timer);
+			resolve({ stdout, stderr, code: code ?? 1 });
+		});
+		child.stdin.end(options.input ?? "");
+	});
+}
+
 async function runCommand(
 	command: string,
 	args: readonly string[],
 	options: CommandOptions = {},
 ): Promise<CommandResult> {
+	if (options.input !== undefined)
+		return runPipedCommand(command, args, options);
 	try {
 		const result = await execFileAsync(command, [...args], {
 			encoding: "utf8",
 			maxBuffer: 16 * 1024 * 1024,
+			timeout: options.timeoutMs,
 			...(options.env !== undefined ? { env: options.env } : {}),
 		});
 		return { stdout: result.stdout, stderr: result.stderr, code: 0 };
@@ -290,14 +333,35 @@ export class SbxClient {
 		}
 	}
 
+	async setSecret(
+		id: string,
+		value: string,
+		timeoutMs = 15_000,
+	): Promise<void> {
+		if (!SERVICE_ID.test(id)) throw new TypeError(`Invalid credential service: ${id}`);
+		if (!value || /[\0\r\n]/.test(value) || value.trim() !== value)
+			throw new TypeError("Invalid secret value");
+		await this.execute(["secret", "set", id], false, {
+			input: `${value}\n`,
+			timeoutMs,
+		});
+	}
+
 	createArgs(request: LaunchRequest): string[] {
 		validateSandboxName(request.name);
 		validatePath(request.workspace, "workspace path");
 		validatePath(request.kit, "Kit path");
-		const args = ["create", "--name", request.name, "--kit", request.kit];
-		if (request.workspaceMode === "clone") args.push("--clone");
-		if (!request.shareSkills) args.push("--no-share-skills");
-		args.push("pi-docker-sandboxes", request.workspace);
+		const args = [
+			"create",
+			"--name",
+			request.name,
+			"--kit",
+			request.kit,
+			"--clone",
+			"--no-share-skills",
+			"pi-docker-sandboxes",
+			request.workspace,
+		];
 		return args;
 	}
 
@@ -322,20 +386,10 @@ export class SbxClient {
 		);
 	}
 
-	/** @deprecated Use createArgs() and attachArgs() separately. */
-	launchArgs(request: LaunchRequest): string[] {
-		return this.createArgs(request);
-	}
-
-	/** @deprecated Use create() followed by attach() for new sandboxes. */
-	async launch(request: LaunchRequest): Promise<number> {
-		return this.attach(request);
-	}
-
 	private execArgs(
 		name: string,
 		argv: readonly string[],
-		options: { workdir?: string; env?: Record<string, string> },
+		options: { workdir?: string; env?: Record<string, string>; user?: string },
 	): string[] {
 		validateSandboxName(name);
 		if (argv.length === 0 || argv.some((arg) => arg.includes("\0")))
@@ -350,6 +404,11 @@ export class SbxClient {
 				throw new TypeError("Invalid sandbox environment entry");
 			args.push("--env", `${key}=${value}`);
 		}
+		if (options.user) {
+			if (!/^[A-Za-z0-9._][A-Za-z0-9._-]*(:[A-Za-z0-9._][A-Za-z0-9._-]*)?$/.test(options.user))
+				throw new TypeError("Invalid sandbox user");
+			args.push("-u", options.user);
+		}
 		args.push(name, ...argv);
 		return args;
 	}
@@ -357,7 +416,7 @@ export class SbxClient {
 	async exec(
 		name: string,
 		argv: readonly string[],
-		options: { workdir?: string; env?: Record<string, string> } = {},
+		options: { workdir?: string; env?: Record<string, string>; user?: string } = {},
 	): Promise<ExecResult> {
 		return this.execute(this.execArgs(name, argv, options));
 	}
@@ -406,14 +465,6 @@ export class SbxClient {
 		validatePath(path, "Kit path");
 		await this.execute(["kit", "validate", path]);
 	}
-	async inspectKit(path: string): Promise<Record<string, unknown>> {
-		validatePath(path, "Kit path");
-		return parseObject(
-			(await this.execute(["kit", "inspect", path, "--json"])).stdout,
-			"kit inspect",
-		);
-	}
-
 	async policyCheckNetwork(
 		target: string,
 		sandbox?: string,
@@ -439,26 +490,6 @@ export class SbxClient {
 		};
 	}
 
-	async templateImages(): Promise<
-		Array<{ repository?: string; tag?: string; id?: string }>
-	> {
-		const parsed = parseObject(
-			(await this.execute(["template", "ls", "--json"])).stdout,
-			"template list",
-		);
-		if (!Array.isArray(parsed.images))
-			throw new Error("sbx template list returned no images array");
-		return parsed.images as Array<{
-			repository?: string;
-			tag?: string;
-			id?: string;
-		}>;
-	}
-
-	async stop(name: string): Promise<void> {
-		validateSandboxName(name);
-		await this.execute(["stop", name]);
-	}
 	async remove(name: string, force = false): Promise<void> {
 		validateSandboxName(name);
 		await this.execute(["rm", ...(force ? ["--force"] : []), name]);

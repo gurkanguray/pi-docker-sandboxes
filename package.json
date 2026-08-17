@@ -1,6 +1,6 @@
 {
   "name": "pi-docker-sandboxes",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "description": "Run Pi inside a Docker Sandboxes microVM",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
   "author": "Guray Gurkan",
   "packageManager": "npm@11.6.2",
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24.12.0 <25"
   },
   "license": "MIT",
   "keywords": [
@@ -35,18 +35,20 @@
     ]
   },
   "scripts": {
-    "build:cli": "rm -rf dist && tsc --project tsconfig.cli.json",
+    "build:cli": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; rm -rf dist && tsc --project tsconfig.cli.json",
     "prepack": "if [ -f .source-checkout ]; then npm run build:cli; fi",
-    "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:e2e": "PI_DOCKER_SANDBOX_E2E=1 node --experimental-strip-types --test test/e2e.test.ts",
-    "test:e2e-receipt": "node --experimental-strip-types --test test/e2e-receipt.test.ts",
-    "check": "npm run typecheck && npm test",
+    "typecheck": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; tsc --noEmit",
+    "test": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/*.test.ts",
+    "test:e2e": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; PI_DOCKER_SANDBOX_E2E=1 node --experimental-strip-types --test test/e2e.test.ts",
+    "test:e2e-receipt": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/e2e-receipt.test.ts",
+    "docs:dev": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress docs",
+    "docs:build": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress build docs",
+    "check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; npm run typecheck && npm test",
     "image:build": "if [ -f .source-checkout ]; then npm run build:cli; fi; node bin/pi-dsbx.mjs image build",
-    "image:verify": "node scripts/verify-image.mjs",
-    "release:check": "node scripts/check-release.mjs",
-    "package:verify": "node scripts/verify-package.mjs",
-    "smoke:fresh-install": "node scripts/fresh-install-smoke.mjs",
+    "image:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-image.mjs",
+    "release:check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-release.mjs",
+    "package:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-package.mjs",
+    "smoke:fresh-install": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/fresh-install-smoke.mjs",
     "pack:dry": "npm pack --dry-run"
   },
   "peerDependencies": {
@@ -61,15 +63,17 @@
     "@types/node": "24.13.3",
     "ajv": "8.20.0",
     "typescript": "7.0.2",
+    "vitepress": "1.6.4",
     "yaml": "2.9.0"
+  },
+  "overrides": {
+    "vite": "6.4.3"
   },
   "files": [
     "bin/",
     "dist/",
     "docker/",
     "extensions/",
-    "profiles/",
-    "scripts/",
     "src/",
     "docs/*.md",
     "README.md",

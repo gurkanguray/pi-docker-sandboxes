@@ -24,6 +24,7 @@ import {
 import { createHash } from "node:crypto";
 import type { SyncOptions, SyncProfile } from "./config.ts";
 import { scanSecretCategories } from "./errors.ts";
+import { isCopyEligibleOAuthEntry } from "./host-auth.ts";
 
 const SAFE_SETTINGS = new Set([
 	"theme",
@@ -60,6 +61,7 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 
 export function sanitizeSettings(
 	value: unknown,
+	availableProviders?: ReadonlySet<string>,
 ): Sanitized<Record<string, unknown>> {
 	if (!plainObject(value))
 		throw new TypeError("settings.json must contain an object");
@@ -67,7 +69,7 @@ export function sanitizeSettings(
 	const warnings: string[] = [];
 	for (const [key, entry] of Object.entries(value)) {
 		if (!SAFE_SETTINGS.has(key)) {
-			warnings.push(`settings.${key}: not imported`);
+			if (key !== "packages") warnings.push(`settings.${key}: not imported`);
 			continue;
 		}
 		if (
@@ -86,11 +88,117 @@ export function sanitizeSettings(
 		);
 		if (sanitized !== undefined) output[key] = sanitized;
 	}
+	if (availableProviders) {
+		const models = output.enabledModels;
+		if (Array.isArray(models))
+			output.enabledModels = models.filter((entry) => {
+				if (typeof entry !== "string") return false;
+				const provider = entry.split("/")[0] ?? "";
+				return availableProviders.has(provider);
+			});
+		const defaultProvider = output.defaultProvider;
+		if (
+			typeof defaultProvider === "string" &&
+			!availableProviders.has(defaultProvider)
+		) {
+			delete output.defaultProvider;
+			delete output.defaultModel;
+		}
+	}
 	return { value: output, warnings };
 }
 
-const PINNED_NPM =
-	/^npm:(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const PACKAGE_CONTROLS = /\p{C}/u;
+const NPM_PACKAGE =
+	/^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[a-z0-9*^~<>=|.+_-]+)?$/i;
+const GIT_HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const GIT_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
+const GIT_REF_SEGMENT = /^[a-z0-9._-]+$/i;
+
+function safeGitHost(host: string): boolean {
+	return (
+		host.length <= 253 &&
+		!host.startsWith("www.") &&
+		host.includes(".") &&
+		host.split(".").every((label) => GIT_HOST_LABEL.test(label))
+	);
+}
+
+function safeGitPath(
+	pathWithRef: string,
+): { path: string; ref?: string } | undefined {
+	const match = /^([^@#]+)(?:@([^@#]+))?$/.exec(pathWithRef);
+	if (!match) return undefined;
+	const path = (match[1] ?? "").replace(/\.git$/, "");
+	const pathSegments = path.split("/");
+	const ref = match[2];
+	if (
+		pathSegments.length !== 2 ||
+		pathSegments.some(
+			(segment) =>
+				segment === "." || segment === ".." || !GIT_PATH_SEGMENT.test(segment),
+		) ||
+		pathSegments[1]?.endsWith(".git") ||
+		(ref !== undefined &&
+			(ref === "." || ref === ".." || !GIT_REF_SEGMENT.test(ref)))
+	)
+		return undefined;
+	return { path, ref };
+}
+
+function safeRemotePackage(source: string): boolean {
+	if (
+		PACKAGE_CONTROLS.test(source) ||
+		/\s/u.test(source) ||
+		source.includes("?") ||
+		source.includes("#") ||
+		source.includes("\\")
+	)
+		return false;
+	if (source.startsWith("npm:") && NPM_PACKAGE.test(source)) return true;
+	if (!source.startsWith("git:") || source.includes("%")) return false;
+	const spec = source.slice(4);
+	const protocol = /^(https?|git|ssh):\/\//.exec(spec);
+	if (protocol) {
+		const remainder = spec.slice(protocol[0].length);
+		const slash = remainder.indexOf("/");
+		const rawHost = remainder.slice(0, slash);
+		const rawPath = safeGitPath(remainder.slice(slash + 1));
+		if (slash <= 0 || !safeGitHost(rawHost) || !rawPath) return false;
+		try {
+			const parsed = new URL(spec);
+			const parsedPath = safeGitPath(parsed.pathname.replace(/^\/+/, ""));
+			return (
+				parsed.protocol === `${protocol[1]}:` &&
+				!parsed.username &&
+				!parsed.password &&
+				!parsed.search &&
+				!parsed.hash &&
+				!parsed.port &&
+				parsed.hostname === rawHost &&
+				safeGitHost(parsed.hostname) &&
+				parsedPath?.path === rawPath.path &&
+				parsedPath.ref === rawPath.ref
+			);
+		} catch {
+			return false;
+		}
+	}
+	if (spec.startsWith("git@")) {
+		const colon = spec.indexOf(":", 4);
+		return (
+			colon > 4 &&
+			safeGitHost(spec.slice(4, colon)) &&
+			Boolean(safeGitPath(spec.slice(colon + 1)))
+		);
+	}
+	const slash = spec.indexOf("/");
+	return (
+		slash > 0 &&
+		safeGitHost(spec.slice(0, slash)) &&
+		Boolean(safeGitPath(spec.slice(slash + 1)))
+	);
+}
 
 export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
 	if (value === undefined) return { value: [], warnings: [] };
@@ -105,15 +213,86 @@ export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
 				: plainObject(entry) && typeof entry.source === "string"
 					? entry.source
 					: undefined;
-		if (!source || !PINNED_NPM.test(source)) {
+		if (!source || !safeRemotePackage(source)) {
 			warnings.push(
-				`settings.packages[${index}]: only exact pinned npm package specs are imported`,
+				source && /^(?:npm|git):/i.test(source)
+					? `settings.packages[${index}]: unsafe remote package spec not imported`
+					: `settings.packages[${index}]: host path package specs are not imported`,
 			);
 			continue;
 		}
 		packages.push(source);
 	}
 	return { value: [...new Set(packages)], warnings };
+}
+
+const NATIVE_NPM_DEPS = new Set([
+	"better-sqlite3",
+	"sqlite3",
+	"node-gyp",
+	"prebuild-install",
+]);
+
+function npmPackageName(source: string): string | undefined {
+	if (!source.startsWith("npm:")) return undefined;
+	const spec = source.slice(4);
+	const scoped = spec.match(/^(@[^/]+\/[^@]+)(?:@.+)?$/);
+	if (scoped) return scoped[1];
+	const name = spec.split("@")[0];
+	return name || undefined;
+}
+
+function packageHasNativeDeps(pkg: Record<string, unknown>): boolean {
+	const deps = {
+		...(plainObject(pkg.dependencies) ? pkg.dependencies : {}),
+		...(plainObject(pkg.optionalDependencies) ? pkg.optionalDependencies : {}),
+	};
+	return Object.keys(deps).some((name) => NATIVE_NPM_DEPS.has(name));
+}
+
+async function readInstalledNpmPackage(
+	agentDir: string,
+	source: string,
+): Promise<Record<string, unknown> | undefined> {
+	const name = npmPackageName(source);
+	if (!name) return undefined;
+	try {
+		const parsed = JSON.parse(
+			await readFile(
+				join(agentDir, "npm", "node_modules", name, "package.json"),
+				"utf8",
+			),
+		) as unknown;
+		return plainObject(parsed) ? parsed : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export async function listNativePackageSpecs(
+	agentDir: string,
+	profile: SyncProfile,
+	custom?: SyncOptions,
+): Promise<string[]> {
+	const policy = syncOptions(profile, custom);
+	if (!policy.packages) return [];
+	let settings: unknown;
+	try {
+		settings = JSON.parse(
+			await readFile(join(agentDir, "settings.json"), "utf8"),
+		);
+	} catch {
+		return [];
+	}
+	const packages = resolvePackageSpecs(
+		plainObject(settings) ? settings.packages : undefined,
+	);
+	const native: string[] = [];
+	for (const source of packages.value) {
+		const installed = await readInstalledNpmPackage(agentDir, source);
+		if (installed && packageHasNativeDeps(installed)) native.push(source);
+	}
+	return native;
 }
 
 function normalizedKey(key: string): string {
@@ -303,7 +482,11 @@ export function scanResourceContent(
 ): string[] {
 	if (!TEXT_EXTENSIONS.has(extname(relativePath).toLowerCase())) return [];
 	const text = content.toString("utf8");
-	const categories = scanSecretCategories(text);
+	const categories = scanSecretCategories(text).filter(
+		(category) =>
+			category !== "secret assignment" ||
+			!/^\.(?:md|mdx)$/i.test(extname(relativePath)),
+	);
 	if (PRIVATE_KEY_HEADER.test(text)) categories.push("private key header");
 	return [...new Set(categories)].sort();
 }
@@ -349,9 +532,15 @@ type TestBoundary =
 	| "beforeFileOpen"
 	| "afterFileOpen"
 	| "duringFileRead"
-	| "afterDirectoryEnumerate";
+	| "afterDirectoryEnumerate"
+	| "afterExtensionClassification";
 interface PersonalizationSnapshotOptions {
 	testHook?: (boundary: TestBoundary, relativePath: string) => Promise<void>;
+	availableProviders?: ReadonlySet<string>;
+	copyOAuth?: boolean;
+	allowNativePackages?: boolean;
+	deferNativePackages?: boolean;
+	deferAllPackages?: boolean;
 }
 
 type FileIdentity = Pick<
@@ -509,6 +698,78 @@ async function readValidatedFile(
 	}
 }
 
+async function isPiExtensionEntry(
+	source: string,
+	realRoot: string,
+	entry: {
+		name: string;
+		isDirectory(): boolean;
+		isFile(): boolean;
+		isSymbolicLink(): boolean;
+	},
+	options: PersonalizationSnapshotOptions,
+): Promise<boolean> {
+	if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile()))
+		return true;
+	if (entry.isFile()) return /\.(?:js|ts)$/.test(entry.name);
+
+	for (const name of ["index.ts", "index.js"]) {
+		try {
+			await lstat(join(source, name));
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+				throw filesystemFailure(`${entry.name}/${name}`, error);
+		}
+	}
+
+	const manifestPath = join(source, "package.json");
+	let discovery;
+	try {
+		discovery = await lstat(manifestPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw filesystemFailure(`${entry.name}/package.json`, error);
+	}
+	if (discovery.isSymbolicLink()) return true;
+	if (!discovery.isFile()) return false;
+	const content = await readValidatedFile(
+		manifestPath,
+		realRoot,
+		`${entry.name}/package.json`,
+		discovery,
+		options,
+	);
+	let manifest: unknown;
+	try {
+		manifest = JSON.parse(content.toString("utf8"));
+	} catch {
+		return false;
+	}
+	const pi = plainObject(manifest) && plainObject(manifest.pi) ? manifest.pi : {};
+	const candidates =
+		Array.isArray(pi.extensions) &&
+		pi.extensions.every(
+			(candidate): candidate is string => typeof candidate === "string",
+		)
+			? pi.extensions
+			: [];
+	const root = resolve(source);
+	for (const candidate of candidates) {
+		if (candidate.length === 0) continue;
+		const target = resolve(source, candidate);
+		if (target === root || !target.startsWith(`${root}${sep}`)) continue;
+		try {
+			await lstat(target);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+				throw filesystemFailure(`${entry.name}/package.json`, error);
+		}
+	}
+	return false;
+}
+
 async function copyResourceTree(
 	source: string,
 	destination: string,
@@ -516,6 +777,7 @@ async function copyResourceTree(
 	realRoot: string,
 	resource: Resource,
 	manifest: ResourceManifestEntry[],
+	warnings: string[],
 	options: PersonalizationSnapshotOptions,
 	ownedStage: (path: string, action: () => Promise<void>) => Promise<void>,
 ): Promise<void> {
@@ -553,6 +815,7 @@ async function copyResourceTree(
 						realRoot,
 						resource,
 						manifest,
+						warnings,
 						options,
 						ownedStage,
 					);
@@ -579,7 +842,10 @@ async function copyResourceTree(
 		options,
 	);
 	const findings = scanResourceContent(relativePath, content);
-	if (findings.length > 0) rejectResource(relativePath, findings[0]!);
+	if (findings.length > 0) {
+		warnings.push(`skipped ${relativePath}: ${findings[0]}`);
+		return;
+	}
 	await ownedStage(dirname(destination), () =>
 		mkdir(dirname(destination), { recursive: true, mode: 0o700 }).then(
 			() => {},
@@ -599,7 +865,7 @@ async function copyResourceTree(
 
 async function readJson(
 	agentDir: string,
-	name: "settings.json" | "models.json",
+	name: "settings.json" | "models.json" | "models-store.json" | "auth.json",
 	options: PersonalizationSnapshotOptions,
 ): Promise<unknown | undefined> {
 	const source = join(agentDir, name);
@@ -638,6 +904,8 @@ export interface PersonalizationSnapshot {
 	warnings: string[];
 	directory: string;
 	manifest: ResourceManifestEntry[];
+	packageSpecs: string[];
+	nativePackages: string[];
 }
 
 const SYNC_POLICIES: Record<Exclude<SyncProfile, "custom">, SyncOptions> = {
@@ -650,16 +918,6 @@ const SYNC_POLICIES: Record<Exclude<SyncProfile, "custom">, SyncOptions> = {
 		themes: false,
 		extensions: false,
 		sessions: "sandbox",
-	},
-	balanced: {
-		settings: true,
-		models: true,
-		packages: false,
-		skills: false,
-		prompts: false,
-		themes: false,
-		extensions: false,
-		sessions: "managed",
 	},
 	mirror: {
 		settings: true,
@@ -735,12 +993,15 @@ export async function createPersonalizationSnapshot(
 			throw destinationOwnershipChanged();
 		const warnings: string[] = [];
 		const manifest: ResourceManifestEntry[] = [];
+		const packageSpecs: string[] = [];
+		const nativePackages: string[] = [];
+		let nativeSkillsDestinationCreated = false;
 		const policy = syncOptions(profile, custom);
 		if (policy.settings || policy.packages) {
 			const settings = await readJson(agentDir, "settings.json", options);
 			if (settings !== undefined) {
 				const sanitized = policy.settings
-					? sanitizeSettings(settings)
+					? sanitizeSettings(settings, options.availableProviders)
 					: { value: {}, warnings: [] };
 				warnings.push(...sanitized.warnings);
 				if (policy.packages) {
@@ -748,8 +1009,121 @@ export async function createPersonalizationSnapshot(
 						plainObject(settings) ? settings.packages : undefined,
 					);
 					warnings.push(...packages.warnings);
-					if (packages.value.length > 0)
-						sanitized.value.packages = packages.value;
+					packageSpecs.push(...packages.value);
+					const installable: string[] = [];
+					for (const source of packages.value) {
+						const installed = await readInstalledNpmPackage(agentDir, source);
+						if (installed && packageHasNativeDeps(installed)) {
+							nativePackages.push(source);
+							if (options.allowNativePackages && !options.deferAllPackages) {
+								installable.push(source);
+								continue;
+							}
+							if (!options.deferNativePackages && !options.deferAllPackages)
+								warnings.push(
+									`${source} skipped: native module cannot install in the sandbox`,
+								);
+							const name = npmPackageName(source);
+							if (name) {
+								const skillRoot = join(
+									agentDir,
+									"npm",
+									"node_modules",
+									name,
+									"skills",
+								);
+								let skillStat;
+								try {
+									skillStat = await lstat(skillRoot);
+								} catch (error) {
+									if ((error as NodeJS.ErrnoException).code === "ENOENT")
+										continue;
+									throw filesystemFailure("skills", error);
+								}
+								if (skillStat.isSymbolicLink())
+									rejectResource("skills", "symbolic link");
+								if (!skillStat.isDirectory())
+									rejectResource("skills", "non-directory resource");
+								let realSkillRoot: string;
+								try {
+									realSkillRoot = await realpath(skillRoot);
+								} catch (error) {
+									throw filesystemFailure("skills", error);
+								}
+								const handle = await openValidatedDirectory(
+									skillRoot,
+									realSkillRoot,
+									"skills",
+									skillStat,
+									true,
+								);
+								const openedStat = await handle.stat();
+								try {
+									const skillDest = join(destination, "skills");
+									await ownedStage(skillDest, () =>
+										mkdir(skillDest, { recursive: true, mode: 0o700 }).then(
+											() => {},
+										),
+									);
+									nativeSkillsDestinationCreated = true;
+									const directory = await opendir(skillRoot);
+									try {
+										await validateOpenedPath(
+											handle,
+											skillRoot,
+											realSkillRoot,
+											openedStat,
+											true,
+										);
+										for await (const entry of directory) {
+											const entryDestination = join(skillDest, entry.name);
+											try {
+												await lstat(entryDestination);
+												rejectResource(
+													`skills/${entry.name}`,
+													"destination collision",
+												);
+											} catch (error) {
+												if (error instanceof ResourcePolicyError) throw error;
+												if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+													throw error;
+											}
+											await copyResourceTree(
+												join(skillRoot, entry.name),
+												entryDestination,
+												skillRoot,
+												realSkillRoot,
+												"skills",
+												manifest,
+												warnings,
+												options,
+												ownedStage,
+											);
+										}
+									} finally {
+										await directory.close().catch(() => {});
+									}
+									await validateOpenedPath(
+										handle,
+										skillRoot,
+										realSkillRoot,
+										openedStat,
+										true,
+									);
+								} catch (error) {
+									if (error instanceof ResourcePolicyError) throw error;
+									if ((error as Error).message.startsWith("Resource "))
+										throw error;
+									throw filesystemFailure("skills", error);
+								} finally {
+									await handle.close().catch(() => {});
+								}
+							}
+							continue;
+						}
+						if (!options.deferAllPackages) installable.push(source);
+					}
+					if (installable.length > 0) sanitized.value.packages = installable;
 				}
 				const settingsPath = join(destination, "settings.json");
 				await ownedStage(settingsPath, () =>
@@ -774,6 +1148,49 @@ export async function createPersonalizationSnapshot(
 						{ mode: 0o600 },
 					),
 				);
+			}
+			const store = await readJson(agentDir, "models-store.json", options);
+			if (store !== undefined && plainObject(store)) {
+				const sanitized = sanitizeModels(store);
+				warnings.push(...sanitized.warnings);
+				const storePath = join(destination, "models-store.json");
+				await ownedStage(storePath, () =>
+					writeFile(
+						storePath,
+						`${JSON.stringify(sanitized.value, null, 2)}\n`,
+						{ mode: 0o600 },
+					),
+				);
+			}
+			const hostAuth = options.copyOAuth
+				? await readJson(agentDir, "auth.json", options)
+				: undefined;
+			if (hostAuth !== undefined && plainObject(hostAuth)) {
+				const oauthAuth: Record<string, unknown> = {};
+				for (const [id, entry] of Object.entries(hostAuth)) {
+					if (!isCopyEligibleOAuthEntry(entry)) continue;
+					if (options.availableProviders && !options.availableProviders.has(id))
+						continue;
+					oauthAuth[id] = {
+						type: "oauth",
+						access: entry.access,
+						refresh: entry.refresh,
+						...(typeof entry.expires === "number"
+							? { expires: entry.expires }
+							: {}),
+						...(typeof entry.accountId === "string"
+							? { accountId: entry.accountId }
+							: {}),
+					};
+				}
+				if (Object.keys(oauthAuth).length > 0) {
+					const authPath = join(destination, "auth.json");
+					await ownedStage(authPath, () =>
+						writeFile(authPath, `${JSON.stringify(oauthAuth, null, 2)}\n`, {
+							mode: 0o600,
+						}),
+					);
+				}
 			}
 		}
 		const resources = (
@@ -808,23 +1225,88 @@ export async function createPersonalizationSnapshot(
 			const openedStat = await handle.stat();
 			try {
 				const resourceDestination = join(destination, resource);
-				await ownedStage(resourceDestination, () =>
-					mkdir(resourceDestination, { mode: 0o700 }).then(() => {}),
-				);
+				await ownedStage(resourceDestination, async () => {
+					try {
+						await mkdir(resourceDestination, { mode: 0o700 });
+					} catch (error) {
+						if (
+							resource !== "skills" ||
+							!nativeSkillsDestinationCreated ||
+							(error as NodeJS.ErrnoException).code !== "EEXIST"
+						)
+							throw error;
+						const current = await lstat(resourceDestination);
+						if (current.isSymbolicLink())
+							rejectResource(resource, "destination symbolic link");
+						if (!current.isDirectory())
+							rejectResource(resource, "destination collision");
+					}
+				});
+				const destinationRealRoot =
+					resource === "extensions"
+						? await realpath(resourceDestination)
+						: undefined;
 				const directory = await opendir(source);
 				try {
 					await validateOpenedPath(handle, source, realRoot, openedStat, true);
-					for await (const entry of directory)
+					for await (const entry of directory) {
+						const entrySource = join(source, entry.name);
+						if (resource === "extensions") {
+							if (
+								!(await isPiExtensionEntry(
+									entrySource,
+									realRoot,
+									entry,
+									options,
+								))
+							) {
+								warnings.push(
+									`skipped extensions/${entry.name}: not a Pi extension`,
+								);
+								continue;
+							}
+							await options.testHook?.(
+								"afterExtensionClassification",
+								entry.name,
+							);
+						}
+						const entryDestination = join(resourceDestination, entry.name);
+						try {
+							await lstat(entryDestination);
+							rejectResource(
+								`${resource}/${entry.name}`,
+								"destination collision",
+							);
+						} catch (error) {
+							if (error instanceof ResourcePolicyError) throw error;
+							if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+								throw error;
+						}
 						await copyResourceTree(
-							join(source, entry.name),
-							join(destination, resource, entry.name),
+							entrySource,
+							entryDestination,
 							resolve(source),
 							realRoot,
 							resource,
 							manifest,
+							warnings,
 							options,
 							ownedStage,
 						);
+						if (
+							resource === "extensions" &&
+							!(await isPiExtensionEntry(
+								entryDestination,
+								destinationRealRoot!,
+								entry,
+								options,
+							))
+						)
+							rejectResource(
+								`extensions/${entry.name}`,
+								"entrypoint changed during copy",
+							);
+					}
 				} finally {
 					await directory.close().catch(() => {});
 				}
@@ -844,6 +1326,45 @@ export async function createPersonalizationSnapshot(
 					resources.indexOf(second.resource) ||
 				compareCodepoints(first.relativePath, second.relativePath),
 		);
+		const resourceScanWarning =
+			/^skipped .+: (?:credential URL|authorization credential|secret token|secret assignment|private key header)$/;
+		const skipped = warnings.filter((warning) =>
+			resourceScanWarning.test(warning),
+		);
+		if (skipped.length > 0) {
+			const remaining = warnings.filter(
+				(warning) => !resourceScanWarning.test(warning),
+			);
+			warnings.length = 0;
+			warnings.push(
+				...remaining,
+				`skipped ${skipped.length} secret-bearing files during ${profile} sync`,
+			);
+		}
+		const collapseWarnings = (
+			pattern: RegExp,
+			summary: (count: number) => string,
+		): void => {
+			let count = 0;
+			for (let index = warnings.length - 1; index >= 0; index -= 1) {
+				if (!pattern.test(warnings[index]!)) continue;
+				warnings.splice(index, 1);
+				count += 1;
+			}
+			if (count > 0) warnings.push(summary(count));
+		};
+		collapseWarnings(
+			/^settings\.[^:]+: not imported$/,
+			(count) => `skipped ${count} settings keys`,
+		);
+		collapseWarnings(
+			/^settings\.packages\[\d+\]: host path/,
+			(count) => `skipped ${count} host-path packages`,
+		);
+		collapseWarnings(
+			/ skipped: native module cannot install in the sandbox$/,
+			(count) => `skipped ${count} native packages (no compiler)`,
+		);
 		if (!policy.extensions && profile !== "clean")
 			warnings.push(
 				"loose global extensions: excluded pending explicit approval",
@@ -860,7 +1381,14 @@ export async function createPersonalizationSnapshot(
 				{ mode: 0o600 },
 			),
 		);
-		return { hash, warnings, directory: destination, manifest };
+		return {
+			hash,
+			warnings,
+			directory: destination,
+			manifest,
+			packageSpecs,
+			nativePackages,
+		};
 	} catch (error) {
 		await options.testHook?.("beforeSnapshotCleanup", "destination");
 		let ownsCurrentPath = false;
@@ -902,11 +1430,4 @@ export async function hashTree(root: string): Promise<string> {
 	}
 	await visit(root);
 	return hash.digest("hex");
-}
-
-export function safeResourceName(path: string): string {
-	const name = basename(path);
-	if (!name || name === "." || name === "..")
-		throw new TypeError("Invalid resource name");
-	return name;
 }

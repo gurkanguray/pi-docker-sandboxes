@@ -15,15 +15,14 @@ import {
 } from "./local-template.ts";
 import { getNetworkProfile } from "./profiles.ts";
 
-export const PI_VERSION = IMAGE_LOCK.piVersion;
 export const PACKAGE_VERSION = IMAGE_LOCK.packageVersion;
-export const BASE_IMAGES = { docker: IMAGE_LOCK.baseImage } as const;
 
 export interface KitOptions {
 	config: DockerSandboxConfig;
 	services: CredentialService[];
 	image?: string;
 	sandboxName?: string;
+	extraAllow?: string[];
 }
 
 export interface KitCredential {
@@ -77,10 +76,6 @@ export async function resolveKitImage(
 		throw new TypeError(
 			"sandbox.image must be set to a digest-pinned image when dockerEngine is false",
 		);
-	if (lock.publishedImage)
-		return {
-			image: assertDigestReference(lock.publishedImage, "publishedImage"),
-		};
 	try {
 		const discoveredId = (
 			await run("docker", [
@@ -106,8 +101,7 @@ export async function resolveKitImage(
 		throw new OperationError({
 			phase: "preflight",
 			operation: "resolve immutable sandbox image",
-			detail:
-				"No published image is locked and the locked local image is absent or invalid",
+			detail: "The locked local image is absent or invalid",
 			recovery: ["pi-dsbx image build"],
 			cause,
 		});
@@ -125,11 +119,10 @@ export function buildKitSpec(options: KitOptions): PiKitSpec {
 		throw new Error(
 			"sandbox.image must be set to a digest-pinned image when dockerEngine is false",
 		);
-	const image =
-		options.image ?? config.sandbox.image ?? IMAGE_LOCK.publishedImage;
+	const image = options.image ?? config.sandbox.image;
 	if (!image)
 		throw new Error(
-			"sandbox.image must be resolved to an immutable published or verified local image",
+			"sandbox.image must be resolved to an immutable configured or verified local image",
 		);
 	try {
 		assertDigestReference(image, "sandbox.image");
@@ -149,6 +142,7 @@ export function buildKitSpec(options: KitOptions): PiKitSpec {
 		...profile.allow,
 		...serviceDomains,
 		...config.network.allow,
+		...(options.extraAllow ?? []),
 	]);
 	const deny = unique(config.network.deny);
 	const spec: PiKitSpec = {
@@ -178,7 +172,6 @@ export function buildKitSpec(options: KitOptions): PiKitSpec {
 				PI_DOCKER_SANDBOX_PACKAGE_VERSION: PACKAGE_VERSION,
 				PI_DOCKER_SANDBOX_PROFILE: config.profile,
 				PI_DOCKER_SANDBOX_SYNC_PROFILE: config.syncProfile,
-				PI_DOCKER_SANDBOX_WORKSPACE_MODE: config.workspaceMode,
 				PI_TELEMETRY: "0",
 			},
 		},
@@ -221,15 +214,5 @@ export async function writeKitDirectory(
 			force: false,
 			errorOnExist: true,
 		});
-	}
-}
-
-export function assertKitContainsNoSecrets(
-	specText: string,
-	secrets: readonly string[],
-): void {
-	for (const secret of secrets) {
-		if (secret && specText.includes(secret))
-			throw new Error("Generated Kit contains a host secret");
 	}
 }

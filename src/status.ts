@@ -18,55 +18,41 @@ export interface DoctorResult {
 	message: string;
 }
 
-export interface DockerSandboxStatus {
-	backend: "docker-sandboxes";
-	packageVersion: string;
-	runningInsideSandbox: boolean;
-	sandboxName?: string;
-	workspaceMode: "clone" | "direct" | "unknown";
-	hostWorkspaceWritable?: boolean;
-	sharedSkills: false | "unknown";
-	privateDockerEngine: boolean | "unknown";
-	profile?: string;
-	syncProfile?: string;
-	credentialMode: "proxy" | "unknown";
+export function isSandboxAttested(
+	env: NodeJS.ProcessEnv,
+	mountInfo: string,
+): boolean {
+	if (env.PI_DOCKER_SANDBOX_ACTIVE !== "1") return false;
+	return mountInfo.split("\n").some((line) => {
+		const fields = line.split(" ");
+		return (
+			fields[4] === "/run/sandbox/source" &&
+			fields[5]?.split(",").includes("ro") === true
+		);
+	});
 }
 
-export function getDockerSandboxStatus(
+export async function attestSandbox(
 	env: NodeJS.ProcessEnv = process.env,
-): DockerSandboxStatus {
-	const active = env.PI_DOCKER_SANDBOX_ACTIVE === "1";
-	const workspaceMode =
-		env.PI_DOCKER_SANDBOX_WORKSPACE_MODE === "clone" ||
-		env.PI_DOCKER_SANDBOX_WORKSPACE_MODE === "direct"
-			? env.PI_DOCKER_SANDBOX_WORKSPACE_MODE
-			: "unknown";
-	return {
-		backend: "docker-sandboxes",
-		packageVersion: env.PI_DOCKER_SANDBOX_PACKAGE_VERSION ?? "0.1.0-alpha.1",
-		runningInsideSandbox: active,
-		...(env.PI_DOCKER_SANDBOX_NAME
-			? { sandboxName: env.PI_DOCKER_SANDBOX_NAME }
-			: {}),
-		workspaceMode,
-		...(workspaceMode === "direct" ? { hostWorkspaceWritable: true } : {}),
-		sharedSkills: "unknown",
-		privateDockerEngine: "unknown",
-		...(env.PI_DOCKER_SANDBOX_PROFILE
-			? { profile: env.PI_DOCKER_SANDBOX_PROFILE }
-			: {}),
-		...(env.PI_DOCKER_SANDBOX_SYNC_PROFILE
-			? { syncProfile: env.PI_DOCKER_SANDBOX_SYNC_PROFILE }
-			: {}),
-		credentialMode: "unknown",
-	};
+): Promise<boolean> {
+	if (env.PI_DOCKER_SANDBOX_ACTIVE !== "1") return false;
+	try {
+		return isSandboxAttested(
+			env,
+			await readFile("/proc/self/mountinfo", "utf8"),
+		);
+	} catch {
+		return false;
+	}
 }
 
-export function sandboxStatus(env: NodeJS.ProcessEnv = process.env): string {
-	if (env.PI_DOCKER_SANDBOX_ACTIVE !== "1") return "Docker SBX: host";
-	const mode = env.PI_DOCKER_SANDBOX_WORKSPACE_MODE ?? "unknown";
+export function sandboxStatus(
+	attested: boolean,
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	if (!attested) return "Docker SBX: host";
 	const profile = env.PI_DOCKER_SANDBOX_PROFILE ?? "unknown";
-	return `SBX: ${mode} · ${profile}`;
+	return `SBX: clone · ${profile}`;
 }
 
 function capabilityChecks(capabilities: SbxCapabilities): DoctorResult[] {
@@ -102,11 +88,8 @@ async function sandboxDoctor(): Promise<DoctorResult[]> {
 			message: "sandbox sentinel present (not an attestation by itself)",
 		},
 		{
-			level:
-				process.env.PI_DOCKER_SANDBOX_WORKSPACE_MODE === "clone"
-					? "pass"
-					: "warning",
-			message: `workspace mode: ${process.env.PI_DOCKER_SANDBOX_WORKSPACE_MODE ?? "unknown"}`,
+			level: "pass",
+			message: "workspace mode: clone",
 		},
 		{
 			level: "pass",
@@ -206,10 +189,11 @@ async function sandboxDoctor(): Promise<DoctorResult[]> {
 }
 
 export async function runDoctor(
+	attested: boolean,
 	client = new SbxClient(),
 	cwd = process.cwd(),
 ): Promise<DoctorResult[]> {
-	if (process.env.PI_DOCKER_SANDBOX_ACTIVE === "1") return sandboxDoctor();
+	if (attested) return sandboxDoctor();
 	const results: DoctorResult[] = [];
 	let capabilities: SbxCapabilities;
 	try {
@@ -239,21 +223,12 @@ export async function runDoctor(
 	try {
 		const config = await loadConfig(cwd);
 		results.push({
-			level: config.workspaceMode === "clone" ? "pass" : "warning",
-			message: `workspace mode: ${config.workspaceMode}`,
-		});
-		results.push({
-			level: !config.shareSkills ? "pass" : "warning",
-			message: `shared skills: ${config.shareSkills ? "enabled" : "disabled"}`,
-		});
-		results.push({
 			level: "pass",
 			message: `security profile: ${config.profile}`,
 		});
 		const resolved = resolveAvailableServices(
 			capabilities!.credentialServices,
 			config.providers,
-			config.services,
 		);
 		for (const id of resolved.unsupported)
 			results.push({
