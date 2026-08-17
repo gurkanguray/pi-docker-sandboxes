@@ -164,8 +164,8 @@ test("signal received during spawn setup is forwarded after PID assignment", {
 				listeners.every(Boolean),
 				"signal listeners must be installed before spawn",
 			);
-			listeners[0]!.call(process, "SIGINT");
-			listeners[1]!.call(process, "SIGTERM");
+			listeners[0]!.call(process);
+			listeners[1]!.call(process);
 			queueMicrotask(() => child.emit("exit", 0, null));
 			return child as unknown as ChildProcess;
 		},
@@ -202,7 +202,7 @@ test("PID-less child async error rejects without hanging or leaking listeners", 
 				.rawListeners("SIGTERM")
 				.find((candidate) => !beforeListeners.has(candidate));
 			assert.ok(listener, "signal listener must be installed before spawn");
-			listener.call(process, "SIGTERM");
+			listener.call(process);
 			queueMicrotask(() =>
 				child.emit(
 					"error",

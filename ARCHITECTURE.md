@@ -16,7 +16,7 @@ host Pi extension / pi-dsbx
 ## Decisions
 
 1. Whole-Pi isolation is the primary and only v0.1 execution mode; host-Pi tool routing is not duplicated.
-2. Clone mode is default. Direct mode never appears as fallback.
+2. Every launch uses a private clone. There is no host-writable fallback.
 3. Kit schema v2 is isolated in `src/kit.ts` and validated by the installed `sbx` before launch.
 4. Pi's async extension factory successfully performs inherited-stdio re-exec before session/TUI startup. The real spike passed with one sandbox creation, clean exit, and unchanged host source. `pi-dsbx` remains the explicit companion path.
 5. API credentials stay host-side through exact-domain proxy declarations. Host credential environment variables and SSH-agent variables are removed from the `sbx` launcher environment; Docker's daemon may still provide documented proxy sentinels/SSH forwarding.

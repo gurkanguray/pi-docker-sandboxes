@@ -1,6 +1,6 @@
 name: Feature request
 description: >-
-  Propose an improvement within the supported public-alpha boundary.
+  Propose an improvement within the supported platform boundary.
 title: "[Feature]: "
 labels:
   - enhancement

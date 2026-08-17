@@ -25,12 +25,11 @@ const packageLock = JSON.parse(
 };
 const digest = "a".repeat(64);
 const validLock = {
-	packageVersion: "0.1.0-alpha.1",
+	packageVersion: "0.1.0",
 	piVersion: "0.84.1",
 	platform: "linux/arm64",
 	baseImage: `docker/sandbox-templates@sha256:${digest}`,
-	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1",
-	publishedImage: `ghcr.io/gurkanguray/pi-docker-sandboxes@sha256:${digest}`,
+	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0",
 	tools: {
 		fdDebianVersion: "10.3.0-2ubuntu1",
 		rgDebianVersion: "15.1.0-1ubuntu1",
@@ -60,7 +59,6 @@ test("strictly requires every lock field", () => {
 		"platform",
 		"baseImage",
 		"localImage",
-		"publishedImage",
 		"tools",
 	] as const) {
 		const lock: Record<string, unknown> = structuredClone(validLock);
@@ -122,7 +120,7 @@ test("strictly rejects invalid and unknown lock fields", () => {
 	);
 	assert.throws(
 		() => parseImageLock({ ...validLock, publishedImage: "repo:latest" }),
-		/digest/,
+		/unknown field publishedImage/,
 	);
 	assert.throws(
 		() => parseImageLock({ ...validLock, localImage: `repo@sha256:${digest}` }),
@@ -139,8 +137,8 @@ test("loads a strict lock fixture", async () => {
 
 test("checked-in lock matches every reviewed immutable value", async () => {
 	const lock = await loadImageLock();
-	assert.equal(lock.packageVersion, "0.1.0-alpha.1");
-	assert.equal(packageJson.version, "0.1.0-alpha.1");
+	assert.equal(lock.packageVersion, "0.1.0");
+	assert.equal(packageJson.version, "0.1.0");
 	assert.equal(lock.piVersion, "0.84.1");
 	assert.equal(
 		packageJson.devDependencies["@earendil-works/pi-coding-agent"],
@@ -164,9 +162,8 @@ test("checked-in lock matches every reviewed immutable value", async () => {
 	assert.equal(lock.platform, "linux/arm64");
 	assert.equal(
 		lock.localImage,
-		"docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1",
+		"docker.io/pi-docker-sandboxes/pi:0.1.0",
 	);
-	assert.equal(lock.publishedImage, null);
 	assert.equal(lock.tools.fdDebianVersion, "10.3.0-2ubuntu1");
 	assert.equal(lock.tools.rgDebianVersion, "15.1.0-1ubuntu1");
 	assert.equal(lock.tools.gitDebianVersion, "1:2.53.0-1ubuntu1");

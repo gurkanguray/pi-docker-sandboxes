@@ -212,6 +212,38 @@ test("capabilities include dynamically discovered credential services", async ()
 	]);
 });
 
+test("setSecret times out instead of hanging on an interactive helper", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-secret-timeout-"));
+	const helper = join(directory, "sbx");
+	await writeFile(
+		helper,
+		`#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n`,
+	);
+	await chmod(helper, 0o755);
+	const client = new SbxClient(helper);
+	const started = Date.now();
+	await assert.rejects(
+		() => client.setSecret("openai", "host-api-key-value", 200),
+		/failed/,
+	);
+	assert.ok(Date.now() - started < 20_000);
+	await rm(directory, { recursive: true, force: true });
+});
+
+test("setSecret sends the value on stdin and never on argv", async () => {
+	const calls: Array<{ args: string[]; input?: string }> = [];
+	const client = new SbxClient("sbx", async (_command, args, options) => {
+		calls.push({ args: [...args], input: options?.input });
+		return { stdout: "", stderr: "", code: 0 };
+	});
+	await client.setSecret("openai", "host-api-key-value");
+	assert.deepEqual(calls, [
+		{ args: ["secret", "set", "openai"], input: "host-api-key-value\n" },
+	]);
+	assert.equal(JSON.stringify(calls[0]?.args).includes("host-api-key-value"), false);
+	await assert.rejects(() => client.setSecret("openai", "one\ntwo"), /Invalid secret value/);
+});
+
 test("rejects sandbox names before process execution", async () => {
 	let called = false;
 	const client = new SbxClient("sbx", async () => {
@@ -244,8 +276,8 @@ test("lifecycle and policy methods preserve literal argv", async () => {
 	await client.exec("safe-name", ["printf", "%s", "$(not-shell)"], {
 		workdir: "/repo with spaces",
 		env: { SAFE: "x y" },
+		user: "root",
 	});
-	await client.stop("safe-name");
 	await client.remove("safe-name", true);
 	await client.copyFrom("safe-name", "/tmp/a b", "/host/a b");
 	assert.deepEqual(calls[1], [
@@ -255,6 +287,8 @@ test("lifecycle and policy methods preserve literal argv", async () => {
 		"/repo with spaces",
 		"--env",
 		"SAFE=x y",
+		"-u",
+		"root",
 		"safe-name",
 		"printf",
 		"%s",
@@ -353,7 +387,6 @@ test("constructs separate create and attach argv with the exact request environm
 		name: "pi-safe",
 		workspace: "/repo with spaces",
 		kit: "/tmp/kit",
-		workspaceMode: "clone" as const,
 		agentArgs: ["--model", "x"],
 		env: { PATH: "/bin", TERM: "xterm" },
 	};
@@ -361,7 +394,6 @@ test("constructs separate create and attach argv with the exact request environm
 		name: "pi-empty",
 		workspace: "/repo",
 		kit: "/tmp/kit",
-		workspaceMode: "clone" as const,
 	};
 	assert.deepEqual(client.createArgs(request), [
 		"create",
@@ -470,7 +502,6 @@ test("create process receives only the sanitized environment", async (t) => {
 		name: "pi-safe",
 		workspace: "/repo",
 		kit: directory,
-		workspaceMode: "clone",
 		env,
 	});
 	const childEnvironment = JSON.parse(
@@ -508,7 +539,6 @@ test("create process with omitted environment does not inherit host canaries", a
 			name: "pi-safe",
 			workspace: "/repo",
 			kit: directory,
-			workspaceMode: "clone",
 		});
 	} finally {
 		if (previous === undefined) delete process.env[canaryKey];
@@ -537,7 +567,6 @@ test("create process failures remain captured and sanitized", async (t) => {
 				name: "pi-safe",
 				workspace: "/repo",
 				kit: directory,
-				workspaceMode: "clone",
 				env: { PATH: process.env.PATH },
 			}),
 		(error: unknown) => {

@@ -1,5 +1,0 @@
-{
-  "name": "development",
-  "allow": ["registry.npmjs.org", "github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com"],
-  "deny": []
-}

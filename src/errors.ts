@@ -38,15 +38,41 @@ export const SECRET_PATTERNS = [
 	},
 ] as const;
 
+const TYPE_KEYWORD =
+	/^(?:string|number|boolean|bigint|symbol|undefined|null|void|never|unknown|any|object|Function)(?:\[\])?;?$/;
+const IDENTIFIER_ACCESS = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+;?$/;
+const DOC_PLACEHOLDER =
+	/^(?:local-dev-key|changeme|your[-_]?[a-z0-9_-]+|xxx+|placeholder|example|dummy|todo|replace[-_]?me)$/i;
+
+function assignedValue(value: string): string {
+	return value.replace(/^['"]|['"];?$/g, "").replace(/;$/, "");
+}
+
+export function isPlausibleSecretAssignment(value: string): boolean {
+	const assigned = assignedValue(value);
+	if (!assigned || assigned === "[redacted]") return false;
+	if (
+		TYPE_KEYWORD.test(assigned) ||
+		IDENTIFIER_ACCESS.test(assigned) ||
+		DOC_PLACEHOLDER.test(assigned)
+	)
+		return false;
+	return true;
+}
+
 export function scanSecretCategories(value: string): string[] {
-	return SECRET_PATTERNS.filter(({ pattern }) => {
+	const categories = new Set<string>();
+	for (const { category, pattern } of SECRET_PATTERNS) {
 		pattern.lastIndex = 0;
-		const matched = pattern.test(value);
+		if (category === "secret assignment") {
+			for (const match of value.matchAll(pattern)) {
+				if (isPlausibleSecretAssignment(match[2] ?? ""))
+					categories.add(category);
+			}
+		} else if (pattern.test(value)) categories.add(category);
 		pattern.lastIndex = 0;
-		return matched;
-	})
-		.map(({ category }) => category)
-		.sort();
+	}
+	return [...categories].sort();
 }
 
 export function sanitizeDetail(value: string, limit = 500): string {
@@ -55,6 +81,7 @@ export function sanitizeDetail(value: string, limit = 500): string {
 		pattern.lastIndex = 0;
 		redacted = redacted.replace(pattern, (_match, prefix, assigned) => {
 			if (category !== "secret assignment") return "[redacted]";
+			if (!isPlausibleSecretAssignment(assigned ?? "")) return _match;
 			const quote = assigned?.match(/^["']/)?.[0] ?? "";
 			return `${prefix}${quote}[redacted]${quote}`;
 		});

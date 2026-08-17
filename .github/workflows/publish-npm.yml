@@ -47,6 +47,8 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
           tarball="$(node scripts/assert-one-tarball.mjs package)"
           node --input-type=module - "$tarball" <<'NODE'
           import { execFileSync } from "node:child_process";
@@ -63,13 +65,25 @@ jobs:
           )[0];
           if (receipt.sourceSha !== process.env.SOURCE_SHA ||
               receipt.tag !== process.env.TAG ||
+              verification.binVersion !== pkg.version ||
+              receipt.version !== pkg.version ||
+              receipt.tag !== `v${pkg.version}` ||
               receipt.e2eReceipt?.status !== "passed" ||
+              receipt.e2eReceipt?.packageVersion !== pkg.version ||
+              receipt.freshInstallReceipt?.sourceSha !==
+                process.env.SOURCE_SHA ||
+              receipt.freshInstallReceipt?.version !== pkg.version ||
+              receipt.freshInstallReceipt?.integrity !==
+                verification.integrity ||
+              !receipt.freshInstallReceipt?.cleanup?.packageRemoved ||
+              !receipt.freshInstallReceipt?.cleanup?.prefixRemoved ||
+              !receipt.freshInstallReceipt?.cleanup?.piHomeRemoved ||
               receipt.tarballIntegrity !== verification.integrity ||
               receipt.tarballIntegrity !== pkg.integrity ||
-              !pkg.version.includes("-"))
+              pkg.version.includes("-"))
             throw new Error("npm candidate receipt is invalid");
           NODE
           test "$(npm config get registry)" = "https://registry.npmjs.org/"
           echo "tarball=$tarball" >> "$GITHUB_ENV"
-      - name: Publish the verified tarball with the prerelease dist-tag
-        run: npm publish "$tarball" --provenance --access public --tag alpha
+      - name: Publish the verified release tarball
+        run: npm publish "$tarball" --provenance --access public --tag latest

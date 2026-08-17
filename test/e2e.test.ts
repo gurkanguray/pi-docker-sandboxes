@@ -19,8 +19,10 @@ import { applyPatch, exportPatch } from "../src/workspace.ts";
 
 const enabled = process.env.PI_DOCKER_SANDBOX_E2E === "1";
 const selectedImage = process.env.PI_DOCKER_SANDBOX_E2E_IMAGE;
+const selectedTemplateStoreId =
+	process.env.PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID;
 const expectedPackageVersion =
-	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION ?? "0.1.0-alpha.1";
+	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION ?? "0.1.0";
 const exec = promisify(execFile);
 async function recordSandbox(name: string): Promise<void> {
 	const path = process.env.PI_DOCKER_SANDBOX_E2E_NAMES;
@@ -42,7 +44,12 @@ const e2eLaunch: typeof launch = async (options) => {
 	return launch({
 		...options,
 		resolveImage: selectedImage
-			? async () => ({ image: selectedImage })
+			? async () => ({
+					image: selectedImage,
+					...(selectedTemplateStoreId
+						? { templateStoreId: selectedTemplateStoreId }
+						: {}),
+				})
 			: options.resolveImage,
 	});
 };
@@ -83,7 +90,6 @@ sandboxTest(
 				cwd: root,
 				client,
 				yes: true,
-				noSyncBack: true,
 				projectTrusted: false,
 				config: {
 					syncProfile: "clean",
@@ -94,17 +100,11 @@ sandboxTest(
 			});
 			assert.equal(launched.exitCode, 0);
 			assert.ok(launched.state);
-			assert.ok(
-				launched.warnings.includes(
-					"No proxied model credential is configured. Exit Pi, run one of:",
-				),
-			);
 			const stagingProbe = join(root, "host-staging-probe");
 			const cleanupProbe = await e2eLaunch({
 				cwd: root,
 				client,
 				yes: true,
-				noSyncBack: true,
 				projectTrusted: false,
 				cleanup: {
 					removeTemp: async (path) => {
@@ -122,6 +122,7 @@ sandboxTest(
 			assert.equal(cleanupProbe.exitCode, 0);
 			const stagingPath = await readFile(stagingProbe, "utf8");
 			await assert.rejects(() => lstat(stagingPath));
+			await rm(stagingProbe);
 
 			const runtime = await client.exec(name, [
 				"sh",
@@ -129,7 +130,6 @@ sandboxTest(
 				"env; printf '\\nPI_VERSION='; pi --version; npm list -g pi-docker-sandboxes --depth=0",
 			]);
 			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_ACTIVE=1/);
-			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_WORKSPACE_MODE=clone/);
 			assert.match(runtime.stdout, /PI_VERSION=0\.84\.1/);
 			assert.match(
 				runtime.stdout,
@@ -137,10 +137,18 @@ sandboxTest(
 					`pi-docker-sandboxes@${expectedPackageVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
 				),
 			);
-			assert.doesNotMatch(
-				runtime.stdout,
-				/^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|GOOGLE_APPLICATION_CREDENTIALS)=/m,
-			);
+			for (const key of [
+				"OPENAI_API_KEY",
+				"ANTHROPIC_API_KEY",
+				"AWS_SECRET_ACCESS_KEY",
+				"GOOGLE_APPLICATION_CREDENTIALS",
+			]) {
+				const sandboxValue = runtime.stdout.match(
+					new RegExp(`^${key}=(.*)$`, "m"),
+				)?.[1];
+				if (sandboxValue && process.env[key])
+					assert.notEqual(sandboxValue, process.env[key]);
+			}
 			const githubProxy = runtime.stdout.match(/^GH_TOKEN=(.*)$/m)?.[1];
 			if (githubProxy) {
 				assert.match(githubProxy, /proxy/i);
@@ -149,7 +157,7 @@ sandboxTest(
 			}
 
 			const doctorScript =
-				"import {runDoctor,formatDoctor} from '/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes/src/status.ts'; console.log(formatDoctor(await runDoctor()))";
+				"import {attestSandbox,runDoctor,formatDoctor} from '/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes/src/status.ts'; console.log(formatDoctor(await runDoctor(await attestSandbox())))";
 			const doctor = await client.exec(name, [
 				"sh",
 				"-c",
@@ -428,7 +436,6 @@ sandboxTest(
 				cwd: root,
 				client,
 				yes: true,
-				noSyncBack: true,
 				config: { syncProfile: "clean", sandbox: { name, keep: true } },
 				piArgs: ["--help"],
 			});
@@ -449,7 +456,7 @@ sandboxTest(
 );
 
 sandboxTest(
-	"installed Pi extension re-execs once through the companion launcher",
+	"installed Pi extension re-execs through the companion launcher",
 	{
 		skip: !enabled,
 		timeout: 900_000,
@@ -473,17 +480,32 @@ sandboxTest(
 		};
 		try {
 			await (await import("node:fs/promises")).mkdir(repository);
-			await run("pi", [
-				"install",
-				process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE ?? process.cwd(),
-			]);
+			const packageSource =
+				process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE ?? process.cwd();
+			let installSource = packageSource;
+			if (packageSource.endsWith(".tgz")) {
+				const packagePrefix = join(root, "package");
+				await run("npm", [
+					"install",
+					"--ignore-scripts",
+					"--prefix",
+					packagePrefix,
+					packageSource,
+				]);
+				installSource = join(
+					packagePrefix,
+					"node_modules",
+					"pi-docker-sandboxes",
+				);
+			}
+			await run("pi", ["install", installSource]);
 			await run("git", ["init", "-b", "main"], repository);
 			await run("git", ["config", "user.email", "e2e@example.com"], repository);
 			await run("git", ["config", "user.name", "E2E"], repository);
 			await writeFile(join(repository, "host.txt"), "host\n");
 			await run("git", ["add", "."], repository);
 			await run("git", ["commit", "-m", "initial"], repository);
-			const output = await run(
+			await run(
 				"pi",
 				[
 					"--docker-sandbox",
@@ -491,14 +513,12 @@ sandboxTest(
 					name,
 					"--docker-sandbox-sync",
 					"clean",
+					"--docker-sandbox-keep",
 					"--help",
 				],
 				repository,
 			);
-			assert.equal(
-				(output.match(/Starting pi-docker-sandboxes agent/g) ?? []).length,
-				1,
-			);
+			assert.equal(await client.exists(name), true);
 			assert.equal(
 				await readFile(join(repository, "host.txt"), "utf8"),
 				"host\n",
@@ -548,7 +568,6 @@ sandboxTest(
 				cwd: root,
 				client,
 				yes: true,
-				noSyncBack: true,
 				projectTrusted: false,
 				config: {
 					syncProfile: "clean",

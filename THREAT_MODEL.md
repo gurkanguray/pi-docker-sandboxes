@@ -38,13 +38,16 @@ The host extension invokes `sbx` only through argv arrays. The microVM, clone wo
 
 ## Explicit limitations
 
+- A separate same-UID host process that concurrently renames user-owned repository paths is out of scope; it can already read or alter the protected host assets. Static symlinks and launcher-observed path replacement are rejected before state bytes are written.
 - The sandbox can read repository content and secrets committed there.
 - Allowed destinations can still be malicious or compromised.
 - Credentials deliberately stored inside the VM are readable by VM processes.
+- With host-auth enabled, sanitized OAuth entries are copied only after Kit validation and image attestation; they are never embedded in Kit files. `--no-host-auth` disables this copy.
+- API keys are persisted through `sbx secret set` only after non-secret launch preflight succeeds.
 - Clone mode protects host writes but exposes host source read-only.
 - Kit setup commands run with substantial privileges inside the VM.
 - `shell-docker` exposes `/var/run/docker.sock` for the VM's private daemon; distinct daemon identity and host invisibility are tested.
 - The launcher does not pass host `SSH_AUTH_SOCK`. Docker Sandboxes may independently provide a proxy socket for a host SSH agent and expose proxy-managed GitHub sentinels. Private keys/raw tokens remain host-side, but sandbox code may request SSH signatures to network destinations policy permits.
-- Direct mode is weaker and remains explicit opt-in.
 - Docker Kit schema and behavior are experimental.
+- The sandbox base image and its Docker/VM tools are upstream Docker components. This project pins and scans them but does not control or rebuild their remediation; accepted inherited findings are recorded as release evidence.
 - This package does not prevent prompt injection or audit arbitrary project code.

@@ -21,70 +21,17 @@ import {
 	writeJsonAtomic,
 } from "../src/migration.ts";
 
-test("legacy defaults migrate in memory with warnings", () => {
+test("current config is preserved without migration warnings", () => {
 	const fixture = {
-		version: 1,
-		syncProfile: "balanced",
+		version: 1 as const,
+		syncProfile: "custom" as const,
 		sandbox: { keep: true },
 	};
 	const migrated = migrateConfig(fixture, "fixture");
 	assert.equal(migrated.sourceVersion, 1);
-	assert.equal(migrated.migrated, true);
-	assert.deepEqual(migrated.value, {
-		version: 1,
-		syncProfile: "custom",
-		sync: {
-			settings: true,
-			models: true,
-			packages: false,
-			skills: false,
-			prompts: false,
-			themes: false,
-			extensions: false,
-			sessions: "managed",
-		},
-		sandbox: { keep: false },
-	});
-	assert.ok(
-		migrated.warnings.some((warning) => /safe personalization/i.test(warning)),
-	);
-	assert.ok(
-		migrated.warnings.some((warning) => /remove.*default/i.test(warning)),
-	);
-	assert.deepEqual(fixture, {
-		version: 1,
-		syncProfile: "balanced",
-		sandbox: { keep: true },
-	});
-});
-
-test("explicit legacy personalization values are distinguished from old defaults", () => {
-	const explicit = migrateConfig(
-		{
-			version: 1,
-			syncProfile: "balanced",
-			sync: {
-				settings: true,
-				models: true,
-				packages: true,
-				skills: true,
-				prompts: false,
-				themes: false,
-				extensions: false,
-				sessions: "managed",
-			},
-		},
-		"fixture",
-	);
-	assert.equal(explicit.value.syncProfile, "custom");
-	assert.equal(explicit.value.sync?.packages, true);
-	assert.equal(explicit.value.sync?.skills, true);
-	assert.equal(
-		explicit.warnings.some((warning) =>
-			/packages and resources now require explicit opt-in/i.test(warning),
-		),
-		true,
-	);
+	assert.equal(migrated.migrated, false);
+	assert.deepEqual(migrated.value, fixture);
+	assert.deepEqual(migrated.warnings, []);
 });
 
 test("state migration rejects unknown versions with preservation instructions", () => {
@@ -116,6 +63,14 @@ test("state migration accepts strict optional local image attestation", () => {
 		workspaceMode: "clone",
 		createdAt: "2026-08-12T00:00:00.000Z",
 	};
+	assert.throws(
+		() =>
+			migrateSandboxState(
+				{ ...base, workspaceMode: "direct" },
+				"/tmp/state.json",
+			),
+		/preserve \/tmp\/state\.json/i,
+	);
 	assert.equal(
 		migrateSandboxState(base, "/tmp/state.json").value.imageAttestation,
 		undefined,
@@ -129,6 +84,17 @@ test("state migration accepts strict optional local image attestation", () => {
 		migrateSandboxState({ ...base, imageAttestation }, "/tmp/state.json").value
 			.imageAttestation,
 		imageAttestation,
+	);
+	const remoteAttestation = {
+		status: "verified" as const,
+		image: `example.invalid/pi@sha256:${"b".repeat(64)}`,
+	};
+	assert.deepEqual(
+		migrateSandboxState(
+			{ ...base, imageAttestation: remoteAttestation },
+			"/tmp/state.json",
+		).value.imageAttestation,
+		remoteAttestation,
 	);
 	for (const mutation of [
 		{ ...imageAttestation, unexpected: true },

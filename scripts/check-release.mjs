@@ -1,10 +1,29 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
+const APPROVED_BASE_IMAGE =
+	"docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299";
+const APPROVED_TRIVY_POLICY_SHA256 =
+	"3eaef1efc293ef48b66b6d930e19d285fa67f141e0f44e39a32bf7213a65cc50";
 const exec = promisify(execFile);
 const root = process.cwd();
+const SAFE_GIT_ARGS = [
+	"-c",
+	"core.hooksPath=/dev/null",
+	"-c",
+	"core.fsmonitor=false",
+	"-c",
+	"commit.gpgSign=false",
+	"-c",
+	"tag.gpgSign=false",
+	"-c",
+	"gpg.format=openpgp",
+	"-c",
+	"gpg.program=gpg",
+];
 
 function fail(message) {
 	throw new Error(message);
@@ -16,7 +35,9 @@ async function json(path) {
 
 async function git(args, operation = `git ${args.join(" ")}`) {
 	try {
-		return (await exec("git", args, { cwd: root })).stdout.trim();
+		return (
+			await exec("git", [...SAFE_GIT_ARGS, ...args], { cwd: root })
+		).stdout.trim();
 	} catch (error) {
 		throw new Error(
 			`${operation} failed: ${String(error?.stderr ?? error?.message ?? error).trim()}`,
@@ -31,49 +52,47 @@ function escapeRegExp(value) {
 function argumentsFrom(argv) {
 	let tag;
 	let allowUnreleased = false;
-	let imageCandidate = false;
 	for (let index = 0; index < argv.length; index += 1) {
 		const argument = argv[index];
 		if (argument === "--allow-unreleased") allowUnreleased = true;
-		else if (argument === "--image-candidate") imageCandidate = true;
 		else if (argument === "--tag") tag = argv[++index];
 		else fail(`Unknown argument: ${argument}`);
 	}
-	if (!tag || (allowUnreleased && imageCandidate))
+	if (!tag)
 		fail(
-			"Usage: node scripts/check-release.mjs [--allow-unreleased | --image-candidate] --tag vX.Y.Z[-prerelease][-oci.N]",
+			"Usage: node scripts/check-release.mjs [--allow-unreleased] --tag vX.Y.Z",
 		);
-	return { tag, allowUnreleased, imageCandidate };
+	return { tag, allowUnreleased };
 }
 
 try {
-	const { tag, allowUnreleased, imageCandidate } = argumentsFrom(
-		process.argv.slice(2),
-	);
-	const [pkg, packageLock, imageLock, changelogText, compatibility] =
-		await Promise.all([
-			json("package.json"),
-			json("package-lock.json"),
-			json("docker/image-lock.json"),
-			readFile(`${root}/CHANGELOG.md`, "utf8"),
-			readFile(`${root}/COMPATIBILITY.md`, "utf8"),
-		]);
+	const { tag, allowUnreleased } = argumentsFrom(process.argv.slice(2));
+	const [
+		pkg,
+		packageLock,
+		imageLock,
+		trivyPolicyText,
+		changelogText,
+		compatibility,
+	] = await Promise.all([
+		json("package.json"),
+		json("package-lock.json"),
+		json("docker/image-lock.json"),
+		readFile(`${root}/.trivyignore.yaml`, "utf8"),
+		readFile(`${root}/CHANGELOG.md`, "utf8"),
+		readFile(`${root}/COMPATIBILITY.md`, "utf8"),
+	]);
+	const trivyExceptions = JSON.parse(trivyPolicyText);
 	if (
-		!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*)|(?:\d*[A-Za-z-][0-9A-Za-z-]*))(?:\.(?:(?:0|[1-9]\d*)|(?:\d*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(
+		!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
 			pkg.version,
 		)
 	)
 		fail(`Package version is not exact semver: ${pkg.version}`);
 	const expectedTag = `v${pkg.version}`;
-	const expectedCandidate = new RegExp(
-		`^${escapeRegExp(expectedTag)}-oci\\.(?:0|[1-9]\\d*)$`,
-	);
-	if (
-		(imageCandidate && !expectedCandidate.test(tag)) ||
-		(!imageCandidate && tag !== expectedTag)
-	)
+	if (tag !== expectedTag)
 		fail(
-			`Tag must ${imageCandidate ? `match ${expectedTag}-oci.N` : `exactly match package version: expected ${expectedTag}`}, received ${tag}`,
+			`Tag must exactly match package version: expected ${expectedTag}, received ${tag}`,
 		);
 	console.log(`✓ tag/version: ${tag}`);
 
@@ -111,16 +130,81 @@ try {
 		).test(compatibility)
 	)
 		fail(`COMPATIBILITY Pi version must match ${piVersion}`);
-	if (imageLock.publishedImage == null) {
-		if (!allowUnreleased && !imageCandidate)
-			fail("Published image must be present and pinned by sha256 digest");
-	} else if (
-		typeof imageLock.publishedImage !== "string" ||
-		!/@sha256:[0-9a-f]{64}$/.test(imageLock.publishedImage)
-	)
-		fail("Published image must be pinned by sha256 digest");
 	console.log(
-		`✓ image lock: package=${imageLock.packageVersion} pi=${imageLock.piVersion} image=${imageLock.publishedImage ?? "unreleased"}`,
+		`✓ image lock: package=${imageLock.packageVersion} pi=${imageLock.piVersion}`,
+	);
+
+	if (!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(imageLock.baseImage ?? ""))
+		fail("Image lock base image must use an immutable sha256 digest");
+	if (
+		!trivyExceptions ||
+		Array.isArray(trivyExceptions) ||
+		JSON.stringify(Object.keys(trivyExceptions).sort()) !==
+			JSON.stringify(["vulnerabilities"])
+	)
+		fail("Trivy exceptions must contain only a vulnerabilities array");
+	if (!Array.isArray(trivyExceptions.vulnerabilities))
+		fail("Trivy exceptions vulnerabilities must be an array");
+	const exceptionIds = new Set();
+	const exceptionPaths = new Set();
+	for (const exception of trivyExceptions.vulnerabilities) {
+		if (
+			!exception ||
+			Array.isArray(exception) ||
+			JSON.stringify(Object.keys(exception).sort()) !==
+				JSON.stringify(["id", "paths", "statement"])
+		)
+			fail("Each Trivy exception must contain only id, paths, and statement");
+		if (!/^CVE-\d{4}-\d{4,}$/.test(exception.id ?? ""))
+			fail("Trivy exception IDs must be CVE identifiers");
+		if (exceptionIds.has(exception.id))
+			fail(`Duplicate Trivy exception ID: ${exception.id}`);
+		exceptionIds.add(exception.id);
+		if (!Array.isArray(exception.paths) || exception.paths.length === 0)
+			fail(`Trivy exception ${exception.id} must use at least one scoped path`);
+		if (
+			typeof exception.statement !== "string" ||
+			!exception.statement.includes(imageLock.baseImage)
+		)
+			fail(`Trivy exception ${exception.id} must name the locked base image`);
+		if (!exception.statement.includes("upstream Docker-owned"))
+			fail(`Trivy exception ${exception.id} must identify upstream ownership`);
+		const reviewed = exception.statement.match(
+			/\breviewed (\d{4}-\d{2}-\d{2})\b/i,
+		)?.[1];
+		if (
+			!reviewed ||
+			new Date(`${reviewed}T00:00:00Z`).toISOString().slice(0, 10) !== reviewed
+		)
+			fail(`Trivy exception ${exception.id} must include a valid review date`);
+		for (const path of exception.paths) {
+			const segments = typeof path === "string" ? path.split("/") : [];
+			if (
+				typeof path !== "string" ||
+				!/^[A-Za-z0-9._+/-]+$/.test(path) ||
+				path.startsWith("/") ||
+				segments.some(
+					(segment) => !segment || segment === "." || segment === "..",
+				)
+			)
+				fail(`Trivy exception ${exception.id} has an invalid scoped path`);
+			const key = `${exception.id}\0${path}`;
+			if (exceptionPaths.has(key))
+				fail(`Trivy exception ${exception.id} repeats scoped path ${path}`);
+			exceptionPaths.add(key);
+		}
+	}
+	if (imageLock.baseImage !== APPROVED_BASE_IMAGE)
+		fail(`Image lock base image must equal approved base image ${APPROVED_BASE_IMAGE}`);
+	const trivyPolicySha256 = createHash("sha256")
+		.update(trivyPolicyText)
+		.digest("hex");
+	if (trivyPolicySha256 !== APPROVED_TRIVY_POLICY_SHA256)
+		fail(
+			`Trivy exceptions must match approved Trivy policy ${APPROVED_TRIVY_POLICY_SHA256}`,
+		);
+	console.log(
+		`✓ Trivy exceptions: ${exceptionIds.size} CVEs / ${exceptionPaths.size} scoped paths`,
 	);
 
 	const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
@@ -142,8 +226,6 @@ try {
 			version: pkg.version,
 			commit,
 			changelog,
-			imageLock: imageLock.publishedImage,
-			imageCandidate,
 			clean: true,
 		}),
 	);

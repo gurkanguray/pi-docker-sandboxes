@@ -5,7 +5,7 @@ import {
 	parseSbxTemplateImages,
 } from "../src/local-template.ts";
 
-const localImage = "docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1";
+const localImage = "docker.io/pi-docker-sandboxes/pi:0.1.0";
 const hex = "a".repeat(64);
 const contentImage = `docker.io/pi-docker-sandboxes/pi:local-${hex}`;
 

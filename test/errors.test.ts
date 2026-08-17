@@ -68,6 +68,16 @@ test("preserves ordinary prose containing basic", () => {
 	);
 });
 
+test("secret assignment ignores type annotations and identifiers", () => {
+	assert.deepEqual(
+		scanSecretCategories("API_KEY: string; // From secrets\nconst apiKey = env.API_KEY;"),
+		[],
+	);
+	assert.deepEqual(scanSecretCategories("token=opaqueCredential"), [
+		"secret assignment",
+	]);
+});
+
 test("sanitized detail is bounded and single-line", () => {
 	const detail = sanitizeDetail(
 		`https://url-user:url-password@host/path\n${"x".repeat(600)}`,

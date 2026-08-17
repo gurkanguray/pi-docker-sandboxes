@@ -124,17 +124,29 @@ jobs:
         env:
           EXPECTED_DIGEST: ${{ inputs.image_digest }}
           IMAGE_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-image
+          IMAGE_ARTIFACT_NAME: ${{ inputs.image_artifact }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          expected_artifact="oci-candidate-$SOURCE_SHA"
+          test "$IMAGE_ARTIFACT_NAME" = "$expected_artifact"
           archive="$IMAGE_ARTIFACT/candidate-image.oci.tar"
+          receipt="$IMAGE_ARTIFACT/image-verification.json"
           test -s "$archive"
+          test -s "$receipt"
           mkdir "$IMAGE_ARTIFACT/oci"
           tar -xf "$archive" -C "$IMAGE_ARTIFACT/oci" index.json
           actual="$(node -p \
             'require(process.argv[1]).manifests[0].digest' \
             "$IMAGE_ARTIFACT/oci/index.json")"
           test "$actual" = "$EXPECTED_DIGEST"
+          node --input-type=module - "$receipt" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const receipt = JSON.parse(await readFile(process.argv[2]));
+          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
+              receipt.ociDigest !== process.env.EXPECTED_DIGEST)
+            throw new Error("candidate image receipt mismatch");
+          NODE
           skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
           docker run --rm --volume "$IMAGE_ARTIFACT:/candidate:ro" \
             --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
@@ -147,11 +159,28 @@ jobs:
           docker tag "$image_id" "$selected"
           docker save --output "$IMAGE_ARTIFACT/sbx-candidate.tar" "$selected"
           sbx template load "$IMAGE_ARTIFACT/sbx-candidate.tar"
-          sbx template ls --json | grep -F "${selected##*:}" >/dev/null
+          sbx template ls --json > "$IMAGE_ARTIFACT/templates.json"
+          template_store_id="$(node --input-type=module - \
+            "$IMAGE_ARTIFACT/templates.json" "$selected" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const [path, selected] = process.argv.slice(2);
+          const separator = selected.lastIndexOf(":");
+          const repository = selected.slice(0, separator);
+          const tag = selected.slice(separator + 1);
+          const templates = JSON.parse(await readFile(path));
+          const matches = (templates.images ?? []).filter(
+            (image) => image.repository === repository && image.tag === tag,
+          );
+          if (matches.length !== 1) process.exit(1);
+          if (!/^[a-f0-9]{12,}$/.test(matches[0]?.id ?? "")) process.exit(1);
+          console.log(matches[0].id);
+          NODE
+          )"
           {
             echo "candidate_digest=$actual"
             echo "selected_image=$selected"
             echo "selected_image_id=$image_id"
+            echo "template_store_id=$template_store_id"
           } >> "$GITHUB_OUTPUT"
       - name: Bind candidate inputs and install in a clean prefix
         id: candidate
@@ -194,6 +223,8 @@ jobs:
           PI_DOCKER_SANDBOX_E2E: "1"
           PI_DOCKER_SANDBOX_E2E_IMAGE: >-
             ${{ steps.image.outputs.selected_image }}
+          PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID: >-
+            ${{ steps.image.outputs.template_store_id }}
           PI_DOCKER_SANDBOX_E2E_NAMES: >-
             ${{ runner.temp }}/e2e-sandboxes.txt
           PI_DOCKER_SANDBOX_E2E_PACKAGE: ${{ steps.candidate.outputs.tarball }}

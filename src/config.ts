@@ -3,13 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { assertDigestReference } from "./image-lock.ts";
 
-export type SecurityProfile =
-	| "hardened"
-	| "development"
-	| "research"
-	| "browser";
-export type SyncProfile = "clean" | "balanced" | "mirror" | "custom";
-export type WorkspaceMode = "clone" | "direct";
+export type SecurityProfile = "hardened" | "development";
+export type SyncProfile = "clean" | "mirror" | "custom";
 export interface SyncOptions {
 	settings: boolean;
 	models: boolean;
@@ -18,7 +13,7 @@ export interface SyncOptions {
 	prompts: boolean;
 	themes: boolean;
 	extensions: boolean;
-	sessions: "managed" | "sandbox" | "ephemeral";
+	sessions: "managed" | "sandbox";
 }
 export interface CredentialService {
 	id: string;
@@ -34,8 +29,6 @@ export interface DockerSandboxConfig {
 	profile: SecurityProfile;
 	syncProfile: SyncProfile;
 	sync: SyncOptions;
-	workspaceMode: WorkspaceMode;
-	shareSkills: boolean;
 	sandbox: {
 		name?: string;
 		keep: boolean;
@@ -43,7 +36,6 @@ export interface DockerSandboxConfig {
 		image?: string;
 	};
 	providers: string[];
-	services: CredentialService[];
 	network: { allow: string[]; deny: string[] };
 	export: { onExit: "prompt" | "always" | "never"; directory: string };
 }
@@ -63,11 +55,8 @@ export const DEFAULT_CONFIG: DockerSandboxConfig = {
 		extensions: false,
 		sessions: "managed",
 	},
-	workspaceMode: "clone",
-	shareSkills: false,
 	sandbox: { keep: false, dockerEngine: true },
 	providers: [],
-	services: [],
 	network: { allow: [], deny: [] },
 	export: { onExit: "prompt", directory: ".git/pi-docker-sandbox/patches" },
 };
@@ -78,11 +67,8 @@ const ROOT_KEYS = new Set([
 	"profile",
 	"syncProfile",
 	"sync",
-	"workspaceMode",
-	"shareSkills",
 	"sandbox",
 	"providers",
-	"services",
 	"network",
 	"export",
 ]);
@@ -99,25 +85,8 @@ const SYNC_KEYS = new Set([
 	"sessions",
 ]);
 const EXPORT_KEYS = new Set(["onExit", "directory"]);
-const SERVICE_KEYS = new Set([
-	"id",
-	"envVar",
-	"domains",
-	"headerName",
-	"valueFormat",
-]);
-const PROFILES = new Set<SecurityProfile>([
-	"hardened",
-	"development",
-	"research",
-	"browser",
-]);
-const SYNC_PROFILES = new Set<SyncProfile>([
-	"clean",
-	"balanced",
-	"mirror",
-	"custom",
-]);
+const PROFILES = new Set<SecurityProfile>(["hardened", "development"]);
+const SYNC_PROFILES = new Set<SyncProfile>(["clean", "mirror", "custom"]);
 
 function object(value: unknown, path: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value))
@@ -191,32 +160,6 @@ export function validateDomain(domain: string, allowWildcard = true): string {
 	return domain.toLowerCase();
 }
 
-function parseService(value: unknown, path: string): CredentialService {
-	const input = object(value, path);
-	rejectUnknown(input, SERVICE_KEYS, `${path}.`);
-	const id = string(input.id, `${path}.id`);
-	const envVar = string(input.envVar, `${path}.envVar`);
-	const headerName = string(input.headerName, `${path}.headerName`);
-	const valueFormat = string(input.valueFormat, `${path}.valueFormat`);
-	if (!/^[a-z0-9][a-z0-9-]*$/.test(id))
-		throw new TypeError(`${path}.id is invalid`);
-	if (!/^[A-Z][A-Z0-9_]*$/.test(envVar))
-		throw new TypeError(`${path}.envVar is invalid`);
-	if (!/^[A-Za-z0-9-]+$/.test(headerName))
-		throw new TypeError(`${path}.headerName is invalid`);
-	if ((valueFormat.match(/%s/g) ?? []).length !== 1)
-		throw new TypeError(`${path}.valueFormat must contain exactly one %s`);
-	return {
-		id,
-		envVar,
-		headerName,
-		valueFormat,
-		domains: strings(input.domains, `${path}.domains`).map((domain) =>
-			validateDomain(domain, false),
-		),
-	};
-}
-
 export type ConfigOverride = Partial<
 	Omit<DockerSandboxConfig, "sandbox" | "sync" | "network" | "export">
 > & {
@@ -269,28 +212,13 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 		}
 		if (sync.sessions !== undefined) {
 			const value = string(sync.sessions, `${source}.sync.sessions`);
-			if (value !== "managed" && value !== "sandbox" && value !== "ephemeral")
+			if (value !== "managed" && value !== "sandbox")
 				throw new TypeError(`${source}.sync.sessions is unsupported`);
 			output.sync.sessions = value;
 		}
 	}
-	if (input.workspaceMode !== undefined) {
-		const value = string(input.workspaceMode, `${source}.workspaceMode`);
-		if (value !== "clone" && value !== "direct")
-			throw new TypeError(`${source}.workspaceMode is unsupported`);
-		output.workspaceMode = value;
-	}
-	if (input.shareSkills !== undefined)
-		output.shareSkills = boolean(input.shareSkills, `${source}.shareSkills`);
 	if (input.providers !== undefined)
 		output.providers = strings(input.providers, `${source}.providers`);
-	if (input.services !== undefined) {
-		if (!Array.isArray(input.services))
-			throw new TypeError(`${source}.services must be an array`);
-		output.services = input.services.map((service, index) =>
-			parseService(service, `${source}.services[${index}]`),
-		);
-	}
 	if (input.sandbox !== undefined) {
 		const sandbox = object(input.sandbox, `${source}.sandbox`);
 		rejectUnknown(sandbox, SANDBOX_KEYS, `${source}.sandbox.`);
