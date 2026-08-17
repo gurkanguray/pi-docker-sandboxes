@@ -1,45 +1,40 @@
 # Migration
 
-This public alpha keeps version 1 pre-alpha configuration and sandbox state readable while tightening defaults. Read the warnings printed before launch and review the effective configuration:
+This Early Access release keeps current version 1 configuration and clone sandbox state readable. Removed legacy fields and values are rejected rather than silently reinterpreted. Review the effective configuration:
 
 ```bash
-npm exec --package=pi-docker-sandboxes@0.1.0-alpha.1 -- pi-dsbx config
+npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx config
 ```
 
 Project configuration is read by standalone `pi-dsbx run` only with `--trust-project-config`; Pi uses its normal project-trust decision.
 
 ## Changed defaults
 
-- **Prebuilt image:** the launcher prefers the release's digest-pinned published image. When none is locked, `pi-dsbx image build` creates and verifies the local fallback.
+- **Verified image:** `pi-dsbx image build` creates and verifies the local image. A configured registry image is accepted only by immutable digest.
 - **No runtime installation:** Pi, this package, Git, `fd`, and `rg` are built into the image. The default launch does not download runtime tools.
 - **Remove clean sandboxes:** clean or successfully exported clone sandboxes are removed after exit by default. Changed or uninspectable sandboxes remain preserved. Set `sandbox.keep: true` or use `--keep` for deliberate persistence.
-- **Safe personalization:** legacy `syncProfile: "balanced"` becomes `custom` with sanitized settings and models only. Packages, skills, prompts, themes, and extensions require explicit opt-in.
-- **Dynamic proxy support:** configured providers are intersected with audited mappings and proxy capabilities discovered from the installed `sbx`. Unsupported or unconfigured services produce warnings; credentials are never copied into the VM.
+- **Safe personalization:** the default `custom` policy copies sanitized settings and model metadata only. Packages, skills, prompts, themes, and extensions require explicit opt-in.
+- **Dynamic proxy support:** configured providers are intersected with built-in audited mappings and proxy capabilities discovered from the installed `sbx`. Unsupported or unconfigured services produce warnings. API keys stay in Docker's proxy store; consented OAuth entries are copied after image attestation.
 - **Dedicated discard:** generic `--yes` cannot authorize loss of changed or unknown work. Use `--discard-changes` only after deciding that sandbox-only work may be permanently lost.
 
-## Configuration migration
+## Configuration compatibility
 
-When version 1 configuration contains legacy values, migration happens in memory and emits a warning describing the changed behavior:
-
-- `syncProfile: "balanced"` becomes the safe `custom` policy;
-- `sandbox.keep: true` becomes `false`, restoring removal of clean sandboxes by default.
-
-Review the warning and `pi-dsbx config` output. To keep old persistence behavior, explicitly set `sandbox.keep` back to `true` after review. To copy additional resources, opt into individual `sync` fields rather than restoring a broad profile.
+There is no silent configuration migration. Removed legacy modes, profiles, and fields fail validation. `sandbox.keep` is preserved exactly. To copy additional resources, opt into individual `sync` fields or the explicit `mirror` profile.
 
 Global configuration is `~/.pi/agent/docker-sandboxes.json`; trusted project configuration is `.pi/docker-sandboxes.json`. Back up a file before editing it:
 
 ```bash
-cp ~/.pi/agent/docker-sandboxes.json ~/.pi/agent/docker-sandboxes.json.pre-alpha
-cp .pi/docker-sandboxes.json .pi/docker-sandboxes.json.pre-alpha
+cp ~/.pi/agent/docker-sandboxes.json ~/.pi/agent/docker-sandboxes.json.backup
+cp .pi/docker-sandboxes.json .pi/docker-sandboxes.json.backup
 ```
 
 Skip a command when that file does not exist. Unknown fields and unsupported versions are rejected rather than discarded.
 
-## Transactional config and state migration
+## Transactional state validation
 
-Migration validates and normalizes a complete document before any replacement. State writes use a temporary owner-only file, sync it, and atomically rename it. The original remains intact if parsing, validation, launch preparation, or the write fails; a partial migration is never treated as authoritative.
+State validation completes before use. State writes use a temporary owner-only file, sync it, and atomically rename it. The original remains intact if parsing, validation, launch preparation, or the write fails; a partial write is never treated as authoritative.
 
-Sandbox state lives at `.git/pi-docker-sandbox/state/NAME.json`. If a warning says existing state was migrated, the launcher first verifies that the repository identity and base commit still match, then persists the normalized state. Do not edit state while a launch is active.
+Sandbox state lives at `.git/pi-docker-sandbox/state/NAME.json`. The launcher verifies that repository identity and base commit still match before reattachment. Do not edit state while a launch is active.
 
 ## Warnings and rollback
 

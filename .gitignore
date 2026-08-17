@@ -2,6 +2,8 @@ node_modules/
 dist/
 *.tgz
 coverage/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 .pi/
 .superpowers/
 .worktrees/

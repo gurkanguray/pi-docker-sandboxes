@@ -3,6 +3,7 @@ import test from "node:test";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import {
+	chmod,
 	lstat,
 	mkdir,
 	mkdtemp,
@@ -113,6 +114,38 @@ test("unborn repositories are identified and can receive an explicit empty commi
 	assert.equal(await git(root, "show", "--format=", "--name-only", "HEAD"), "");
 });
 
+test("empty initial commit never executes repository hooks", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-unborn-hooks-"));
+	await git(root, "init", "-b", "main");
+	await git(root, "config", "user.email", "test@example.com");
+	await git(root, "config", "user.name", "Test");
+	const marker = join(root, "hook-ran");
+	const hook = join(root, ".git", "hooks", "pre-commit");
+	await writeFile(hook, `#!/bin/sh\necho ran > ${JSON.stringify(marker)}\n`);
+	await chmod(hook, 0o755);
+	await createEmptyInitialCommit(root);
+	await assert.rejects(lstat(marker), { code: "ENOENT" });
+});
+
+test("empty initial commit never executes repository signing programs", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-unborn-signing-"));
+	await git(root, "init", "-b", "main");
+	await git(root, "config", "user.email", "test@example.com");
+	await git(root, "config", "user.name", "Test");
+	const marker = join(root, "signing-program-ran");
+	const signingProgram = join(root, "signing-program");
+	await writeFile(
+		signingProgram,
+		`#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`,
+	);
+	await chmod(signingProgram, 0o755);
+	await git(root, "config", "commit.gpgSign", "true");
+	await git(root, "config", "gpg.program", signingProgram);
+	await createEmptyInitialCommit(root);
+	await assert.rejects(lstat(marker), { code: "ENOENT" });
+	assert.equal(await git(root, "rev-list", "--count", "HEAD"), "1");
+});
+
 test("empty initial commit preserves staged content", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-staged-unborn-"));
 	await git(root, "init", "-b", "main");
@@ -177,6 +210,17 @@ test("repository inspection and names are deterministic", async () => {
 	assert.notEqual(sandboxName(root, true), sandboxName(root, true));
 });
 
+test("repository inspection never executes configured fsmonitor executables", async () => {
+	const root = await repository();
+	const marker = join(root, "fsmonitor-ran");
+	const fsmonitor = join(root, "fsmonitor");
+	await writeFile(fsmonitor, `#!/bin/sh\n: > ${JSON.stringify(marker)}\n`);
+	await chmod(fsmonitor, 0o755);
+	await git(root, "config", "core.fsmonitor", fsmonitor);
+	await inspectRepository(root);
+	await assert.rejects(lstat(marker), { code: "ENOENT" });
+});
+
 test("corrupt HEAD is not classified as unborn", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-corrupt-"));
 	await git(root, "init", "-b", "main");
@@ -232,6 +276,17 @@ test("state writes replace atomically and corrupt state has recovery context", a
 	await saveSandboxState(state);
 	await saveSandboxState({ ...state, hostBranch: "updated" });
 	assert.equal((await loadSandboxState(root, name)).hostBranch, "updated");
+	await assert.rejects(
+		saveSandboxState({
+			...state,
+			imageAttestation: {
+				status: "verified",
+				image: `docker.io/pi-docker-sandboxes/pi:local-${"a".repeat(64)}`,
+			},
+		}),
+		/imageAttestation\.image.*immutable/i,
+	);
+	assert.equal((await loadSandboxState(root, name)).hostBranch, "updated");
 	const path = statePath(root, name);
 	assert.deepEqual(
 		(await readdir(resolve(path, ".."))).filter((entry) =>
@@ -261,6 +316,20 @@ test("state writes replace atomically and corrupt state has recovery context", a
 		},
 	);
 	assert.equal(await readFile(path, "utf8"), "{");
+});
+
+test("state writes reject symlinked control directories", async () => {
+	const root = await repository();
+	const state = await sandboxState(root);
+	const outside = await mkdtemp(join(tmpdir(), "pi-dsbx-state-outside-"));
+	await symlink(outside, join(root, ".git", "pi-docker-sandbox"));
+	await assert.rejects(
+		saveSandboxState(state),
+		/symlink|containment|directory/i,
+	);
+	await assert.rejects(lstat(join(outside, "state", `${state.name}.json`)), {
+		code: "ENOENT",
+	});
 });
 
 test("state removal rejects symlink, hardlink, and replacement races", async () => {

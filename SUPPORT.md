@@ -1,16 +1,18 @@
 # Support
 
-## Supported public-alpha boundary
+## Supported Early Access boundary
 
-The supported platform is macOS ARM64 (Apple Silicon) and only the latest `0.1.0-alpha.x` package release. The exact tested Pi, Node.js, Docker Sandboxes, Docker Engine, and Kit versions are in the [compatibility matrix](COMPATIBILITY.md). Docker Kit APIs remain experimental.
+The exact tested host is macOS 26.5.2 on Apple Silicon (macOS ARM64); no other macOS release is claimed. Only the latest `0.1.x` package release is supported. The exact tested Pi, Node.js, Docker Sandboxes, Docker Engine, and Kit versions are in the [compatibility matrix](COMPATIBILITY.md). Docker Kit APIs remain experimental.
 
-Support covers the Pi extension, the `pi-dsbx` CLI, `pi --docker-sandbox`, default clone mode, and the documented image, credential-proxy, export, and cleanup paths. A stable programmatic library API is not supported.
+Support covers the Pi extension, the `pi-dsbx` CLI, `pi --docker-sandbox`, private clone mode, and the documented local-image, credential-proxy, export, and cleanup paths. A stable programmatic library API is not supported.
 
-Linux and Windows reports are welcome but unsupported until real platform E2E evidence exists. Older alpha releases, unlisted component versions, direct mode, shared writable skills, sandbox-local credentials, and modified images may be useful diagnostic reports but are outside the supported boundary.
+Linux and Windows reports are welcome but unsupported until real platform E2E evidence exists. Older releases, unlisted component versions, sandbox-local credentials, and modified images may be useful diagnostic reports but are outside the supported boundary.
 
 ## Getting help
 
-Search [existing issues](https://github.com/gurkanguray/pi-docker-sandboxes/issues), then open a public issue for non-security bugs or questions. Include:
+Search [existing issues](https://github.com/gurkanguray/pi-docker-sandboxes/issues). Use the structured [bug report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=bug.yml) for reproducible problems or the [question form](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=question.yml) for usage questions within the supported boundary.
+
+When reporting a bug, include:
 
 - the package version and relevant [compatibility](COMPATIBILITY.md) versions;
 - whether the host is macOS ARM64;

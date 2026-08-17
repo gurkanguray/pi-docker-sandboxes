@@ -1,6 +1,6 @@
 name: Bug report
 description: >-
-  Report a reproducible problem on the supported public-alpha platform.
+  Report a reproducible problem on the supported platform.
 title: "[Bug]: "
 labels:
   - bug
@@ -15,8 +15,8 @@ body:
     id: package_version
     attributes:
       label: Package version
-      description: Output of `pi-dsbx --version`, if available.
-      placeholder: 0.1.0-alpha.1
+      description: Version shown by `pi list` or your npm installation record.
+      placeholder: 0.1.0
     validations:
       required: true
   - type: input
@@ -44,8 +44,10 @@ body:
     id: macos_version
     attributes:
       label: macOS version
-      description: Give only the version number; do not paste system reports.
-      placeholder: "26.1"
+      description: >-
+        Give only the version number; do not paste system reports. Other macOS
+        versions: use the unsupported-platform form; reports are welcome.
+      placeholder: "26.5.2"
     validations:
       required: true
   - type: dropdown

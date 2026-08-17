@@ -22,26 +22,11 @@ export const NETWORK_PROFILES: Readonly<
 			"api.github.com",
 			"raw.githubusercontent.com",
 			"objects.githubusercontent.com",
+			"api.openai.com",
+			"chatgpt.com",
+			"api.x.ai",
+			"openrouter.ai",
 		],
-		deny: [],
-	},
-	research: {
-		name: "research",
-		allow: [
-			"registry.npmjs.org",
-			"github.com",
-			"api.github.com",
-			"raw.githubusercontent.com",
-			"objects.githubusercontent.com",
-			"docs.docker.com",
-			"pi.dev",
-		],
-		deny: [],
-	},
-	// Browser mode still requires explicit destinations; it never becomes unrestricted implicitly.
-	browser: {
-		name: "browser",
-		allow: ["registry.npmjs.org"],
 		deny: [],
 	},
 });

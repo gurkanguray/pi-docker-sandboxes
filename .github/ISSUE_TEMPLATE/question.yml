@@ -1,0 +1,52 @@
+name: Question
+
+description: Ask about a workflow within the supported platform boundary.
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask only about the supported platform boundary.
+        Do not include credentials, secrets, private source, environment dumps,
+        or sensitive patch contents.
+  - type: dropdown
+    id: supported_area
+    attributes:
+      label: Supported area
+      description: Which documented, supported workflow is your question about?
+      options:
+        - Pi extension or pi --docker-sandbox
+        - pi-dsbx CLI
+        - Private clone mode
+        - Local image, credential proxy, export, or cleanup
+    validations:
+      required: true
+  - type: input
+    id: package_version
+    attributes:
+      label: Package version
+      description: Version shown by `pi list` or your npm installation record.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: >-
+        Provide only the context needed to understand the supported workflow.
+        Do not paste credentials, secrets, private source, logs, or environment
+        dumps.
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Public information confirmation
+      options:
+        - label: >-
+            I included no credentials, secrets, private source, or sensitive
+            information.
+          required: true

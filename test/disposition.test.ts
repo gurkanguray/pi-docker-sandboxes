@@ -35,15 +35,9 @@ test("all 48 disposition combinations follow the data-loss policy", () => {
 							exportSucceeded,
 							discardAuthorized,
 						};
-						const decision = decideDisposition(input);
 						assert.equal(
-							decision.action,
+							decideDisposition(input),
 							expected(input),
-							JSON.stringify(input),
-						);
-						assert.equal(
-							decision.meaningful,
-							!exportSucceeded || exportRequested,
 							JSON.stringify(input),
 						);
 						count++;
@@ -59,32 +53,14 @@ test("priority mutations cannot turn keep or failed export into removal", () => 
 		exportSucceeded: false,
 		discardAuthorized: true,
 	};
-	assert.equal(decideDisposition(removable).action, "remove");
-	assert.equal(
-		decideDisposition({ ...removable, keep: true }).action,
-		"preserve",
-	);
+	assert.equal(decideDisposition(removable), "remove");
+	assert.equal(decideDisposition({ ...removable, keep: true }), "preserve");
 	assert.equal(
 		decideDisposition({
 			...removable,
 			exportRequested: true,
 			exportSucceeded: false,
-		}).action,
+		}),
 		"preserve",
 	);
-});
-
-test("successful export is meaningful only when requested", () => {
-	const impossible = decideDisposition({
-		keep: false,
-		changes: "changed",
-		exportRequested: false,
-		exportSucceeded: true,
-		discardAuthorized: false,
-	});
-	assert.deepEqual(impossible, {
-		action: "preserve",
-		reason: "unexported-changes",
-		meaningful: false,
-	});
 });

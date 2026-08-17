@@ -14,26 +14,26 @@ sbx exec NAME git status --porcelain=v1
 Export changed clone work while the package, repository state, and sandbox still exist:
 
 ```bash
-npm exec --package=pi-docker-sandboxes@0.1.0-alpha.1 -- pi-dsbx export --name NAME
+npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx export --name NAME
 ```
 
-Review and back up the patch under `.git/pi-docker-sandbox/patches/`. Direct-mode changes already write to the host, so inspect and commit or back up the host worktree instead.
+Review and back up the patch under `.git/pi-docker-sandbox/patches/`. If removing legacy direct-mode state, inspect and commit or back up its host worktree because that mode did not create clone patches.
 
 ## 2. Remove confirmed sandboxes
 
 For a clean clone sandbox, use the lifecycle-aware command from its repository:
 
 ```bash
-npm exec --package=pi-docker-sandboxes@0.1.0-alpha.1 -- pi-dsbx destroy --name NAME --yes
+npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx destroy --name NAME --yes
 ```
 
 If the sandbox has changes or cannot be inspected, the command preserves it. Add `--discard-changes` only after export or when losing its work is intentional:
 
 ```bash
-npm exec --package=pi-docker-sandboxes@0.1.0-alpha.1 -- pi-dsbx destroy --name NAME --discard-changes
+npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx destroy --name NAME --discard-changes
 ```
 
-Direct-mode destruction requires `--direct` and dedicated discard confirmation or `--discard-changes`. Use raw `sbx rm --force NAME` only for a sandbox whose package state is missing or corrupt, and only after manual recovery described in [Troubleshooting](troubleshooting.md#state-is-missing-or-corrupt).
+Use raw `sbx rm --force NAME` only for a sandbox whose package state is missing or corrupt, and only after manual recovery described in [Troubleshooting](troubleshooting.md#state-is-missing-or-corrupt).
 
 ## 3. Remove the package
 
@@ -47,21 +47,19 @@ If it was installed in project settings, run the command with Pi's `--local` opt
 
 ## 4. Optionally remove images
 
-Images are harmless to retain and may be shared by remaining sandboxes. First list matching local and published-image records:
+Images are harmless to retain and may be shared by remaining sandboxes. First list matching local records:
 
 ```bash
 docker image ls docker.io/pi-docker-sandboxes/pi
-docker image ls ghcr.io/gurkanguray/pi-docker-sandboxes
 ```
 
 After confirming they are unused, remove exact references returned by those listings, for example:
 
 ```bash
-docker image rm docker.io/pi-docker-sandboxes/pi:0.1.0-alpha.1
-docker image rm ghcr.io/gurkanguray/pi-docker-sandboxes@sha256:DIGEST
+docker image rm docker.io/pi-docker-sandboxes/pi:0.1.0
 ```
 
-The GHCR command applies only when a release has locked and pulled that digest. Do not remove unrelated Docker Sandboxes base or template images as part of this package uninstall.
+Do not remove unrelated Docker Sandboxes base or template images as part of this package uninstall.
 
 ## 5. Optionally archive or remove configuration and state
 
