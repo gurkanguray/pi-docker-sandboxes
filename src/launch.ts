@@ -388,6 +388,16 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		});
 
 	const inspectHostRepository = options.inspectRepository ?? inspectRepository;
+	const prepared = {
+		options,
+		client,
+		loadedConfig,
+		config,
+		resolvedImage,
+		sync,
+		capabilities,
+		inspectHostRepository,
+	};
 	let repository: Awaited<ReturnType<typeof inspectRepository>>;
 	try {
 		repository = await inspectHostRepository(cwd);
@@ -397,27 +407,34 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			options.yes === true ||
 			(await options.confirmInitialCommit?.(error.root)) === true;
 		if (!accepted) throw error;
-		await createEmptyInitialCommit(error.root);
-		repository = await inspectHostRepository(cwd);
+		const root = error.root;
+		const name = config.sandbox.name ?? sandboxName(root, options.fresh);
+		return withSandboxLease(root, name, "run", async () => {
+			try {
+				repository = await inspectHostRepository(cwd);
+			} catch (current) {
+				if (!(current instanceof UnbornHeadError)) throw current;
+				if (current.root !== root)
+					throw new Error("Git repository identity changed before initialization");
+				await createEmptyInitialCommit(root);
+				repository = await inspectHostRepository(cwd);
+			}
+			if (!repository.mainWorktree)
+				throw new Error("Clone mode does not support secondary Git worktrees");
+			return launchWithLease({
+				...prepared,
+				repository,
+				root,
+				name,
+			});
+		});
 	}
 	if (!repository.mainWorktree)
 		throw new Error("Clone mode does not support secondary Git worktrees");
 	const root = repository.root;
 	const name = config.sandbox.name ?? sandboxName(root, options.fresh);
 	return withSandboxLease(root, name, "run", () =>
-		launchWithLease({
-			options,
-			client,
-			loadedConfig,
-			config,
-			resolvedImage,
-			sync,
-			capabilities,
-			inspectHostRepository,
-			repository,
-			root,
-			name,
-		}),
+		launchWithLease({ ...prepared, repository, root, name }),
 	);
 }
 

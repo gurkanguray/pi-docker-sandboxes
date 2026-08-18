@@ -28,7 +28,8 @@ export interface SandboxLeaseRuntime {
 	pid?: number;
 	host?: string;
 	now?: () => Date;
-	processAlive?: (pid: number) => boolean | "uncertain";
+	/** @internal Test-only durability failure injection. */
+	syncDirectory?: (path: string, handle: FileHandle) => Promise<void>;
 }
 
 export interface SandboxLease {
@@ -91,18 +92,16 @@ function flags(): { directory: number; create: number; read: number } {
 	};
 }
 
-async function syncDirectory(directory: FileHandle): Promise<void> {
-	await directory.sync().catch((cause) => {
-		if (
-			!["EINVAL", "ENOTSUP", "EBADF"].includes(
-				(cause as NodeJS.ErrnoException).code ?? "",
-			)
-		)
-			throw cause;
-	});
-}
+type DirectorySync = NonNullable<SandboxLeaseRuntime["syncDirectory"]>;
 
-async function prepareLeaseDirectory(root: string): Promise<{
+const syncDirectory: DirectorySync = async (_path, directory) => {
+	await directory.sync();
+};
+
+async function prepareLeaseDirectory(
+	root: string,
+	sync: DirectorySync,
+): Promise<{
 	directory: string;
 	handle: FileHandle;
 	validate: () => Promise<void>;
@@ -130,10 +129,25 @@ async function prepareLeaseDirectory(root: string): Promise<{
 	for (let index = 0; index < paths.length; index++) {
 		await validate();
 		const path = paths[index]!;
-		if (index >= 2)
+		if (index >= 2) {
 			await mkdir(path, { mode: 0o700 }).catch((cause) => {
 				if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 			});
+			await validate();
+			const parentPath = paths[index - 1]!;
+			const parent = await open(parentPath, flags().directory);
+			try {
+				const opened = await parent.stat();
+				if (
+					!opened.isDirectory() ||
+					!sameIdentity(identities[index - 1]!, opened)
+				)
+					throw new Error("Lifecycle lease parent changed while syncing");
+				await sync(parentPath, parent);
+			} finally {
+				await parent.close().catch(() => undefined);
+			}
+		}
 		const current = await lstat(path);
 		if (
 			!current.isDirectory() ||
@@ -197,22 +211,10 @@ async function readBounded(handle: FileHandle): Promise<Buffer> {
 	return Buffer.from(output.subarray(0, offset));
 }
 
-function defaultProcessAlive(pid: number): boolean | "uncertain" {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (cause) {
-		if ((cause as NodeJS.ErrnoException).code === "ESRCH") return false;
-		return "uncertain";
-	}
-}
-
-async function reclaimIfStale(
+async function inspectExistingLease(
 	path: string,
 	name: string,
-	parent: Awaited<ReturnType<typeof prepareLeaseDirectory>>,
-	runtime: Required<Pick<SandboxLeaseRuntime, "host" | "processAlive">>,
-): Promise<"reclaimed" | "retry"> {
+): Promise<"retry"> {
 	let handle: FileHandle;
 	try {
 		handle = await open(path, flags().read);
@@ -226,30 +228,9 @@ async function reclaimIfStale(
 		const contents = await readBounded(handle);
 		const record = parseRecord(contents);
 		if (!record || record.sandbox !== name) throw busy();
-		if (record.host !== runtime.host) throw busy(record);
-		if (runtime.processAlive(record.pid) !== false) throw busy(record);
-		await parent.validate();
-		const [opened, current, reread] = await Promise.all([
-			handle.stat(),
-			lstat(path),
-			readBounded(handle),
-		]);
-		if (
-			!opened.isFile() ||
-			opened.nlink !== 1 ||
-			!current.isFile() ||
-			current.isSymbolicLink() ||
-			current.nlink !== 1 ||
-			!sameIdentity(identity, opened) ||
-			!sameIdentity(identity, current) ||
-			!contents.equals(reread)
-		)
-			throw busy();
-		await unlink(path).catch((cause) => {
-			if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
-		});
-		await syncDirectory(parent.handle);
-		return "reclaimed";
+		// Host and PID are diagnostics only. Neither can prove local ownership,
+		// so every existing record remains busy until explicit recovery.
+		throw busy(record);
 	} finally {
 		await handle.close().catch(() => undefined);
 	}
@@ -268,7 +249,7 @@ export async function acquireSandboxLease(
 		pid: runtime.pid ?? process.pid,
 		host: runtime.host ?? hostname(),
 		now: runtime.now ?? (() => new Date()),
-		processAlive: runtime.processAlive ?? defaultProcessAlive,
+		syncDirectory: runtime.syncDirectory ?? syncDirectory,
 	};
 	if (!Number.isSafeInteger(actual.pid) || actual.pid <= 0 || !actual.host)
 		throw new TypeError("Invalid lifecycle lease owner identity");
@@ -280,7 +261,7 @@ export async function acquireSandboxLease(
 		host: actual.host,
 		startedAt: actual.now().toISOString(),
 	};
-	const parent = await prepareLeaseDirectory(root);
+	const parent = await prepareLeaseDirectory(root, actual.syncDirectory);
 	const path = join(parent.directory, `${name}.json`);
 	for (;;) {
 		try {
@@ -298,7 +279,7 @@ export async function acquireSandboxLease(
 				throw cause;
 			}
 			try {
-				await reclaimIfStale(path, name, parent, actual);
+				await inspectExistingLease(path, name);
 				continue;
 			} catch (error) {
 				await parent.handle.close().catch(() => undefined);
@@ -319,7 +300,7 @@ export async function acquireSandboxLease(
 				!sameIdentity(identity, current)
 			)
 				throw new Error("Lifecycle lease changed during acquisition");
-			await syncDirectory(parent.handle);
+			await actual.syncDirectory(parent.directory, parent.handle);
 			let released = false;
 			return {
 				path,
@@ -351,7 +332,7 @@ export async function acquireSandboxLease(
 								"Lifecycle lease ownership changed before release",
 							);
 						await unlink(path);
-						await syncDirectory(parent.handle);
+						await actual.syncDirectory(parent.directory, parent.handle);
 					} finally {
 						await file.close().catch(() => undefined);
 						await parent.handle.close().catch(() => undefined);
@@ -359,10 +340,8 @@ export async function acquireSandboxLease(
 				},
 			};
 		} catch (cause) {
-			const identity = await file.stat().catch(() => undefined);
-			const current = await lstat(path).catch(() => undefined);
-			if (identity && current && sameIdentity(identity, current))
-				await unlink(path).catch(() => undefined);
+			// A post-create failure retains the pathname. Path-based cleanup cannot
+			// prove ownership after replacement and must fail closed.
 			await file.close().catch(() => undefined);
 			await parent.handle.close().catch(() => undefined);
 			throw cause;

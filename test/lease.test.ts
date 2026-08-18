@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
+	cp,
 	link,
 	mkdir,
 	mkdtemp,
@@ -14,7 +15,12 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
+import {
+	acquireSandboxLease,
+	LEASE_BUSY_EXIT_CODE,
+	type SandboxLeaseRuntime,
+	withSandboxLease,
+} from "../src/lease.ts";
 
 const exec = promisify(execFile);
 
@@ -65,25 +71,39 @@ test("live leases are exclusive and report their owning operation", async (t) =>
 	await second.release();
 });
 
-test("only demonstrably dead local leases are reclaimed", async (t) => {
-	const root = await fixture(t);
-	const path = await preparedLeasePath(root);
-	await writeFile(path, record({ pid: 2_147_483_647 }), { mode: 0o600 });
-	const reclaimed = await acquireSandboxLease(root, "box", "export");
-	await reclaimed.release();
-
-	await writeFile(path, "not json\n", { mode: 0o600 });
-	await assert.rejects(
-		() => acquireSandboxLease(root, "box", "run"),
-		/busy.*uncertain/i,
-	);
-	assert.equal(await readFile(path, "utf8"), "not json\n");
-
-	await writeFile(path, record({ pid: 2_147_483_647, host: "another-host" }));
-	await assert.rejects(
-		() => acquireSandboxLease(root, "box", "run"),
-		/busy.*another-host/i,
-	);
+test("abandoned leases stay busy without local-owner inference or reclamation", async (t) => {
+	for (const [name, contents, diagnostic] of [
+		[
+			"dead-local",
+			record({ sandbox: "dead-local", pid: 2_147_483_647 }),
+			/busy.*run/i,
+		],
+		[
+			"duplicate-hostname",
+			record({ sandbox: "duplicate-hostname", pid: 2_147_483_647 }),
+			/busy.*run/i,
+		],
+		[
+			"foreign",
+			record({ sandbox: "foreign", pid: 2_147_483_647, host: "another-host" }),
+			/busy.*another-host/i,
+		],
+		["malformed", "not json\n", /busy.*uncertain/i],
+	] as const) {
+		const root = await fixture(t);
+		const path = await preparedLeasePath(root, name);
+		await writeFile(path, contents, { mode: 0o600 });
+		const attempts = await Promise.allSettled(
+			Array.from({ length: 16 }, () =>
+				acquireSandboxLease(root, name, "export"),
+			),
+		);
+		assert.equal(attempts.every((attempt) => attempt.status === "rejected"), true);
+		for (const attempt of attempts) {
+			if (attempt.status === "rejected") assert.match(String(attempt.reason), diagnostic);
+		}
+		assert.equal(await readFile(path, "utf8"), contents);
+	}
 });
 
 test("canonical repository roots share one sandbox lease", async (t) => {
@@ -135,6 +155,94 @@ test("release refuses to unlink a replacement lease", async (t) => {
 	assert.match(await readFile(path, "utf8"), /"operation":"destroy"/);
 });
 
+test("directory sync failures propagate through create and release", async (t) => {
+	for (const code of ["EINVAL", "ENOTSUP", "EBADF"] as const) {
+		const directoryRoot = await fixture(t);
+		const failure = Object.assign(
+			new Error(`injected ${code} directory sync failure`),
+			{ code },
+		);
+		await assert.rejects(
+			() =>
+				acquireSandboxLease(directoryRoot, `directory-${code}`, "run", {
+					syncDirectory: async () => {
+						throw failure;
+					},
+				} as SandboxLeaseRuntime),
+			(error: unknown) => error === failure,
+		);
+	}
+
+	const root = await fixture(t);
+	const synced: string[] = [];
+	const syncDirectory = async (path: string, handle: { sync(): Promise<void> }) => {
+		synced.push(path);
+		await handle.sync();
+	};
+	const lease = await acquireSandboxLease(root, "box", "run", {
+		syncDirectory,
+	} as SandboxLeaseRuntime);
+	await lease.release();
+	assert.deepEqual(
+		synced.map((path) => path.slice(path.indexOf(".git"))),
+		[
+			".git",
+			".git/pi-docker-sandbox",
+			".git/pi-docker-sandbox/leases",
+			".git/pi-docker-sandbox/leases",
+		],
+	);
+
+	const invalid = Object.assign(new Error("injected directory sync failure"), {
+		code: "EINVAL",
+	});
+	await assert.rejects(
+		() =>
+			acquireSandboxLease(root, "sync-create", "run", {
+					syncDirectory: async (
+						path: string,
+						handle: { sync(): Promise<void> },
+					) => {
+						if (path.endsWith("/leases")) throw invalid;
+						await handle.sync();
+					},
+				} as SandboxLeaseRuntime),
+
+		(error: unknown) => error === invalid,
+	);
+	await assert.rejects(
+		() => acquireSandboxLease(root, "sync-create", "destroy"),
+		/busy.*run/i,
+	);
+
+	let leaseDirectorySyncs = 0;
+	const release = await acquireSandboxLease(root, "sync-release", "run", {
+		syncDirectory: async (
+			path: string,
+			handle: { sync(): Promise<void> },
+		) => {
+			if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2) throw invalid;
+			await handle.sync();
+		},
+	} as SandboxLeaseRuntime);
+	await assert.rejects(() => release.release(), (error: unknown) => error === invalid);
+	const reacquired = await acquireSandboxLease(root, "sync-release", "destroy");
+	await reacquired.release();
+});
+
+test("withSandboxLease releases after its callback rejects", async (t) => {
+	const root = await fixture(t);
+	await assert.rejects(
+		() =>
+			withSandboxLease(root, "box", "run", async () => {
+				throw new Error("injected callback failure");
+			}),
+		/injected callback failure/,
+	);
+	const reacquired = await acquireSandboxLease(root, "box", "destroy");
+	await reacquired.release();
+});
+
 test("concurrent in-process acquisition has exactly one winner", async (t) => {
 	const root = await fixture(t);
 	const attempts = await Promise.allSettled(
@@ -160,37 +268,115 @@ test("concurrent in-process acquisition has exactly one winner", async (t) => {
 	await acquired[0]!.value.release();
 });
 
-test("Python process probe observes one owner and the documented busy code", async (t) => {
-	const root = await fixture(t);
-	const module = new URL("../src/lease.ts", import.meta.url).href;
-	const worker = `
-const { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } = await import(process.argv[1]);
-try {
-  const lease = await acquireSandboxLease(process.argv[2], "box", "run");
-  console.log("ACQUIRED");
-  await new Promise((resolve) => setTimeout(resolve, Number(process.argv[3])));
-  await lease.release();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = error?.exitCode ?? 1;
-}
-`;
+test("Python launches two actual pi-dsbx run processes with one lifecycle owner", async (t) => {
+	const harness = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-lease-probe-"));
+	t.after(() => rm(harness, { recursive: true, force: true }));
+	await Promise.all([
+		cp(new URL("../src", import.meta.url), join(harness, "src"), {
+			recursive: true,
+		}),
+		cp(new URL("../docker", import.meta.url), join(harness, "docker"), {
+			recursive: true,
+		}),
+		symlink(new URL("../node_modules", import.meta.url), join(harness, "node_modules")),
+	]);
+	const image = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
+	await writeFile(
+		join(harness, "docker", "image-lock.json"),
+		`${JSON.stringify({
+			version: 2,
+			runtimeSchema: 1,
+			piVersion: "0.84.1",
+			images: {
+				standard: {
+					status: "published",
+					reference: image,
+					platforms: ["linux/amd64", "linux/arm64"],
+					privileged: false,
+				},
+				docker: {
+					status: "published",
+					reference: image,
+					platforms: ["linux/amd64", "linux/arm64"],
+					privileged: true,
+				},
+			},
+		}, null, 2)}\n`,
+	);
+	const root = join(harness, "repository");
+	const home = join(harness, "home");
+	const bin = join(harness, "bin");
+	await Promise.all([
+		mkdir(root),
+		mkdir(home),
+		mkdir(bin),
+	]);
+	await exec("git", ["init", "-b", "main"], { cwd: root });
+	await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+	await exec("git", ["config", "user.name", "Test"], { cwd: root });
+	await writeFile(join(root, "file.txt"), "initial\n");
+	await exec("git", ["add", "file.txt"], { cwd: root });
+	await exec("git", ["commit", "-m", "initial"], { cwd: root });
+
+	const ready = join(harness, "ready");
+	const proceed = join(harness, "proceed");
+	const present = join(harness, "present");
+	const log = join(harness, "sbx.log");
+	const fakeSbx = join(bin, "sbx");
+	await writeFile(
+		fakeSbx,
+		`#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, parent: process.ppid }) + "\\n");
+const output = (value) => process.stdout.write(value);
+if (args[0] === "create" && args[1] === "--help") output("--clone --no-share-skills\\n");
+else if (args[0] === "kit" && args[1] === "--help") output("validate\\n");
+else if (args[0] === "inspect" && args[1] === "--help") output("--json\\n");
+else if (args[0] === "policy") output("policy check network\\n");
+else if (args[0] === "secret") process.exit(1);
+else if (args[0] === "list") {
+  if (!fs.existsSync(${JSON.stringify(ready)})) {
+    fs.writeFileSync(${JSON.stringify(ready)}, String(process.ppid));
+    while (!fs.existsSync(${JSON.stringify(proceed)}))
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+  const name = fs.existsSync(${JSON.stringify(present)}) ? fs.readFileSync(${JSON.stringify(present)}, "utf8") : undefined;
+  output(JSON.stringify({ sandboxes: name ? [{ name }] : [] }));
+} else if (args[0] === "create" && args.includes("--name")) {
+  fs.writeFileSync(${JSON.stringify(present)}, args[args.indexOf("--name") + 1]);
+} else if (args[0] === "inspect") output(JSON.stringify({ image: ${JSON.stringify(image)} }));
+else if (args[0] === "exec") output("");
+`,
+	);
+	await exec("chmod", ["755", fakeSbx]);
+
 	const python = `
-import subprocess, sys
-node, module, root, worker, busy = sys.argv[1:]
-command = [node, "--experimental-strip-types", "--input-type=module", "-e", worker, module, root]
-first = subprocess.Popen(command + ["1500"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-ready = first.stdout.readline().strip()
-if ready != "ACQUIRED":
-    out, err = first.communicate()
-    raise SystemExit(f"first probe did not acquire: {ready}{out} {err}")
-second = subprocess.run(command + ["0"], capture_output=True, text=True)
-first_out, first_err = first.communicate()
-codes = [first.returncode, second.returncode]
-print(f"ready={ready} codes={codes[0]},{codes[1]}")
-print(f"contender={second.stderr.strip()}")
-if codes != [0, int(busy)]:
-    raise SystemExit(f"unexpected codes {codes}: first={first_err!r} second={second.stderr!r}")
+import json, os, subprocess, sys, time
+node, cli, root, home, bin_dir, ready, proceed, log, busy = sys.argv[1:]
+env = os.environ.copy()
+env["HOME"] = home
+env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+command = [node, "--experimental-strip-types", cli, "run", "--cwd", root, "--sync", "clean", "--keep", "--no-host-auth", "--yes"]
+first = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+deadline = time.time() + 10
+while not os.path.exists(ready) and first.poll() is None and time.time() < deadline:
+    time.sleep(0.025)
+if not os.path.exists(ready):
+    out, err = first.communicate(timeout=2)
+    raise SystemExit(f"first pi-dsbx run did not reach lifecycle: {first.returncode} {out!r} {err!r}")
+second = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+second_out, second_err = second.communicate(timeout=10)
+with open(proceed, "w") as handle:
+    handle.write("continue")
+first_out, first_err = first.communicate(timeout=10)
+with open(log) as handle:
+    calls = [json.loads(line) for line in handle if line.strip()]
+second_state_reads = [call for call in calls if call["parent"] == second.pid and call["args"][:1] == ["list"]]
+print(f"codes={first.returncode},{second.returncode} second_state_reads={len(second_state_reads)}")
+print("contender=" + " ".join(second_err.split()))
+if [first.returncode, second.returncode] != [0, int(busy)] or second_state_reads:
+    raise SystemExit(f"contention failed: first={first_err!r} second={second_err!r} calls={second_state_reads!r}")
 `;
 	const result = await exec(
 		"python3",
@@ -198,16 +384,19 @@ if codes != [0, int(busy)]:
 			"-c",
 			python,
 			process.execPath,
-			module,
+			join(harness, "src", "cli.ts"),
 			root,
-			worker,
+			home,
+			bin,
+			ready,
+			proceed,
+			log,
 			String(LEASE_BUSY_EXIT_CODE),
 		],
-		{ timeout: 10_000 },
+		{ timeout: 30_000 },
 	);
-	console.log(
-		`python lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`,
-	);
+	console.log(`python CLI lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`);
 	assert.match(result.stdout, new RegExp(`codes=0,${LEASE_BUSY_EXIT_CODE}`));
+	assert.match(result.stdout, /second_state_reads=0/);
 	assert.match(result.stdout, /contender=.*busy.*run/i);
 });

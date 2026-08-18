@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { parseRunArgs } from "../src/cli.ts";
+import { acquireSandboxLease } from "../src/lease.ts";
 import {
 	launch as productionLaunch,
 	sanitizedHostEnvironment,
@@ -1402,6 +1403,37 @@ test("unborn repository rejection does not create a commit", async () => {
 	await assert.rejects(() => git(root, "rev-parse", "--verify", "HEAD"));
 	assert.equal(await git(root, "status", "--porcelain=v1"), statusBefore);
 	assert.equal(await git(root, "ls-files", "--stage"), stagedBefore);
+});
+
+test("concurrent unborn run cannot create an initial commit before its lease", async () => {
+	const root = await unbornRepository();
+	const canonical = await realpath(root);
+	const held = await acquireSandboxLease(
+		canonical,
+		sandboxName(canonical),
+		"destroy",
+	);
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: launchClient,
+				config: launchConfig,
+				yes: true,
+			}),
+			/busy.*destroy/i,
+		);
+		await assert.rejects(() => git(root, "rev-parse", "--verify", "HEAD"));
+	} finally {
+		await held.release();
+	}
+	await launch({
+		cwd: root,
+		client: launchClient,
+		config: launchConfig,
+		yes: true,
+	});
+	assert.equal(await git(root, "rev-list", "--count", "HEAD"), "1");
 });
 
 test("callback approval creates exactly one empty initial commit", async () => {
