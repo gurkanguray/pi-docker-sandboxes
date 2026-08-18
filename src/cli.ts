@@ -13,6 +13,7 @@ import { decideDisposition } from "./disposition.ts";
 import { formatError, OperationError } from "./errors.ts";
 import { buildLocalImage } from "./image.ts";
 import { launch } from "./launch.ts";
+import { SandboxLeaseBusyError, withSandboxLease } from "./lease.ts";
 import { SbxClient } from "./sbx/client.ts";
 import {
 	attestSandbox,
@@ -350,76 +351,86 @@ export async function main(
 		if (command === "apply" && !patch)
 			throw new TypeError("apply requires a patch path");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
-		const hasState = await sandboxStateExists(repository.root, name);
-		const state = hasState
-			? await loadSandboxState(repository.root, name)
-			: undefined;
-		if (command === "export") {
-			if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
-			const config = await loadConfig(cwd);
-			const result = await exportPatch(client, state!, config.export.directory);
-			console.log(`${result.path}\n${result.summary.join("\n")}`);
-			return 0;
-		}
-		if (command === "apply") {
-			if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
-			const patchPath = patch!;
+		return withSandboxLease(repository.root, name, command, async () => {
+			const hasState = await sandboxStateExists(repository.root, name);
+			const state = hasState
+				? await loadSandboxState(repository.root, name)
+				: undefined;
+			if (command === "export") {
+				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
+				const config = await loadConfig(cwd);
+				const result = await exportPatch(
+					client,
+					state,
+					config.export.directory,
+				);
+				console.log(`${result.path}\n${result.summary.join("\n")}`);
+				return 0;
+			}
+			if (command === "apply") {
+				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
+				const patchPath = patch!;
+				if (
+					!yes &&
+					!(await confirm(`Apply ${patchPath} to the host working tree?`))
+				)
+					throw new Error("Patch apply cancelled");
+				await applyPatch(state, resolve(patchPath));
+				console.log(`Applied ${patchPath}`);
+				return 0;
+			}
+			const dirty = !state
+				? undefined
+				: (
+						await client.exec(name, ["git", "status", "--porcelain=v1"], {
+							workdir: state.hostRoot,
+						})
+					).stdout.trim().length > 0;
+			let discardAuthorized = discardChanges;
+			if ((!state || dirty) && !discardAuthorized)
+				discardAuthorized = await confirm(
+					!state
+						? "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state."
+						: "Sandbox has unexported changes. Destroy and discard them permanently?",
+				);
 			if (
+				dirty === false &&
 				!yes &&
-				!(await confirm(`Apply ${patchPath} to the host working tree?`))
+				!(await confirm("Destroy sandbox permanently?"))
 			)
-				throw new Error("Patch apply cancelled");
-			await applyPatch(state, resolve(patchPath));
-			console.log(`Applied ${patchPath}`);
-			return 0;
-		}
-		const dirty = !state
-			? undefined
-			: (
-					await client.exec(name, ["git", "status", "--porcelain=v1"], {
-						workdir: state.hostRoot,
-					})
-				).stdout.trim().length > 0;
-		let discardAuthorized = discardChanges;
-		if ((!state || dirty) && !discardAuthorized)
-			discardAuthorized = await confirm(
-				!state
-					? "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state."
-					: "Sandbox has unexported changes. Destroy and discard them permanently?",
-			);
-		if (
-			dirty === false &&
-			!yes &&
-			!(await confirm("Destroy sandbox permanently?"))
-		)
-			throw new Error("Destroy cancelled");
-		const disposition = decideDisposition({
-			keep: false,
-			changes: !state ? "unknown" : dirty ? "changed" : "clean",
-			exportRequested: false,
-			exportSucceeded: false,
-			discardAuthorized,
-		});
-		if (disposition !== "remove")
-			throw new Error(
-				"Destroy cancelled; use --discard-changes to authorize noninteractive dirty removal",
-			);
-		await client.remove(name, true);
-		try {
-			await removeSandboxState(repository.root, name, dependencies.removeState);
-		} catch (cause) {
-			throw new OperationError({
-				phase: "remove-or-keep",
-				operation: "remove stale sandbox state",
-				detail: `Sandbox ${name} is gone but stale state requires inspection; automatic removal was refused`,
-				recovery: [
-					`Inspect ${statePath(repository.root, name)} and its parent directory manually`,
-				],
-				cause,
+				throw new Error("Destroy cancelled");
+			const disposition = decideDisposition({
+				keep: false,
+				changes: !state ? "unknown" : dirty ? "changed" : "clean",
+				exportRequested: false,
+				exportSucceeded: false,
+				discardAuthorized,
 			});
-		}
-		console.log(`Destroyed ${name}`);
-		return 0;
+			if (disposition !== "remove")
+				throw new Error(
+					"Destroy cancelled; use --discard-changes to authorize noninteractive dirty removal",
+				);
+			await client.remove(name, true);
+			try {
+				await removeSandboxState(
+					repository.root,
+					name,
+					dependencies.removeState,
+				);
+			} catch (cause) {
+				throw new OperationError({
+					phase: "remove-or-keep",
+					operation: "remove stale sandbox state",
+					detail: `Sandbox ${name} is gone but stale state requires inspection; automatic removal was refused`,
+					recovery: [
+						`Inspect ${statePath(repository.root, name)} and its parent directory manually`,
+					],
+					cause,
+				});
+			}
+			console.log(`Destroyed ${name}`);
+			return 0;
+		});
 	}
 	throw new TypeError(`Unknown command: ${command}\n${usage()}`);
 }
@@ -434,6 +445,7 @@ if (
 		})
 		.catch((error: unknown) => {
 			console.error(`Error: ${formatError(error)}`);
-			process.exitCode = 1;
+			process.exitCode =
+				error instanceof SandboxLeaseBusyError ? error.exitCode : 1;
 		});
 }

@@ -19,6 +19,10 @@ import {
 	main,
 } from "../src/cli.ts";
 import {
+	acquireSandboxLease,
+	LEASE_BUSY_EXIT_CODE,
+} from "../src/lease.ts";
+import {
 	inspectRepository,
 	sandboxName,
 	saveSandboxState,
@@ -121,6 +125,29 @@ function runDestroy(
 ): ReturnType<typeof runCli> {
 	return runCli(subject, "destroy", args, dirty);
 }
+
+test("all management mutations contend on the sandbox lifecycle lease", async () => {
+	for (const [command, args] of [
+		["export", []],
+		["apply", ["change.patch", "--yes"]],
+		["destroy", ["--yes"]],
+	] as const) {
+		const subject = await fixture();
+		const held = await acquireSandboxLease(
+			subject.root,
+			sandboxName(subject.root),
+			"run",
+		);
+		try {
+			const result = await runCli(subject, command, [...args], false);
+			assert.equal(result.code, LEASE_BUSY_EXIT_CODE, result.stderr);
+			assert.match(result.stderr, /busy.*run/i);
+			assert.deepEqual(result.calls, []);
+		} finally {
+			await held.release();
+		}
+	}
+});
 
 test("management commands reject trailing arguments", async () => {
 	const destroyed = await runCli(

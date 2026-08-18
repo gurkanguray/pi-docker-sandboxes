@@ -21,6 +21,7 @@ import {
 	type KitImageResolver,
 	writeKitDirectory,
 } from "./kit.ts";
+import { withSandboxLease } from "./lease.ts";
 import {
 	createPersonalizationSnapshot,
 	listNativePackageSpecs,
@@ -30,7 +31,6 @@ import {
 import {
 	classifyHostProviders,
 	listHostOAuthProviderIds,
-	listHostProviderIds,
 	syncHostProviderSecrets,
 } from "./host-auth.ts";
 import {
@@ -407,6 +407,49 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		throw new Error("Clone mode does not support secondary Git worktrees");
 	const root = repository.root;
 	const name = config.sandbox.name ?? sandboxName(root, options.fresh);
+	return withSandboxLease(root, name, "run", () =>
+		launchWithLease({
+			options,
+			client,
+			loadedConfig,
+			config,
+			resolvedImage,
+			sync,
+			capabilities,
+			inspectHostRepository,
+			repository,
+			root,
+			name,
+		}),
+	);
+}
+
+async function launchWithLease(context: {
+	options: LaunchOptions;
+	client: SbxClient;
+	loadedConfig: Awaited<ReturnType<typeof loadConfigResult>>;
+	config: ReturnType<typeof mergeConfig>;
+	resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
+	sync: ReturnType<typeof syncOptions>;
+	capabilities: Awaited<ReturnType<SbxClient["capabilities"]>>;
+	inspectHostRepository: typeof inspectRepository;
+	repository: Awaited<ReturnType<typeof inspectRepository>>;
+	root: string;
+	name: string;
+}): Promise<LaunchResult> {
+	const {
+		options,
+		client,
+		loadedConfig,
+		config,
+		resolvedImage,
+		sync,
+		capabilities,
+		inspectHostRepository,
+		repository,
+		root,
+		name,
+	} = context;
 	let existing: boolean;
 	try {
 		existing = await client.exists(name);

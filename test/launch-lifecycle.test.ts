@@ -15,6 +15,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { OperationError } from "../src/errors.ts";
+import { acquireSandboxLease } from "../src/lease.ts";
 import {
 	launch as productionLaunch,
 	type LaunchResult,
@@ -300,6 +301,30 @@ async function runCase(
 	});
 	return { fixture, log, fake, operation };
 }
+
+test("run holds one lifecycle lease before reading sandbox state", async () => {
+	const fixture = await repository();
+	const held = await acquireSandboxLease(fixture.root, fixture.name, "destroy");
+	const log: string[] = [];
+	const fake = fakeClient(log);
+	try {
+		await assert.rejects(
+			launch({
+				cwd: fixture.root,
+				client: fake.client,
+				config: {
+					...baseConfig,
+					sandbox: { keep: true, name: fixture.name },
+				},
+				noHostAuth: true,
+			}),
+			/busy.*destroy/i,
+		);
+		assert.deepEqual(log, ["capabilities"]);
+	} finally {
+		await held.release();
+	}
+});
 
 test("fresh launch rejects a configured sandbox name before sbx access", async () => {
 	const subject = await runCase({
