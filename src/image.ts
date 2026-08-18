@@ -69,7 +69,8 @@ export async function packPackage(
 	]);
 	let filename: string | undefined;
 	try {
-		filename = (JSON.parse(stdout) as Array<{ filename?: string }>)[0]?.filename;
+		filename = (JSON.parse(stdout) as Array<{ filename?: string }>)[0]
+			?.filename;
 	} catch (cause) {
 		throw new OperationError({
 			phase: "prepare",
@@ -96,30 +97,21 @@ export interface ImageVerificationReceipt {
 }
 
 export async function verifyImageReceipt(
-	image: string,
-	lock: RuntimeImageLock,
-): Promise<ImageVerificationReceipt> {
-	const host = detectHostPlatform();
-	const docker =
-		lock.images.docker.status === "published" &&
-		lock.images.docker.reference === image;
-	const selected = selectRuntimeImage(lock, docker, host.runtimePlatform);
-	if (selected.reference !== image)
-		throw new Error("image must be an exact locked production runtime reference");
-	return {
-		image,
-		digest: image.slice(image.lastIndexOf("@") + 1),
-		platform: host.runtimePlatform,
-	};
+	_image: string,
+	_lock: RuntimeImageLock,
+): Promise<never> {
+	throw new Error(
+		"production runtime image verification is unavailable until Task 8",
+	);
 }
 
 export function compareImageReceipts(
-	local: ImageVerificationReceipt,
-	candidate: ImageVerificationReceipt,
-): { status: "matched"; candidate: string } {
-	if (local.platform !== candidate.platform)
-		throw new Error("image parity mismatch: platform");
-	return { status: "matched", candidate: candidate.image };
+	_local: ImageVerificationReceipt,
+	_candidate: ImageVerificationReceipt,
+): never {
+	throw new Error(
+		"production runtime image parity verification is unavailable until Task 8",
+	);
 }
 
 export async function buildLocalImage(): Promise<never> {

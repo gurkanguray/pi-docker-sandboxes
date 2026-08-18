@@ -33,7 +33,12 @@ export interface RuntimeImageLock {
 }
 
 const LOCK_URL = new URL("../docker/image-lock.json", import.meta.url);
-const LOCK_FIELDS = new Set(["version", "runtimeSchema", "piVersion", "images"]);
+const LOCK_FIELDS = new Set([
+	"version",
+	"runtimeSchema",
+	"piVersion",
+	"images",
+]);
 const IMAGE_FIELDS = new Set([
 	"status",
 	"reference",

@@ -4,10 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { parseConfig, type ConfigOverride } from "./config.ts";
 import { assertDigestReference } from "./image-lock.ts";
 import { assertLocalTemplateAttestation } from "./local-template.ts";
-import type {
-	SandboxImageAttestation,
-	SandboxState,
-} from "./state-schema.ts";
+import type { SandboxImageAttestation, SandboxState } from "./state-schema.ts";
 
 export interface Migration<T> {
 	value: T;

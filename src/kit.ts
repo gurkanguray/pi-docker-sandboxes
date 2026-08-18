@@ -81,7 +81,9 @@ export function buildKitSpec(options: KitOptions): PiKitSpec {
 	const { config, services } = options;
 	const profile = getNetworkProfile(config.profile);
 	if (!options.image)
-		throw new Error("production runtime image must be resolved before Kit build");
+		throw new Error(
+			"production runtime image must be resolved before Kit build",
+		);
 	const image = assertDigestReference(options.image, "sandbox.image");
 	const serviceDomains = services.flatMap((service) => service.domains);
 	const allow = unique([

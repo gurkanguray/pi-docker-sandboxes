@@ -34,7 +34,10 @@ test("README gives a concise path into the product documentation", async () => {
 	const readme = await read("README.md");
 	const top = readme.split("\n").slice(0, 12).join("\n");
 
-	assert.doesNotMatch(top, /tested on macOS|other macOS releases|Linux|Windows/i);
+	assert.doesNotMatch(
+		top,
+		/tested on macOS|other macOS releases|Linux|Windows/i,
+	);
 	assert.match(readme, /pi-dsbx image build/);
 	assert.match(readme, /pi --docker-sandbox/);
 	assert.match(readme, /if[^\n]*repository[^\n]*has no commits/i);
@@ -73,16 +76,13 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 		assert.ok(reference.includes("`" + flag + "`"), flag);
 
 	const extension = await read("extensions/docker-sandboxes/index.ts");
-	const extensionFlags = [...extension.matchAll(/registerFlag\("([^"]+)"/g)].map(
-		([, flag]) => `--${flag}`,
-	);
+	const extensionFlags = [
+		...extension.matchAll(/registerFlag\("([^"]+)"/g),
+	].map(([, flag]) => `--${flag}`);
 	for (const flag of extensionFlags)
 		assert.ok(reference.includes("`" + flag + "`"), flag);
 	for (const command of ["status", "doctor", "config"])
-		assert.ok(
-			reference.includes("`/docker-sandbox " + command + "`"),
-			command,
-		);
+		assert.ok(reference.includes("`/docker-sandbox " + command + "`"), command);
 
 	assert.match(
 		reference,
@@ -92,8 +92,6 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 				"` \\(default\\)[^\\n]*`clean`[^\\n]*`mirror`",
 		),
 	);
-	assert.match(reference, /`--image`[^\n]*immutable[^\n]*digest/i);
-	assert.doesNotMatch(reference, /`--image`[^\n]*local content tag/i);
 	assert.match(reference, /`--fresh`[^\n]*cannot[^\n]*`--name`/i);
 	assert.match(reference, /`--discard-changes`[^\n]*noninteractive/i);
 	assert.match(
@@ -152,7 +150,10 @@ test("getting started separates compatibility from release validation", async ()
 		"## Next steps",
 	].map((heading) => gettingStarted.indexOf(heading));
 	assert.ok(ordered.every((index) => index >= 0));
-	assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right));
+	assert.deepEqual(
+		ordered,
+		[...ordered].sort((left, right) => left - right),
+	);
 	for (const value of [
 		packageJson.engines.node,
 		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
@@ -174,7 +175,10 @@ test("getting started separates compatibility from release validation", async ()
 	assert.match(gettingStarted, /--docker-sandbox-no-host-auth/);
 	assert.match(gettingStarted, /sandbox-local `?\/login`?[^\n]*unsupported/i);
 	assert.match(gettingStarted, /accept[^\n]*exit prompt[^\n]*export/i);
-	assert.match(gettingStarted, /accept[^\n]*\.git\/pi-docker-sandbox\/patches\//i);
+	assert.match(
+		gettingStarted,
+		/accept[^\n]*\.git\/pi-docker-sandbox\/patches\//i,
+	);
 	assert.match(gettingStarted, /decline[^\n]*export[^\n]*later/i);
 	assert.doesNotMatch(gettingStarted, /printed patch/i);
 	assert.doesNotMatch(gettingStarted, /pi-dsbx: checking Docker Sandboxes/);
@@ -252,7 +256,10 @@ test("uninstall preserves data and follows the safe removal order", async () => 
 	].map((heading) => uninstall.indexOf(heading));
 
 	assert.ok(ordered.every((index) => index >= 0));
-	assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right));
+	assert.deepEqual(
+		ordered,
+		[...ordered].sort((left, right) => left - right),
+	);
 	assert.match(uninstall, /sbx ls/);
 	assert.match(uninstall, /pi-dsbx export --name NAME/);
 	assert.match(uninstall, /pi-dsbx destroy --name NAME/);
@@ -265,7 +272,10 @@ test("uninstall preserves data and follows the safe removal order", async () => 
 	assert.match(uninstall, /~\/\.pi\/agent\/docker-sandboxes\.json/);
 	assert.match(uninstall, /\.pi\/docker-sandboxes\.json/);
 	assert.match(uninstall, /\.git\/pi-docker-sandbox\/(?:state|patches)/);
-	assert.match(uninstall, /configuration[^\n]*state[^\n]*remove[^\n]*after[^\n]*sandbox/i);
+	assert.match(
+		uninstall,
+		/configuration[^\n]*state[^\n]*remove[^\n]*after[^\n]*sandbox/i,
+	);
 	assert.match(uninstall, /patch[^\n]*(?:keep|retain|preserve)/i);
 });
 
@@ -398,7 +408,9 @@ test("issue forms match pinned GitHub schemas", async () => {
 		[".github/ISSUE_TEMPLATE/feature.yml", validateForm],
 		[".github/ISSUE_TEMPLATE/platform.yml", validateForm],
 	] as const;
-	await assert.rejects(access(".github/ISSUE_TEMPLATE/unsupported-platform.yml"));
+	await assert.rejects(
+		access(".github/ISSUE_TEMPLATE/unsupported-platform.yml"),
+	);
 
 	for (const [path, validate] of templates) {
 		const yaml = await read(path);
@@ -499,7 +511,10 @@ test("issue forms accept every documented host status", async () => {
 	assert.match(platform, /upstream-supported|Docker Sandboxes/i);
 	assert.match(platform, /`linux\/arm64`/i);
 	assert.match(platform, /does not\s+(?:establish|guarantee)[^\n]*roadmap/i);
-	assert.doesNotMatch(platform, /Linux[^\n]*unsupported|Windows[^\n]*unsupported/i);
+	assert.doesNotMatch(
+		platform,
+		/Linux[^\n]*unsupported|Windows[^\n]*unsupported/i,
+	);
 });
 
 test("diagnostics stay truthful", async () => {
@@ -508,10 +523,7 @@ test("diagnostics stay truthful", async () => {
 		read("docs/troubleshooting.md"),
 		read("RELEASE.md"),
 	]);
-	assert.doesNotMatch(
-		cli,
-		/`pi-dsbx doctor`[^\n]*(?:platform|tools|image)/i,
-	);
+	assert.doesNotMatch(cli, /`pi-dsbx doctor`[^\n]*(?:platform|tools|image)/i);
 	assert.doesNotMatch(troubleshooting, /sw_vers/);
 	assert.match(troubleshooting, /process\.platform/);
 	assert.match(troubleshooting, /process\.arch/);
@@ -542,10 +554,7 @@ test("release instructions bind dispatch and repository prerequisites", async ()
 		'gh workflow run release-candidate.yml --ref "$TAG" -f tag="$TAG"';
 	assert.ok(release.includes(dispatch));
 	assert.match(release, /workflow ref and tag input must be identical/i);
-	assert.match(
-		release,
-		/tag commit[^\r\n]*ancestor of[^\r\n]*origin\/main/i,
-	);
+	assert.match(release, /tag commit[^\r\n]*ancestor of[^\r\n]*origin\/main/i);
 	assert.match(
 		release,
 		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/issues\/8/,
@@ -559,7 +568,9 @@ test("release instructions bind dispatch and repository prerequisites", async ()
 	])
 		assert.match(release, prerequisite);
 	const manualE2E =
-		release.match(/For manual `workflow_dispatch`[\s\S]*?does not[\s\S]*?candidate\./i)?.[0] ?? "";
+		release.match(
+			/For manual `workflow_dispatch`[\s\S]*?does not[\s\S]*?candidate\./i,
+		)?.[0] ?? "";
 	for (const input of [
 		"source_sha",
 		"package_artifact",

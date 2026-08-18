@@ -110,13 +110,6 @@ export function parseRunArgs(input: readonly string[]): ParsedRun {
 			override.sandbox = { ...override.sandbox, name: take(args, index, flag) };
 			continue;
 		}
-		if (flag === "--image") {
-			override.sandbox = {
-				...override.sandbox,
-				image: take(args, index, flag),
-			};
-			continue;
-		}
 		if (flag === "--cwd") {
 			cwd = resolve(take(args, index, flag));
 			continue;
@@ -262,7 +255,7 @@ export function createPausedConfirm(
 }
 
 function usage(): string {
-	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status\n  pi-dsbx doctor\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --image REF --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
+	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status\n  pi-dsbx doctor\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
 }
 
 function option(args: string[], name: string): string | undefined {

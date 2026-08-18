@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { assertDigestReference } from "./image-lock.ts";
 
 export type SecurityProfile = "hardened" | "development";
 export type SyncProfile = "clean" | "mirror" | "custom";
@@ -35,7 +34,6 @@ export interface DockerSandboxConfig {
 		name?: string;
 		keep: boolean;
 		dockerEngine: boolean;
-		image?: string;
 	};
 	network: { allow: string[]; deny: string[] };
 	export: { onExit: "prompt" | "always" | "never"; directory: string };
@@ -73,7 +71,7 @@ const ROOT_KEYS = new Set([
 	"network",
 	"export",
 ]);
-const SANDBOX_KEYS = new Set(["name", "keep", "dockerEngine", "image"]);
+const SANDBOX_KEYS = new Set(["name", "keep", "dockerEngine"]);
 const NETWORK_KEYS = new Set(["allow", "deny"]);
 const SYNC_KEYS = new Set([
 	"settings",
@@ -164,10 +162,7 @@ export function validateDomain(domain: string, allowWildcard = true): string {
 }
 
 export type ConfigOverride = Partial<
-	Omit<
-		DockerSandboxConfig,
-		"auth" | "sandbox" | "sync" | "network" | "export"
-	>
+	Omit<DockerSandboxConfig, "auth" | "sandbox" | "sync" | "network" | "export">
 > & {
 	auth?: Partial<DockerSandboxConfig["auth"]>;
 	sandbox?: Partial<DockerSandboxConfig["sandbox"]>;
@@ -254,11 +249,6 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.sandbox.dockerEngine = boolean(
 				sandbox.dockerEngine,
 				`${source}.sandbox.dockerEngine`,
-			);
-		if (sandbox.image !== undefined)
-			output.sandbox.image = assertDigestReference(
-				string(sandbox.image, `${source}.sandbox.image`),
-				`${source}.sandbox.image`,
 			);
 	}
 	if (input.network !== undefined) {

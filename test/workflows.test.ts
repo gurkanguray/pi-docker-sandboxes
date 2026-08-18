@@ -183,23 +183,20 @@ test("release workflows are valid npm-only gates", async () => {
 			statement: string;
 		}>;
 	};
-	assert.deepEqual(
-		policy.vulnerabilities.map(({ id }) => id).sort(),
-		[
-			"CVE-2026-33818",
-			"CVE-2026-34040",
-			"CVE-2026-39821",
-			"CVE-2026-39822",
-			"CVE-2026-41567",
-			"CVE-2026-42306",
-			"CVE-2026-46600",
-			"CVE-2026-56853",
-			"CVE-2026-56858",
-			"CVE-2026-56859",
-			"CVE-2026-56860",
-			"CVE-2026-56862",
-		],
-	);
+	assert.deepEqual(policy.vulnerabilities.map(({ id }) => id).sort(), [
+		"CVE-2026-33818",
+		"CVE-2026-34040",
+		"CVE-2026-39821",
+		"CVE-2026-39822",
+		"CVE-2026-41567",
+		"CVE-2026-42306",
+		"CVE-2026-46600",
+		"CVE-2026-56853",
+		"CVE-2026-56858",
+		"CVE-2026-56859",
+		"CVE-2026-56860",
+		"CVE-2026-56862",
+	]);
 	assert.equal(
 		policy.vulnerabilities.reduce(
 			(total, exception) => total + exception.paths.length,
@@ -224,12 +221,11 @@ test("release workflows are valid npm-only gates", async () => {
 			/--tag "v\$\(node -p 'require\("\.\/package\.json"\)\.version'\)"/,
 		);
 	}
-	const candidateSteps = parsed.get("security.yml")!.jobs["candidate-image"]!
-		.steps!;
+	const candidateSteps =
+		parsed.get("security.yml")!.jobs["candidate-image"]!.steps!;
 	const candidateCheckout = candidateSteps.findIndex(
 		(step) =>
-			step.uses ===
-			"actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+			step.uses === "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
 	);
 	const candidateScan = candidateSteps.findIndex(
 		(step) => step.name === "Scan exact candidate image",

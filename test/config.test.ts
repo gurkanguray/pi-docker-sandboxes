@@ -79,7 +79,10 @@ test("config is strict and merges nested fields", () => {
 	);
 	assert.throws(() => parseConfig({ version: 1 }), /must be 2/);
 	assert.throws(() => parseConfig({ providers: ["openai"] }), /Unknown/);
-	assert.throws(() => parseConfig({ auth: { mode: "automatic" } }), /unsupported/);
+	assert.throws(
+		() => parseConfig({ auth: { mode: "automatic" } }),
+		/unsupported/,
+	);
 });
 
 test("network profiles control egress only", () => {
@@ -87,13 +90,16 @@ test("network profiles control egress only", () => {
 		assert.equal("runtimeInstall" in NETWORK_PROFILES[name], false);
 });
 
-test("sandbox images must be explicit immutable digest references", () => {
+test("custom sandbox images are rejected without a compatibility alias", () => {
 	assert.throws(
-		() => parseConfig({ sandbox: { image: "example.invalid/pi:latest" } }),
-		/digest/,
+		() =>
+			parseConfig({
+				sandbox: {
+					image: `example.invalid/pi@sha256:${"a".repeat(64)}`,
+				},
+			}),
+		/Unknown configuration field: config\.sandbox\.image/,
 	);
-	const image = `example.invalid/pi@sha256:${"a".repeat(64)}`;
-	assert.equal(parseConfig({ sandbox: { image } }).sandbox?.image, image);
 });
 
 test("security-sensitive values reject injection and ambiguous domains", () => {

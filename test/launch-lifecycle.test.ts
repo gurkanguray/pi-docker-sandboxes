@@ -37,6 +37,13 @@ const launch: typeof productionLaunch = (options) =>
 		...options,
 		resolveImage:
 			options.resolveImage ?? (async () => ({ image: fixtureImage })),
+		certifyPlatform:
+			options.certifyPlatform ??
+			(async () => ({
+				os: "darwin",
+				arch: "arm64",
+				runtimePlatform: "linux/arm64",
+			})),
 	});
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
@@ -130,7 +137,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		},
 		inspect: async () => {
 			log.push("inspect");
-			return options.inspection ?? { image: baseConfig.sandbox.image };
+			return options.inspection ?? { image: fixtureImage };
 		},
 		attach: async () => {
 			log.push("attach");
@@ -180,10 +187,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 
 const baseConfig = {
 	syncProfile: "clean" as const,
-	sandbox: {
-		image: fixtureImage,
-		keep: false,
-	},
+	sandbox: { keep: false },
 	export: { onExit: "never" as const },
 };
 
@@ -303,7 +307,10 @@ test("fresh launch rejects a configured sandbox name before sbx access", async (
 		configuredName: true,
 		keep: true,
 	});
-	await assert.rejects(subject.operation, /--fresh cannot be combined with sandbox\.name/);
+	await assert.rejects(
+		subject.operation,
+		/--fresh cannot be combined with sandbox\.name/,
+	);
 	assert.deepEqual(subject.log, []);
 });
 

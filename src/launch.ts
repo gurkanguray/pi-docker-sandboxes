@@ -33,6 +33,10 @@ import {
 	listHostProviderIds,
 	syncHostProviderSecrets,
 } from "./host-auth.ts";
+import {
+	certifyHostPlatform,
+	type SupportedHost,
+} from "./platform.ts";
 import { providerSetupGuidance } from "./preflight.ts";
 import { resolveAvailableServices } from "./providers.ts";
 import { SbxClient, SbxCommandError } from "./sbx/client.ts";
@@ -120,6 +124,8 @@ export interface LaunchOptions {
 	onWarning?: (warning: string) => void;
 	/** @internal Test-only image resolver injection. */
 	resolveImage?: KitImageResolver;
+	/** @internal Test-only host certification injection. */
+	certifyPlatform?: () => Promise<SupportedHost>;
 	/** @internal Test-only state persistence injection. */
 	saveState?: typeof saveSandboxState;
 	/** @internal Test-only repository inspection injection. */
@@ -321,11 +327,35 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	const config = mergeConfig(loadedConfig.value, override);
 	if (options.fresh && config.sandbox.name)
 		throw new Error("--fresh cannot be combined with sandbox.name");
-	const sync = syncOptions(config.syncProfile, config.sync);
 	if (!config.enabled)
 		throw new Error(
 			"Docker Sandboxes integration is disabled by configuration",
 		);
+	let resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
+	try {
+		resolvedImage = await (options.resolveImage ?? resolveKitImage)(config);
+	} catch (cause) {
+		if (cause instanceof OperationError) throw cause;
+		throw new OperationError({
+			phase: "preflight",
+			operation: "resolve immutable sandbox image",
+			detail: errorDetail(cause),
+			recovery: ["wait for a published production runtime image"],
+			cause,
+		});
+	}
+	try {
+		await (options.certifyPlatform ?? certifyHostPlatform)();
+	} catch (cause) {
+		throw new OperationError({
+			phase: "preflight",
+			operation: "certify host platform",
+			detail: errorDetail(cause),
+			recovery: ["pi-dsbx doctor"],
+			cause,
+		});
+	}
+	const sync = syncOptions(config.syncProfile, config.sync);
 	let capabilities: Awaited<ReturnType<SbxClient["capabilities"]>>;
 	try {
 		capabilities = await client.capabilities();
@@ -581,19 +611,6 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			warnings.push(
 				"launcher does not pass host SSH_AUTH_SOCK; Docker Sandboxes may independently provide a proxy socket",
 			);
-		let resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
-		try {
-			resolvedImage = await (options.resolveImage ?? resolveKitImage)(config);
-		} catch (cause) {
-			if (cause instanceof OperationError) throw cause;
-			throw new OperationError({
-				phase: "preflight",
-				operation: "resolve immutable sandbox image",
-				detail: errorDetail(cause),
-				recovery: ["pi-dsbx image build"],
-				cause,
-			});
-		}
 		const spec = buildKitSpec({
 			config,
 			services: resolvedProviders.services,
@@ -852,12 +869,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			if (credentialError) throw credentialError;
 		}
 
-		if (
-			!existing &&
-			!options.fresh &&
-			state &&
-			sync.sessions === "managed"
-		) {
+		if (!existing && !options.fresh && state && sync.sessions === "managed") {
 			primaryPhase = "create";
 			primaryOperation = "restore managed sessions";
 			await restoreSessions(client, agentDir, state.hostRepoIdentity, name);
@@ -936,18 +948,12 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 
 			let exportRequested = false;
 			let exportSucceeded = false;
-			if (
-				inspected &&
-				changes === "changed" &&
-				!config.sandbox.keep &&
-				state
-			) {
+			if (inspected && changes === "changed" && !config.sandbox.keep && state) {
 				exportRequested =
 					config.export.onExit === "always" ||
 					(config.export.onExit === "prompt" &&
-						(await options.confirm?.(
-							"Export sandbox changes as a patch?",
-						)) === true);
+						(await options.confirm?.("Export sandbox changes as a patch?")) ===
+							true);
 				if (exportRequested)
 					exportSucceeded = await finalize(
 						"export-or-preserve",

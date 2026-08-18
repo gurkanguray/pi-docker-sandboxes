@@ -67,6 +67,13 @@ const launch: typeof productionLaunch = (options) =>
 		...options,
 		resolveImage:
 			options.resolveImage ?? (async () => ({ image: launchImage })),
+		certifyPlatform:
+			options.certifyPlatform ??
+			(async () => ({
+				os: "darwin",
+				arch: "arm64",
+				runtimePlatform: "linux/arm64",
+			})),
 	});
 
 const launchClient = {
@@ -88,10 +95,7 @@ const launchClient = {
 
 const launchConfig = {
 	syncProfile: "clean" as const,
-	sandbox: {
-		image: launchImage,
-		keep: true,
-	},
+	sandbox: { keep: true },
 	export: { onExit: "never" as const },
 };
 
@@ -115,6 +119,54 @@ test("production launch fails closed before sandbox mutation while images are un
 		},
 	);
 	assert.equal(created, false);
+});
+
+test("unpublished runtime leaves an approved unborn repository unborn", async () => {
+	const root = await unbornRepository();
+	await assert.rejects(
+		productionLaunch({
+			cwd: root,
+			client: launchClient,
+			config: launchConfig,
+			yes: true,
+		}),
+		(error: unknown) => {
+			assert.equal(
+				(error as { detail?: string }).detail,
+				"production runtime image standard is unpublished",
+			);
+			return true;
+		},
+	);
+	await assert.rejects(git(root, "rev-parse", "--verify", "HEAD"));
+	assert.equal(await git(root, "status", "--porcelain=v1"), "");
+});
+
+test("host certification rejection precedes repository inspection", async () => {
+	let inspected = false;
+	await assert.rejects(
+		launch({
+			cwd: "/not-inspected",
+			client: launchClient,
+			config: launchConfig,
+			certifyPlatform: async () => {
+				throw new Error("Ubuntu 24.04 or newer is required; detected ubuntu 22.04");
+			},
+			inspectRepository: async (...args) => {
+				inspected = true;
+				return inspectRepository(...args);
+			},
+		}),
+		(error: unknown) => {
+			assert.equal((error as { operation?: string }).operation, "certify host platform");
+			assert.match(
+				(error as { detail?: string }).detail ?? "",
+				/Ubuntu 24\.04 or newer is required/,
+			);
+			return true;
+		},
+	);
+	assert.equal(inspected, false);
 });
 
 test("launch stages personalization but no runtime package archive or setup", async () => {
@@ -1110,7 +1162,10 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 			);
 			const cleanup = commands.find((args) => args[0] === "rm");
 			assert.ok(cleanup, `${failure} failure must attempt OAuth cleanup`);
-			assert.match(cleanup.at(-1) ?? "", /^\/root\/\.pi-docker-sandboxes-auth-/);
+			assert.match(
+				cleanup.at(-1) ?? "",
+				/^\/root\/\.pi-docker-sandboxes-auth-/,
+			);
 		}
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -1610,7 +1665,7 @@ test("launch passes the exact sanitized environment to create and attach request
 			create: async (request: { env?: NodeJS.ProcessEnv }) => {
 				requests.push(request);
 			},
-			inspect: async () => ({ image: launchConfig.sandbox.image }),
+			inspect: async () => ({ image: launchImage }),
 			attach: async (request: { env?: NodeJS.ProcessEnv }) => {
 				requests.push(request);
 				return 0;
@@ -1827,6 +1882,14 @@ test("CLI parser requires explicit options and keeps Pi args after separator", (
 	assert.deepEqual(parsed.piArgs, ["--help"]);
 	assert.throws(() => parseRunArgs(["--direct"]), /Unknown run option/);
 	assert.throws(() => parseRunArgs(["--share-skills"]), /Unknown run option/);
+	assert.throws(
+		() =>
+			parseRunArgs([
+				"--image",
+				`example.invalid/pi@sha256:${"a".repeat(64)}`,
+			]),
+		/Unknown run option: --image/,
+	);
 	assert.throws(() => parseRunArgs(["--no-sync-back"]), /Unknown run option/);
 	assert.throws(() => parseRunArgs(["--wat"]), /Unknown run option/);
 });
