@@ -150,7 +150,9 @@ test("host certification rejection precedes repository inspection", async () => 
 			client: launchClient,
 			config: launchConfig,
 			certifyPlatform: async () => {
-				throw new Error("Ubuntu 24.04 or newer is required; detected ubuntu 22.04");
+				throw new Error(
+					"Ubuntu 24.04 or newer is required; detected ubuntu 22.04",
+				);
 			},
 			inspectRepository: async (...args) => {
 				inspected = true;
@@ -158,7 +160,10 @@ test("host certification rejection precedes repository inspection", async () => 
 			},
 		}),
 		(error: unknown) => {
-			assert.equal((error as { operation?: string }).operation, "certify host platform");
+			assert.equal(
+				(error as { operation?: string }).operation,
+				"certify host platform",
+			);
 			assert.match(
 				(error as { detail?: string }).detail ?? "",
 				/Ubuntu 24\.04 or newer is required/,
@@ -1884,10 +1889,7 @@ test("CLI parser requires explicit options and keeps Pi args after separator", (
 	assert.throws(() => parseRunArgs(["--share-skills"]), /Unknown run option/);
 	assert.throws(
 		() =>
-			parseRunArgs([
-				"--image",
-				`example.invalid/pi@sha256:${"a".repeat(64)}`,
-			]),
+			parseRunArgs(["--image", `example.invalid/pi@sha256:${"a".repeat(64)}`]),
 		/Unknown run option: --image/,
 	);
 	assert.throws(() => parseRunArgs(["--no-sync-back"]), /Unknown run option/);

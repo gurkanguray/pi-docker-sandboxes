@@ -27,7 +27,11 @@ test("image verification script fails explicitly without a success receipt", asy
 				`example.invalid/runtime@sha256:${"a".repeat(64)}`,
 			]),
 			(error: unknown) => {
-				const output = error as { stdout?: string; stderr?: string; code?: number };
+				const output = error as {
+					stdout?: string;
+					stderr?: string;
+					code?: number;
+				};
 				assert.equal(output.code, 1);
 				assert.match(
 					output.stderr ?? "",

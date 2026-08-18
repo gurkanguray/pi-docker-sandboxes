@@ -14,14 +14,13 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import {
-	acquireSandboxLease,
-	LEASE_BUSY_EXIT_CODE,
-} from "../src/lease.ts";
+import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
 
 const exec = promisify(execFile);
 
-async function fixture(t: { after(fn: () => Promise<void>): void }): Promise<string> {
+async function fixture(t: {
+	after(fn: () => Promise<void>): void;
+}): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-"));
 	await mkdir(join(root, ".git"));
 	t.after(() => rm(root, { recursive: true, force: true }));
@@ -53,7 +52,10 @@ test("live leases are exclusive and report their owning operation", async (t) =>
 	await assert.rejects(
 		() => acquireSandboxLease(root, "box", "destroy"),
 		(error: unknown) => {
-			assert.equal((error as { exitCode?: number }).exitCode, LEASE_BUSY_EXIT_CODE);
+			assert.equal(
+				(error as { exitCode?: number }).exitCode,
+				LEASE_BUSY_EXIT_CODE,
+			);
 			assert.match(String(error), /busy.*run/i);
 			return true;
 		},
@@ -136,20 +138,22 @@ test("release refuses to unlink a replacement lease", async (t) => {
 test("concurrent in-process acquisition has exactly one winner", async (t) => {
 	const root = await fixture(t);
 	const attempts = await Promise.allSettled(
-		Array.from({ length: 16 }, () =>
-			acquireSandboxLease(root, "box", "run"),
-		),
+		Array.from({ length: 16 }, () => acquireSandboxLease(root, "box", "run")),
 	);
 	const acquired = attempts.filter(
-		(result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof acquireSandboxLease>>> =>
-			result.status === "fulfilled",
+		(
+			result,
+		): result is PromiseFulfilledResult<
+			Awaited<ReturnType<typeof acquireSandboxLease>>
+		> => result.status === "fulfilled",
 	);
 	assert.equal(acquired.length, 1);
 	assert.equal(
 		attempts.filter(
 			(result) =>
 				result.status === "rejected" &&
-				(result.reason as { exitCode?: number }).exitCode === LEASE_BUSY_EXIT_CODE,
+				(result.reason as { exitCode?: number }).exitCode ===
+					LEASE_BUSY_EXIT_CODE,
 		).length,
 		15,
 	);
@@ -190,10 +194,20 @@ if codes != [0, int(busy)]:
 `;
 	const result = await exec(
 		"python3",
-		["-c", python, process.execPath, module, root, worker, String(LEASE_BUSY_EXIT_CODE)],
+		[
+			"-c",
+			python,
+			process.execPath,
+			module,
+			root,
+			worker,
+			String(LEASE_BUSY_EXIT_CODE),
+		],
 		{ timeout: 10_000 },
 	);
-	console.log(`python lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`);
+	console.log(
+		`python lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`,
+	);
 	assert.match(result.stdout, new RegExp(`codes=0,${LEASE_BUSY_EXIT_CODE}`));
 	assert.match(result.stdout, /contender=.*busy.*run/i);
 });

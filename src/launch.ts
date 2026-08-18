@@ -33,10 +33,7 @@ import {
 	listHostOAuthProviderIds,
 	syncHostProviderSecrets,
 } from "./host-auth.ts";
-import {
-	certifyHostPlatform,
-	type SupportedHost,
-} from "./platform.ts";
+import { certifyHostPlatform, type SupportedHost } from "./platform.ts";
 import { providerSetupGuidance } from "./preflight.ts";
 import { resolveAvailableServices } from "./providers.ts";
 import { SbxClient, SbxCommandError } from "./sbx/client.ts";

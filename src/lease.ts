@@ -80,7 +80,8 @@ function flags(): { directory: number; create: number; read: number } {
 		if (typeof constants[name] !== "number")
 			throw new Error(`Lifecycle leases are unsupported: ${name} unavailable`);
 	return {
-		directory: constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		directory:
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
 		create:
 			constants.O_CREAT |
 			constants.O_EXCL |

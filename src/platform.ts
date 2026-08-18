@@ -53,7 +53,9 @@ function versionAtLeast(
 	if (!match) return false;
 	const major = Number(match[1]);
 	const minor = Number(match[2] ?? 0);
-	return major > minimumMajor || (major === minimumMajor && minor >= minimumMinor);
+	return (
+		major > minimumMajor || (major === minimumMajor && minor >= minimumMinor)
+	);
 }
 
 export function detectHostPlatform(
@@ -82,10 +84,7 @@ export async function certifyHostPlatform(
 		return host;
 	}
 	const release = await probe.linuxOsRelease();
-	if (
-		release.id !== "ubuntu" ||
-		!versionAtLeast(release.versionId, 24, 4)
-	)
+	if (release.id !== "ubuntu" || !versionAtLeast(release.versionId, 24, 4))
 		throw new Error(
 			`Ubuntu 24.04 or newer is required; detected ${release.id || "unknown"} ${release.versionId || "unknown"}`,
 		);

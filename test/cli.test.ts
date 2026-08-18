@@ -13,15 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import {
-	createLaunchReporter,
-	createPausedConfirm,
-	main,
-} from "../src/cli.ts";
-import {
-	acquireSandboxLease,
-	LEASE_BUSY_EXIT_CODE,
-} from "../src/lease.ts";
+import { createLaunchReporter, createPausedConfirm, main } from "../src/cli.ts";
+import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
 import {
 	inspectRepository,
 	sandboxName,
@@ -201,10 +194,11 @@ test("symlinked CLI entry executes its main function", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-symlink-"));
 	const link = join(directory, "pi-dsbx.ts");
 	await symlink(await realpath(cli), link);
-	const { stdout } = await exec(
-		process.execPath,
-		["--experimental-strip-types", link, "--help"],
-	);
+	const { stdout } = await exec(process.execPath, [
+		"--experimental-strip-types",
+		link,
+		"--help",
+	]);
 	assert.match(stdout, /Usage:/);
 });
 
