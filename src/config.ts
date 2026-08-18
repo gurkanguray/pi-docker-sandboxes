@@ -5,6 +5,7 @@ import { assertDigestReference } from "./image-lock.ts";
 
 export type SecurityProfile = "hardened" | "development";
 export type SyncProfile = "clean" | "mirror" | "custom";
+export type AuthMode = "none" | "proxy" | "oauth-copy";
 export interface SyncOptions {
 	settings: boolean;
 	models: boolean;
@@ -24,30 +25,30 @@ export interface CredentialService {
 }
 
 export interface DockerSandboxConfig {
-	version: 1;
+	version: 2;
 	enabled: boolean;
 	profile: SecurityProfile;
 	syncProfile: SyncProfile;
 	sync: SyncOptions;
+	auth: { mode: AuthMode; providers: string[] };
 	sandbox: {
 		name?: string;
 		keep: boolean;
 		dockerEngine: boolean;
 		image?: string;
 	};
-	providers: string[];
 	network: { allow: string[]; deny: string[] };
 	export: { onExit: "prompt" | "always" | "never"; directory: string };
 }
 
 export const DEFAULT_CONFIG: DockerSandboxConfig = {
-	version: 1,
+	version: 2,
 	enabled: true,
-	profile: "development",
+	profile: "hardened",
 	syncProfile: "custom",
 	sync: {
-		settings: true,
-		models: true,
+		settings: false,
+		models: false,
 		packages: false,
 		skills: false,
 		prompts: false,
@@ -55,8 +56,8 @@ export const DEFAULT_CONFIG: DockerSandboxConfig = {
 		extensions: false,
 		sessions: "managed",
 	},
-	sandbox: { keep: false, dockerEngine: true },
-	providers: [],
+	auth: { mode: "none", providers: [] },
+	sandbox: { keep: false, dockerEngine: false },
 	network: { allow: [], deny: [] },
 	export: { onExit: "prompt", directory: ".git/pi-docker-sandbox/patches" },
 };
@@ -67,8 +68,8 @@ const ROOT_KEYS = new Set([
 	"profile",
 	"syncProfile",
 	"sync",
+	"auth",
 	"sandbox",
-	"providers",
 	"network",
 	"export",
 ]);
@@ -85,6 +86,8 @@ const SYNC_KEYS = new Set([
 	"sessions",
 ]);
 const EXPORT_KEYS = new Set(["onExit", "directory"]);
+const AUTH_KEYS = new Set(["mode", "providers"]);
+const AUTH_MODES = new Set<AuthMode>(["none", "proxy", "oauth-copy"]);
 const PROFILES = new Set<SecurityProfile>(["hardened", "development"]);
 const SYNC_PROFILES = new Set<SyncProfile>(["clean", "mirror", "custom"]);
 
@@ -161,8 +164,12 @@ export function validateDomain(domain: string, allowWildcard = true): string {
 }
 
 export type ConfigOverride = Partial<
-	Omit<DockerSandboxConfig, "sandbox" | "sync" | "network" | "export">
+	Omit<
+		DockerSandboxConfig,
+		"auth" | "sandbox" | "sync" | "network" | "export"
+	>
 > & {
+	auth?: Partial<DockerSandboxConfig["auth"]>;
 	sandbox?: Partial<DockerSandboxConfig["sandbox"]>;
 	sync?: Partial<DockerSandboxConfig["sync"]>;
 	network?: Partial<DockerSandboxConfig["network"]>;
@@ -174,8 +181,8 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 	rejectUnknown(input, ROOT_KEYS, `${source}.`);
 	const output: ConfigOverride = {};
 	if (input.version !== undefined) {
-		if (input.version !== 1) throw new TypeError(`${source}.version must be 1`);
-		output.version = 1;
+		if (input.version !== 2) throw new TypeError(`${source}.version must be 2`);
+		output.version = 2;
 	}
 	if (input.enabled !== undefined)
 		output.enabled = boolean(input.enabled, `${source}.enabled`);
@@ -217,8 +224,22 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.sync.sessions = value;
 		}
 	}
-	if (input.providers !== undefined)
-		output.providers = strings(input.providers, `${source}.providers`);
+	if (input.auth !== undefined) {
+		const auth = object(input.auth, `${source}.auth`);
+		rejectUnknown(auth, AUTH_KEYS, `${source}.auth.`);
+		output.auth = {};
+		if (auth.mode !== undefined) {
+			const value = string(auth.mode, `${source}.auth.mode`) as AuthMode;
+			if (!AUTH_MODES.has(value))
+				throw new TypeError(`${source}.auth.mode is unsupported`);
+			output.auth.mode = value;
+		}
+		if (auth.providers !== undefined)
+			output.auth.providers = strings(
+				auth.providers,
+				`${source}.auth.providers`,
+			);
+	}
 	if (input.sandbox !== undefined) {
 		const sandbox = object(input.sandbox, `${source}.sandbox`);
 		rejectUnknown(sandbox, SANDBOX_KEYS, `${source}.sandbox.`);
@@ -284,6 +305,7 @@ export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
 		(result, value) => ({
 			...result,
 			...value,
+			auth: { ...result.auth, ...value.auth },
 			sandbox: { ...result.sandbox, ...value.sandbox },
 			sync: { ...result.sync, ...value.sync },
 			network: { ...result.network, ...value.network },

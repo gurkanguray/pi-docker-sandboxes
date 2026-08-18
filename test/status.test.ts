@@ -113,8 +113,11 @@ test("doctor reports discovered proxy credential services", async () => {
 
 test("doctor reports configured requested credentials and unsupported requests separately", async () => {
 	const config = await import("../src/config.ts");
-	const original = config.DEFAULT_CONFIG.providers;
-	config.DEFAULT_CONFIG.providers = ["openai", "cursor"];
+	const original = config.DEFAULT_CONFIG.auth;
+	config.DEFAULT_CONFIG.auth = {
+		mode: "proxy",
+		providers: ["openai", "cursor"],
+	};
 	try {
 		const client = {
 			version: async () => ({ version: "0.38.0" }),
@@ -148,7 +151,7 @@ test("doctor reports configured requested credentials and unsupported requests s
 			),
 		);
 	} finally {
-		config.DEFAULT_CONFIG.providers = original;
+		config.DEFAULT_CONFIG.auth = original;
 	}
 });
 

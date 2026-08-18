@@ -1,6 +1,6 @@
 {
   "name": "pi-docker-sandboxes",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Run Pi inside a Docker Sandboxes microVM",
   "type": "module",
   "bin": {

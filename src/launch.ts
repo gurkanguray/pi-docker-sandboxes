@@ -413,11 +413,9 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		options.onWarning?.(warning);
 	};
 	const hostProviderIds =
-		config.providers.length > 0
-			? config.providers
-			: await (options.listHostProviders ?? listHostProviderIds)();
+		config.auth.mode === "none" ? [] : config.auth.providers;
 	const oauthHostIds =
-		sync.models && !options.noHostAuth
+		config.auth.mode === "oauth-copy" && !options.noHostAuth
 			? await listHostOAuthProviderIds(hostProviderIds)
 			: new Set<string>();
 	const mapped = classifyHostProviders(
@@ -438,7 +436,8 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			`Requested credential service ${id} is not both audited and proxy-supported`,
 		);
 	if (
-		config.providers.length > 0 &&
+		config.auth.mode === "proxy" &&
+		config.auth.providers.length > 0 &&
 		capabilities.credentialServices.length === 0
 	)
 		pushProviderWarning(

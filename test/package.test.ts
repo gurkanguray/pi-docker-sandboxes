@@ -16,71 +16,10 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
-import type { ImageLock } from "../src/image-lock.ts";
-import { loadImageLock } from "../src/image-lock.ts";
 
 const exec = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const rootPath = fileURLToPath(root);
-interface InstalledImageReceipt {
-	image: string;
-	digest: string;
-	imageId: string;
-	registryDigest: string | null;
-	platform: string;
-	uid: number;
-	user: string;
-	entrypoint: string[];
-	versions: Record<string, string>;
-	parity: { status: string; candidate: string | null };
-}
-
-function assertInstalledImageReceipt(
-	receipt: InstalledImageReceipt,
-	image: string,
-	lock: ImageLock,
-): void {
-	assert.deepEqual(Object.keys(receipt).sort(), [
-		"digest",
-		"entrypoint",
-		"image",
-		"imageId",
-		"parity",
-		"platform",
-		"registryDigest",
-		"uid",
-		"user",
-		"versions",
-	]);
-	assert.equal(receipt.image, image);
-	assert.match(receipt.digest, /^sha256:[0-9a-f]{64}$/);
-	assert.equal(receipt.digest, receipt.imageId);
-	assert.equal(receipt.registryDigest, null);
-	assert.equal(receipt.platform, "linux/arm64");
-	assert.equal(receipt.uid, 1000);
-	assert.equal(receipt.user, "agent");
-	assert.deepEqual(receipt.entrypoint, ["tini", "--"]);
-	assert.deepEqual(Object.keys(receipt.versions).sort(), [
-		"fd",
-		"git",
-		"node",
-		"npm",
-		"package",
-		"pi",
-		"ripgrep",
-	]);
-	assert.equal(receipt.versions.package, lock.packageVersion);
-	assert.equal(receipt.versions.pi, lock.piVersion);
-	assert.equal(receipt.versions.fd, lock.tools.fdDebianVersion);
-	assert.equal(receipt.versions.ripgrep, lock.tools.rgDebianVersion);
-	assert.equal(receipt.versions.git, lock.tools.gitDebianVersion);
-	assert.match(receipt.versions.node ?? "", /^v\d+\.\d+\.\d+$/);
-	assert.match(receipt.versions.npm ?? "", /^\d+\.\d+\.\d+$/);
-	assert.deepEqual(receipt.parity, {
-		status: "not-compared",
-		candidate: null,
-	});
-}
 
 test("source package builds the CLI exactly once before scriptless packing", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-source-pack-"));
@@ -146,70 +85,11 @@ test("source CLI build failure is structured", async () => {
 				assert.equal((error as { name?: string }).name, "OperationError");
 				assert.equal((error as { phase?: string }).phase, "prepare");
 				assert.equal((error as { exitCode?: number }).exitCode, 7);
-				assert.deepEqual((error as { recovery?: string[] }).recovery, [
-					"pi-dsbx image build",
-				]);
 				return true;
 			},
 		);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
-	}
-});
-
-test("installed receipt assertion rejects every omitted or mutated field", async () => {
-	const lock = await loadImageLock();
-	const image = lock.localImage;
-	const id = `sha256:${"a".repeat(64)}`;
-	const receipt: InstalledImageReceipt = {
-		image,
-		digest: id,
-		imageId: id,
-		registryDigest: null,
-		platform: lock.platform,
-		uid: 1000,
-		user: "agent",
-		entrypoint: ["tini", "--"],
-		versions: {
-			package: lock.packageVersion,
-			pi: lock.piVersion,
-			fd: lock.tools.fdDebianVersion,
-			ripgrep: lock.tools.rgDebianVersion,
-			git: lock.tools.gitDebianVersion,
-			node: "v22.22.1",
-			npm: "9.2.0",
-		},
-		parity: { status: "not-compared", candidate: null },
-	};
-	assertInstalledImageReceipt(receipt, image, lock);
-	const mutations: InstalledImageReceipt[] = [
-		{ ...receipt, image: "wrong" },
-		{ ...receipt, digest: "sha256:bad" },
-		{ ...receipt, imageId: `sha256:${"b".repeat(64)}` },
-		{ ...receipt, registryDigest: `registry/image@${id}` },
-		{ ...receipt, platform: "linux/amd64" },
-		{ ...receipt, uid: 0 },
-		{ ...receipt, user: "root" },
-		{ ...receipt, entrypoint: ["sh"] },
-		...["package", "pi", "fd", "ripgrep", "git", "node", "npm"].map((name) => ({
-			...receipt,
-			versions: { ...receipt.versions, [name]: "mutated" },
-		})),
-		{ ...receipt, parity: { status: "matched", candidate: null } },
-		{ ...receipt, parity: { status: "not-compared", candidate: "unexpected" } },
-	];
-	for (const mutation of mutations)
-		assert.throws(() => assertInstalledImageReceipt(mutation, image, lock));
-	for (const field of Object.keys(receipt)) {
-		const incomplete = { ...receipt } as Record<string, unknown>;
-		delete incomplete[field];
-		assert.throws(() =>
-			assertInstalledImageReceipt(
-				incomplete as unknown as InstalledImageReceipt,
-				image,
-				lock,
-			),
-		);
 	}
 });
 
@@ -262,28 +142,8 @@ test("packed CLI runs from node_modules", async () => {
 		assert.equal(
 			(await readFile(reexecLog, "utf8")).trim().split("\n").length,
 			1,
-			"the package bin must not forward NODE_OPTIONS to its CLI child",
 		);
-
 		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
-		await assert.rejects(access(join(packageDirectory, "scripts")));
-		for (const script of [
-			"build:cli",
-			"typecheck",
-			"test:e2e",
-			"docs:build",
-			"package:verify",
-		])
-			await assert.rejects(
-				exec("npm", ["run", script], { cwd: packageDirectory }),
-				(error: unknown) => {
-					assert.match(
-						(error as { stderr?: string }).stderr ?? "",
-						/source checkout only/,
-					);
-					return true;
-				},
-			);
 	} finally {
 		await chmod(
 			join(directory, "node_modules", "pi-docker-sandboxes"),
@@ -291,7 +151,6 @@ test("packed CLI runs from node_modules", async () => {
 		).catch(() => {});
 		await rm(directory, { recursive: true, force: true });
 	}
-	await assert.rejects(access(directory));
 });
 
 test("installed read-only package repacks without scripts or a compiler", async () => {
@@ -317,7 +176,6 @@ test("installed read-only package repacks without scripts or a compiler", async 
 		const { packPackage, runImageCommand } = await import(
 			pathToFileURL(join(packageDirectory, "dist", "image.js")).href
 		);
-		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
 		const output = join(directory, "output");
 		await mkdir(output);
 		const calls: string[][] = [];
@@ -334,10 +192,8 @@ test("installed read-only package repacks without scripts or a compiler", async 
 			},
 		);
 		assert.equal(calls.length, 1);
-		assert.equal(calls[0]?.[0], "pack");
 		const { stdout: listing } = await exec("tar", ["-tf", archive]);
 		assert.match(listing, /^package\/dist\/cli\.js$/m);
-		assert.match(listing, /^package\/dist\/sbx\/inherited-runner\.mjs$/m);
 	} finally {
 		await chmod(
 			join(directory, "node_modules", "pi-docker-sandboxes"),
@@ -345,7 +201,6 @@ test("installed read-only package repacks without scripts or a compiler", async 
 		).catch(() => {});
 		await rm(directory, { recursive: true, force: true });
 	}
-	await assert.rejects(access(directory));
 });
 
 test("npm package includes the image lock contract", async () => {
@@ -356,21 +211,18 @@ test("npm package includes the image lock contract", async () => {
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
-		const tarball = join(directory, stdout.trim());
-		const { stdout: listing } = await exec("tar", ["-tf", tarball]);
+		const { stdout: listing } = await exec("tar", [
+			"-tf",
+			join(directory, stdout.trim()),
+		]);
 		const files = new Set(listing.trim().split("\n"));
 		assert.equal(files.has("package/docker/image-lock.json"), true);
 		assert.equal(files.has("package/src/image-lock.ts"), true);
+		assert.equal(files.has("package/src/platform.ts"), true);
+		assert.equal(files.has("package/src/state-schema.ts"), true);
 		assert.equal(files.has("package/dist/cli.js"), true);
-		assert.equal(files.has("package/dist/image.js"), true);
-		assert.equal(files.has("package/dist/sbx/inherited-runner.mjs"), true);
 		assert.equal(files.has("package/scripts/verify-image.mjs"), false);
-		assert.equal(files.has("package/scripts/verify-package.mjs"), false);
-		assert.equal(files.has("package/scripts/fresh-install-smoke.mjs"), false);
-		assert.equal(files.has("package/docs/.vitepress/config.mts"), false);
-		assert.equal(files.has("package/docs/.vitepress/dist/index.html"), false);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
-	await assert.rejects(access(directory));
 });

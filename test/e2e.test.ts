@@ -93,7 +93,7 @@ sandboxTest(
 				projectTrusted: false,
 				config: {
 					syncProfile: "clean",
-					providers: ["openai"],
+					auth: { mode: "proxy", providers: ["openai"] },
 					sandbox: { name, keep: true },
 				},
 				piArgs: ["--help"],
@@ -114,7 +114,7 @@ sandboxTest(
 				},
 				config: {
 					syncProfile: "clean",
-					providers: ["openai"],
+					auth: { mode: "proxy", providers: ["openai"] },
 					sandbox: { name, keep: true },
 				},
 				piArgs: ["--help"],

@@ -342,10 +342,7 @@ export async function main(
 		return 0;
 	}
 	if (command === "image" && args[0] === "build") {
-		const result = await buildLocalImage({ keepBuildDirectory: true });
-		console.log(
-			`Built and verified ${result.verifiedImage}\nLoaded ${result.image}\nArtifacts: ${result.buildDirectory}`,
-		);
+		await buildLocalImage();
 		return 0;
 	}
 	if (command === "export" || command === "apply" || command === "destroy") {

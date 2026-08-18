@@ -13,15 +13,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NETWORK_PROFILES } from "../src/profiles.ts";
 
-test("fresh defaults use the approved safe personalization and removal policy", () => {
+test("fresh defaults use the approved production security policy", () => {
 	assert.deepEqual(DEFAULT_CONFIG, {
-		version: 1,
+		version: 2,
 		enabled: true,
-		profile: "development",
+		profile: "hardened",
 		syncProfile: "custom",
 		sync: {
-			settings: true,
-			models: true,
+			settings: false,
+			models: false,
 			packages: false,
 			skills: false,
 			prompts: false,
@@ -29,8 +29,8 @@ test("fresh defaults use the approved safe personalization and removal policy", 
 			extensions: false,
 			sessions: "managed",
 		},
-		sandbox: { keep: false, dockerEngine: true },
-		providers: [],
+		auth: { mode: "none", providers: [] },
+		sandbox: { keep: false, dockerEngine: false },
 		network: { allow: [], deny: [] },
 		export: {
 			onExit: "prompt",
@@ -41,20 +41,22 @@ test("fresh defaults use the approved safe personalization and removal policy", 
 
 test("config is strict and merges nested fields", () => {
 	const parsed = parseConfig({
-		version: 1,
+		version: 2,
 		profile: "hardened",
 		syncProfile: "custom",
 		sync: { extensions: true, sessions: "sandbox" },
+		auth: { mode: "proxy", providers: ["openai"] },
 		sandbox: { keep: false },
 		network: { allow: ["api.example.com:443"] },
 	});
 	const config = mergeConfig(parsed);
 	assert.equal(config.profile, "hardened");
 	assert.equal(config.sandbox.keep, false);
-	assert.equal(config.sandbox.dockerEngine, true);
+	assert.equal(config.sandbox.dockerEngine, false);
+	assert.deepEqual(config.auth, { mode: "proxy", providers: ["openai"] });
 	assert.deepEqual(config.network.allow, ["api.example.com:443"]);
 	assert.equal(config.sync.extensions, true);
-	assert.equal(config.sync.settings, true);
+	assert.equal(config.sync.settings, false);
 	assert.equal(config.sync.sessions, "sandbox");
 	assert.throws(
 		() => parseConfig({ workspaecMode: "clone" }),
@@ -75,7 +77,9 @@ test("config is strict and merges nested fields", () => {
 		() => parseConfig({ sync: { sessions: "ephemeral" } }),
 		/unsupported/,
 	);
-	assert.throws(() => parseConfig({ version: 2 }), /must be 1/);
+	assert.throws(() => parseConfig({ version: 1 }), /must be 2/);
+	assert.throws(() => parseConfig({ providers: ["openai"] }), /Unknown/);
+	assert.throws(() => parseConfig({ auth: { mode: "automatic" } }), /unsupported/);
 });
 
 test("network profiles control egress only", () => {
@@ -129,14 +133,14 @@ test("current config is loaded without changing source bytes", async () => {
 	const home = join(root, "home");
 	const path = join(home, ".pi", "agent", "docker-sandboxes.json");
 	const original =
-		'{"version":1,"syncProfile":"custom","sandbox":{"keep":true}}\n';
+		'{"version":2,"syncProfile":"custom","sandbox":{"keep":true}}\n';
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(path, original);
 	const loaded = await loadConfigResult(root, { home });
 	assert.equal(loaded.value.syncProfile, "custom");
 	assert.deepEqual(loaded.value.sync, {
-		settings: true,
-		models: true,
+		settings: false,
+		models: false,
 		packages: false,
 		skills: false,
 		prompts: false,
@@ -157,11 +161,11 @@ test("project config applies only when explicitly trusted", async () => {
 	await mkdir(join(cwd, ".pi"), { recursive: true });
 	await writeFile(
 		join(home, ".pi", "agent", "docker-sandboxes.json"),
-		'{"version":1,"profile":"hardened"}',
+		'{"version":2,"profile":"hardened"}',
 	);
 	await writeFile(
 		join(cwd, ".pi", "docker-sandboxes.json"),
-		'{"version":1,"sandbox":{"keep":true}}',
+		'{"version":2,"sandbox":{"keep":true}}',
 	);
 	assert.equal(
 		(await loadConfig(cwd, { home, projectTrusted: false })).sandbox.keep,

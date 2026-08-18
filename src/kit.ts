@@ -5,17 +5,13 @@ import type { CredentialService } from "./config.ts";
 import {
 	IMAGE_LOCK,
 	assertDigestReference,
-	type ImageLock,
+	selectRuntimeImage,
+	type RuntimeImageLock,
 } from "./image-lock.ts";
-import { OperationError } from "./errors.ts";
-import { runImageCommand, verifyImage, type ImageCommand } from "./image.ts";
-import {
-	deriveLocalTemplateImage,
-	requireLocalTemplate,
-} from "./local-template.ts";
+import { detectHostPlatform } from "./platform.ts";
 import { getNetworkProfile } from "./profiles.ts";
 
-export const PACKAGE_VERSION = IMAGE_LOCK.packageVersion;
+export const PACKAGE_VERSION = "1.0.0";
 
 export interface KitOptions {
 	config: DockerSandboxConfig;
@@ -65,47 +61,16 @@ export type KitImageResolver = (
 
 export async function resolveKitImage(
 	config: DockerSandboxConfig,
-	lock: ImageLock = IMAGE_LOCK,
-	run: ImageCommand = runImageCommand,
+	lock: RuntimeImageLock = IMAGE_LOCK,
 ): Promise<ResolvedKitImage> {
-	if (config.sandbox.image)
-		return {
-			image: assertDigestReference(config.sandbox.image, "sandbox.image"),
-		};
-	if (!config.sandbox.dockerEngine)
-		throw new TypeError(
-			"sandbox.image must be set to a digest-pinned image when dockerEngine is false",
-		);
-	try {
-		const discoveredId = (
-			await run("docker", [
-				"image",
-				"inspect",
-				"--format",
-				"{{.Id}}",
-				lock.localImage,
-			])
-		).stdout.trim();
-		if (!/^sha256:[0-9a-f]{64}$/.test(discoveredId))
-			throw new TypeError("locked local tag must resolve to an image ID");
-		const verifiedImage = await verifyImage(discoveredId, lock, run);
-		if (verifiedImage !== discoveredId)
-			throw new TypeError("verified local image identity changed");
-		const image = deriveLocalTemplateImage(lock.localImage, verifiedImage);
-		const template = requireLocalTemplate(
-			(await run("sbx", ["template", "ls", "--json"])).stdout,
-			image,
-		);
-		return { image, templateStoreId: template.storeId };
-	} catch (cause) {
-		throw new OperationError({
-			phase: "preflight",
-			operation: "resolve immutable sandbox image",
-			detail: "The locked local image is absent or invalid",
-			recovery: ["pi-dsbx image build"],
-			cause,
-		});
-	}
+	const host = detectHostPlatform();
+	return {
+		image: selectRuntimeImage(
+			lock,
+			config.sandbox.dockerEngine,
+			host.runtimePlatform,
+		).reference,
+	};
 }
 
 function unique(values: readonly string[]): string[] {
@@ -115,28 +80,9 @@ function unique(values: readonly string[]): string[] {
 export function buildKitSpec(options: KitOptions): PiKitSpec {
 	const { config, services } = options;
 	const profile = getNetworkProfile(config.profile);
-	if (!config.sandbox.dockerEngine && !config.sandbox.image)
-		throw new Error(
-			"sandbox.image must be set to a digest-pinned image when dockerEngine is false",
-		);
-	const image = options.image ?? config.sandbox.image;
-	if (!image)
-		throw new Error(
-			"sandbox.image must be resolved to an immutable configured or verified local image",
-		);
-	try {
-		assertDigestReference(image, "sandbox.image");
-	} catch (cause) {
-		const expectedLocal = image.match(/^(.+):local-([0-9a-f]{64})$/);
-		if (
-			!expectedLocal ||
-			deriveLocalTemplateImage(
-				IMAGE_LOCK.localImage,
-				`sha256:${expectedLocal[2]}`,
-			) !== image
-		)
-			throw cause;
-	}
+	if (!options.image)
+		throw new Error("production runtime image must be resolved before Kit build");
+	const image = assertDigestReference(options.image, "sandbox.image");
 	const serviceDomains = services.flatMap((service) => service.domains);
 	const allow = unique([
 		...profile.allow,

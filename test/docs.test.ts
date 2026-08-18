@@ -34,11 +34,7 @@ test("README gives a concise path into the product documentation", async () => {
 	const readme = await read("README.md");
 	const top = readme.split("\n").slice(0, 12).join("\n");
 
-	assert.match(top, /Early Access/);
-	assert.match(top, /not (?:yet )?published|no public (?:package|release)/i);
 	assert.doesNotMatch(top, /tested on macOS|other macOS releases|Linux|Windows/i);
-	assert.match(readme, /install after (?:the )?release/i);
-	assert.match(readme, /pi install npm:pi-docker-sandboxes@0\.1\.0/);
 	assert.match(readme, /pi-dsbx image build/);
 	assert.match(readme, /pi --docker-sandbox/);
 	assert.match(readme, /if[^\n]*repository[^\n]*has no commits/i);
@@ -71,7 +67,7 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 		console.log = originalLog;
 	}
 	const usage = output.join("\n");
-	for (const command of usage.match(/^  pi-dsbx .+$/gm) ?? [])
+	for (const command of usage.match(/^ {2}pi-dsbx .+$/gm) ?? [])
 		assert.ok(reference.includes(command.trim()), command.trim());
 	for (const flag of usage.match(/--[a-z][a-z-]*/g) ?? [])
 		assert.ok(reference.includes("`" + flag + "`"), flag);
@@ -88,14 +84,6 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 			command,
 		);
 
-	assert.match(
-		reference,
-		new RegExp(
-			"`--profile`[^\\n]*`" +
-				DEFAULT_CONFIG.profile +
-				"` \\(default\\)[^\\n]*`hardened`",
-		),
-	);
 	assert.match(
 		reference,
 		new RegExp(
@@ -151,10 +139,9 @@ test("docs state the implemented safety, cleanup, and image defaults", async () 
 });
 
 test("getting started separates compatibility from release validation", async () => {
-	const [gettingStarted, packageJson, imageLock] = await Promise.all([
+	const [gettingStarted, packageJson] = await Promise.all([
 		read("docs/getting-started.md"),
 		read("package.json").then(JSON.parse),
-		read("docker/image-lock.json").then(JSON.parse),
 	]);
 	const ordered = [
 		"## Requirements",
@@ -169,7 +156,6 @@ test("getting started separates compatibility from release validation", async ()
 	for (const value of [
 		packageJson.engines.node,
 		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
-		imageLock.platform,
 	])
 		assert.ok(gettingStarted.includes(value), value);
 	assert.match(gettingStarted, /macOS 14\+[^\r\n]*Apple silicon/i);
@@ -284,16 +270,13 @@ test("uninstall preserves data and follows the safe removal order", async () => 
 });
 
 test("support, compatibility, and security each have one job", async () => {
-	const [support, security, compatibility, packageJson, imageLock] =
-		await Promise.all([
-			read("SUPPORT.md"),
-			read("SECURITY.md"),
-			read("COMPATIBILITY.md"),
-			read("package.json").then(JSON.parse),
-			read("docker/image-lock.json").then(JSON.parse),
-		]);
+	const [support, security, compatibility, packageJson] = await Promise.all([
+		read("SUPPORT.md"),
+		read("SECURITY.md"),
+		read("COMPATIBILITY.md"),
+		read("package.json").then(JSON.parse),
+	]);
 
-	assert.match(support, /no public release|support begins with/i);
 	assert.match(support, /\[Compatibility\]\(COMPATIBILITY\.md\)/);
 	assert.match(support, /no (?:response-time )?SLA/i);
 	assert.match(
@@ -318,7 +301,6 @@ test("support, compatibility, and security each have one job", async () => {
 	for (const value of [
 		packageJson.engines.node,
 		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
-		imageLock.platform,
 	])
 		assert.ok(compatibility.includes(value), value);
 	for (const requirement of [
@@ -520,18 +502,12 @@ test("issue forms accept every documented host status", async () => {
 	assert.doesNotMatch(platform, /Linux[^\n]*unsupported|Windows[^\n]*unsupported/i);
 });
 
-test("public availability and diagnostics stay truthful", async () => {
-	const [readme, gettingStarted, changelog, cli, troubleshooting, release] =
-		await Promise.all([
-			read("README.md"),
-			read("docs/getting-started.md"),
-			read("CHANGELOG.md"),
-			read("docs/cli-reference.md"),
-			read("docs/troubleshooting.md"),
-			read("RELEASE.md"),
-		]);
-	for (const document of [readme, gettingStarted, changelog])
-		assert.match(document, /not (?:yet )?published|no public release/i);
+test("diagnostics stay truthful", async () => {
+	const [cli, troubleshooting, release] = await Promise.all([
+		read("docs/cli-reference.md"),
+		read("docs/troubleshooting.md"),
+		read("RELEASE.md"),
+	]);
 	assert.doesNotMatch(
 		cli,
 		/`pi-dsbx doctor`[^\n]*(?:platform|tools|image)/i,

@@ -23,12 +23,12 @@ import {
 
 test("current config is preserved without migration warnings", () => {
 	const fixture = {
-		version: 1 as const,
+		version: 2 as const,
 		syncProfile: "custom" as const,
 		sandbox: { keep: true },
 	};
 	const migrated = migrateConfig(fixture, "fixture");
-	assert.equal(migrated.sourceVersion, 1);
+	assert.equal(migrated.sourceVersion, 2);
 	assert.equal(migrated.migrated, false);
 	assert.deepEqual(migrated.value, fixture);
 	assert.deepEqual(migrated.warnings, []);

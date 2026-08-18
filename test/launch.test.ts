@@ -14,7 +14,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { parseRunArgs } from "../src/cli.ts";
 import {
-	launch,
+	launch as productionLaunch,
 	sanitizedHostEnvironment,
 	stripSandboxFlags,
 } from "../src/launch.ts";
@@ -62,6 +62,12 @@ async function exists(path: string): Promise<boolean> {
 }
 
 const launchImage = `example.invalid/image@sha256:${"a".repeat(64)}`;
+const launch: typeof productionLaunch = (options) =>
+	productionLaunch({
+		...options,
+		resolveImage:
+			options.resolveImage ?? (async () => ({ image: launchImage })),
+	});
 
 const launchClient = {
 	capabilities: async () => ({
@@ -88,6 +94,28 @@ const launchConfig = {
 	},
 	export: { onExit: "never" as const },
 };
+
+test("production launch fails closed before sandbox mutation while images are unpublished", async () => {
+	const root = await committedRepository();
+	let created = false;
+	const client = {
+		...launchClient,
+		create: async () => {
+			created = true;
+		},
+	} as unknown as SbxClient;
+	await assert.rejects(
+		productionLaunch({ cwd: root, client, config: launchConfig }),
+		(error: unknown) => {
+			assert.equal(
+				(error as { detail?: string }).detail,
+				"production runtime image standard is unpublished",
+			);
+			return true;
+		},
+	);
+	assert.equal(created, false);
+});
 
 test("launch stages personalization but no runtime package archive or setup", async () => {
 	const root = await committedRepository();
@@ -467,16 +495,11 @@ test("native packages prompt once and install a compiler only after yes", async 
 				]);
 				assert.deepEqual(kitAllow, [
 					"api.github.com",
-					"api.openai.com",
-					"api.x.ai",
 					"archive.ubuntu.com",
-					"chatgpt.com",
 					"codeload.github.com",
 					"github.com",
 					"objects.githubusercontent.com",
-					"openrouter.ai",
 					"ports.ubuntu.com",
-					"raw.githubusercontent.com",
 					"registry.npmjs.org",
 					"security.ubuntu.com",
 				]);
@@ -484,17 +507,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 				assert.deepEqual(execs, [
 					["agent", "pi", "install", "npm:pi-subagents"],
 				]);
-				assert.deepEqual(kitAllow, [
-					"api.github.com",
-					"api.openai.com",
-					"api.x.ai",
-					"chatgpt.com",
-					"github.com",
-					"objects.githubusercontent.com",
-					"openrouter.ai",
-					"raw.githubusercontent.com",
-					"registry.npmjs.org",
-				]);
+				assert.deepEqual(kitAllow, []);
 				if (mode === "no") assert.ok(events.includes("prompt"));
 				else assert.equal(events.includes("prompt"), false);
 			}
@@ -850,7 +863,10 @@ test("missing proxy credentials are optional and guidance precedes launch", asyn
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["cursor", "openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["cursor", "openai"] },
+		},
 		onWarning: (warning) => events.push(`warning:${warning}`),
 	});
 	const spec = JSON.parse(kit);
@@ -938,7 +954,12 @@ test("launch does not warn for copied oauth host providers", async () => {
 		const result = await launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, syncProfile: "custom" },
+			config: {
+				...launchConfig,
+				syncProfile: "custom",
+				auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+				sync: { models: true },
+			},
 			listHostProviders: async () => ["openai-codex"],
 			yes: true,
 		});
@@ -1021,7 +1042,11 @@ test("no-host-auth excludes OAuth credentials from generated Kit files", async (
 		await launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, syncProfile: "custom" },
+			config: {
+				...launchConfig,
+				syncProfile: "custom",
+				auth: { mode: "oauth-copy", providers: ["xai"] },
+			},
 			listHostProviders: async () => ["xai"],
 			noHostAuth: true,
 			yes: true,
@@ -1069,7 +1094,15 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 				launch({
 					cwd: root,
 					client,
-					config: { ...launchConfig, syncProfile: "custom" },
+					config: {
+						...launchConfig,
+						syncProfile: "custom",
+						auth: {
+							mode: "oauth-copy",
+							providers: ["openai-codex"],
+						},
+						sync: { models: true },
+					},
 					listHostProviders: async () => ["openai-codex"],
 					yes: true,
 				}),
@@ -1114,10 +1147,22 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 				client: launchClient,
 				config:
 					scenario === "malformed"
-						? { ...launchConfig, syncProfile: "custom" }
+						? {
+								...launchConfig,
+								syncProfile: "custom",
+								auth: {
+									mode: "oauth-copy",
+									providers: ["openai-codex"],
+								},
+								sync: { models: true },
+							}
 						: {
 								...launchConfig,
 								syncProfile: "custom",
+								auth: {
+									mode: "oauth-copy",
+									providers: ["openai-codex"],
+								},
 								sync: {
 									settings: true,
 									models: false,
@@ -1132,10 +1177,11 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 				listHostProviders: async () => ["openai-codex"],
 				yes: true,
 			});
-			assert.ok(
+			assert.equal(
 				result.warnings.includes(
 					"Host provider openai-codex has no sandbox credential service",
 				),
+				scenario === "malformed",
 			);
 		}
 	} finally {
@@ -1158,7 +1204,10 @@ test("configured requested proxy credential suppresses no-credential guidance ca
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai", "cursor"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai", "cursor"] },
+		},
 		onWarning: (warning) => delivered.push(warning),
 	});
 	assert.equal(
@@ -1193,7 +1242,10 @@ test("launch copies a missing host API key into sbx before guidance", async () =
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai"] },
+		},
 		printApiKey: async () => "host-api-key-value",
 	});
 	assert.deepEqual(stored, [{ id: "openai", key: "host-api-key-value" }]);
@@ -1223,7 +1275,10 @@ test("image preflight failure does not persist host credentials", async () => {
 		launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, providers: ["openai"] },
+			config: {
+				...launchConfig,
+				auth: { mode: "proxy", providers: ["openai"] },
+			},
 			printApiKey: async () => "host-api-key-value",
 			resolveImage: async () => {
 				throw new Error("image unavailable");
@@ -1249,7 +1304,10 @@ test("credential presence discovery failures do not guess that credentials are m
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai"] },
+		},
 	});
 	assert.ok(
 		result.warnings.includes(

@@ -4,7 +4,10 @@ import { basename, dirname, join } from "node:path";
 import { parseConfig, type ConfigOverride } from "./config.ts";
 import { assertDigestReference } from "./image-lock.ts";
 import { assertLocalTemplateAttestation } from "./local-template.ts";
-import type { SandboxImageAttestation, SandboxState } from "./workspace.ts";
+import type {
+	SandboxImageAttestation,
+	SandboxState,
+} from "./state-schema.ts";
 
 export interface Migration<T> {
 	value: T;
@@ -18,7 +21,7 @@ export function migrateConfig(
 	source: string,
 ): Migration<ConfigOverride> {
 	const parsed = parseConfig(value, source);
-	const sourceVersion = parsed.version ?? 1;
+	const sourceVersion = parsed.version ?? 2;
 	return {
 		value: structuredClone(parsed),
 		warnings: [],

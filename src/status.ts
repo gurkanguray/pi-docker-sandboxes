@@ -228,7 +228,7 @@ export async function runDoctor(
 		});
 		const resolved = resolveAvailableServices(
 			capabilities!.credentialServices,
-			config.providers,
+			config.auth.mode === "proxy" ? config.auth.providers : [],
 		);
 		for (const id of resolved.unsupported)
 			results.push({

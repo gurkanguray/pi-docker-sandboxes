@@ -15,7 +15,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { OperationError } from "../src/errors.ts";
-import { launch, type LaunchResult } from "../src/launch.ts";
+import {
+	launch as productionLaunch,
+	type LaunchResult,
+} from "../src/launch.ts";
 import { SbxCommandError, type SbxClient } from "../src/sbx/client.ts";
 import { sessionBackupRoot } from "../src/sessions.ts";
 import {
@@ -28,6 +31,13 @@ import {
 } from "../src/workspace.ts";
 
 const exec = promisify(execFile);
+const fixtureImage = `example.invalid/image@sha256:${"a".repeat(64)}`;
+const launch: typeof productionLaunch = (options) =>
+	productionLaunch({
+		...options,
+		resolveImage:
+			options.resolveImage ?? (async () => ({ image: fixtureImage })),
+	});
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
 	await exec("git", args, { cwd });
@@ -171,7 +181,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 const baseConfig = {
 	syncProfile: "clean" as const,
 	sandbox: {
-		image: `example.invalid/image@sha256:${"a".repeat(64)}`,
+		image: fixtureImage,
 		keep: false,
 	},
 	export: { onExit: "never" as const },
@@ -386,53 +396,6 @@ test("managed restore failure fails closed and preserves new sandbox and state",
 	}
 });
 
-test("new local template is inspected before attach and mismatch preserves it", async () => {
-	const hex = "a".repeat(64);
-	const image = `docker.io/pi-docker-sandboxes/pi:local-${hex}`;
-	const storeId = "abc123def456";
-	const matching = await runCase({
-		keep: true,
-		resolvedImage: { image, templateStoreId: storeId },
-		inspection: { image, image_digest: `sha256:${storeId}7890` },
-	});
-	const result = await matching.operation;
-	assert.equal(result.exitCode, 0);
-	assert.ok(matching.log.indexOf("inspect") > matching.log.indexOf("create"));
-	assert.ok(matching.log.indexOf("inspect") < matching.log.indexOf("attach"));
-	assert.equal(result.state?.imageAttestation?.status, "verified");
-
-	const mismatched = await runCase({
-		keep: true,
-		resolvedImage: { image, templateStoreId: storeId },
-		inspection: {
-			image: `${image}-wrong`,
-			image_digest: `sha256:${storeId}7890`,
-		},
-	});
-	await assert.rejects(mismatched.operation, (error: unknown) => {
-		assert.match(String(error), /created sandbox image/i);
-		assert.deepEqual((error as { recovery?: string[] }).recovery, [
-			`pi-dsbx export --name '${mismatched.fixture.name}'`,
-			`pi-dsbx destroy --name '${mismatched.fixture.name}' --discard-changes`,
-			`pi-dsbx run --name '${mismatched.fixture.name}'`,
-		]);
-		return true;
-	});
-	assert.equal(mismatched.log.includes("attach"), false);
-	assert.equal(mismatched.log.includes("remove"), false);
-	assert.equal(
-		await pathExists(
-			statePath(mismatched.fixture.root, mismatched.fixture.name),
-		),
-		true,
-	);
-	assert.equal(
-		(await loadSandboxState(mismatched.fixture.root, mismatched.fixture.name))
-			.imageAttestation?.status,
-		"pending",
-	);
-});
-
 test("clone sandboxes attest configured remote images before attach", async () => {
 	const image = `example.invalid/image@sha256:${"b".repeat(64)}`;
 	const matching = await runCase({
@@ -508,12 +471,11 @@ test("clone create state failures retain executable custody", async () => {
 });
 
 test("verified attestation state save failure preserves without attach", async () => {
-	const image = `docker.io/pi-docker-sandboxes/pi:local-${"a".repeat(64)}`;
-	const templateStoreId = "abc123def456";
+	const image = fixtureImage;
 	const subject = await runCase({
 		keep: true,
-		resolvedImage: { image, templateStoreId },
-		inspection: { image, image_digest: `sha256:${templateStoreId}7890` },
+		resolvedImage: { image },
+		inspection: { image },
 		saveStateErrorAfter: 2,
 	});
 	await assert.rejects(subject.operation, /attestation state save failure/);
@@ -526,19 +488,16 @@ test("verified attestation state save failure preserves without attach", async (
 	);
 });
 
-test("recorded local image attestation is enforced on every resume", async () => {
-	const image = `docker.io/pi-docker-sandboxes/pi:local-${"a".repeat(64)}`;
-	const templateStoreId = "abc123def456";
+test("recorded image attestation is enforced on every resume", async () => {
+	const image = fixtureImage;
+	const selectedImage = `example.invalid/image@sha256:${"b".repeat(64)}`;
 	for (const status of ["pending", "verified"] as const) {
 		const matching = await runCase({
 			existed: true,
 			keep: true,
-			imageAttestation: { status, image, templateStoreId },
-			resolvedImage: {
-				image: `docker.io/pi-docker-sandboxes/pi:local-${"b".repeat(64)}`,
-				templateStoreId: "def456abc123",
-			},
-			inspection: { image, image_digest: `sha256:${templateStoreId}7890` },
+			imageAttestation: { status, image },
+			resolvedImage: { image: selectedImage },
+			inspection: { image },
 		});
 		const result = await matching.operation;
 		assert.equal(result.state?.imageAttestation?.status, "verified");
@@ -547,15 +506,9 @@ test("recorded local image attestation is enforced on every resume", async () =>
 		const mismatch = await runCase({
 			existed: true,
 			keep: true,
-			imageAttestation: { status, image, templateStoreId },
-			resolvedImage: {
-				image: `docker.io/pi-docker-sandboxes/pi:local-${"b".repeat(64)}`,
-				templateStoreId: "def456abc123",
-			},
-			inspection: {
-				image: `${image}-wrong`,
-				image_digest: `sha256:${templateStoreId}`,
-			},
+			imageAttestation: { status, image },
+			resolvedImage: { image: selectedImage },
+			inspection: { image: `${image}-wrong` },
 		});
 		await assert.rejects(mismatch.operation, /resumed sandbox image/i);
 		assert.equal(mismatch.log.includes("attach"), false);

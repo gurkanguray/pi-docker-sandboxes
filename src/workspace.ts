@@ -32,6 +32,11 @@ import {
 	writeJsonAtomic,
 } from "./migration.ts";
 import { type SbxClient, validateSandboxName } from "./sbx/client.ts";
+import type { SandboxState } from "./state-schema.ts";
+export type {
+	SandboxImageAttestation,
+	SandboxState,
+} from "./state-schema.ts";
 
 const execFileAsync = promisify(execFile);
 const SAFE_GIT_CONFIG = [
@@ -303,24 +308,6 @@ export function sandboxName(root: string, fresh = false): string {
 		? randomBytes(4).toString("hex")
 		: createHash("sha256").update(resolve(root)).digest("hex").slice(0, 10);
 	return `pi-${slug}-${suffix}`;
-}
-
-export interface SandboxImageAttestation {
-	status: "pending" | "verified";
-	image: string;
-	templateStoreId?: string;
-}
-
-export interface SandboxState {
-	version: 1;
-	name: string;
-	hostBaseCommit: string;
-	hostBranch: string;
-	hostRepoIdentity: string;
-	hostRoot: string;
-	workspaceMode: "clone";
-	createdAt: string;
-	imageAttestation?: SandboxImageAttestation;
 }
 
 export function statePath(root: string, name: string): string {
