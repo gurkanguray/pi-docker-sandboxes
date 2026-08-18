@@ -1,29 +1,37 @@
 # Support
 
-## Supported Early Access boundary
+## Supported
 
-The exact tested host is macOS 26.5.2 on Apple Silicon (macOS ARM64); no other macOS release is claimed. Only the latest `0.1.x` package release is supported. The exact tested Pi, Node.js, Docker Sandboxes, Docker Engine, and Kit versions are in the [compatibility matrix](COMPATIBILITY.md). Docker Kit APIs remain experimental.
+Support covers the latest `0.1.x` release on the tested [Compatibility](COMPATIBILITY.md) matrix.
 
-Support covers the Pi extension, the `pi-dsbx` CLI, `pi --docker-sandbox`, private clone mode, and the documented local-image, credential-proxy, export, and cleanup paths. A stable programmatic library API is not supported.
+Supported surfaces:
 
-Linux and Windows reports are welcome but unsupported until real platform E2E evidence exists. Older releases, unlisted component versions, sandbox-local credentials, and modified images may be useful diagnostic reports but are outside the supported boundary.
+- `pi --docker-sandbox`
+- the `pi-dsbx` CLI
+- private clone workspaces
+- the documented image, credential, export, and cleanup flows
 
-## Getting help
+There is no stable programmatic library API.
 
-Search [existing issues](https://github.com/gurkanguray/pi-docker-sandboxes/issues). Use the structured [bug report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=bug.yml) for reproducible problems or the [question form](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=question.yml) for usage questions within the supported boundary.
+## Get help
 
-When reporting a bug, include:
+Search [existing issues](https://github.com/gurkanguray/pi-docker-sandboxes/issues), then use:
 
-- the package version and relevant [compatibility](COMPATIBILITY.md) versions;
-- whether the host is macOS ARM64;
-- the failed command, lifecycle phase, and sanitized error;
+- [Bug report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=bug.yml)
+- [Usage question](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=question.yml)
+- [Unsupported platform report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=unsupported-platform.yml)
+
+Include:
+
+- package version;
+- failed command;
+- sanitized error;
 - reviewed `pi-dsbx doctor` output;
-- minimal reproduction steps and whether work remains in a retained sandbox.
+- minimal reproduction steps;
+- whether work remains in a retained sandbox.
 
-Follow [Troubleshooting](docs/troubleshooting.md#collect-doctor-output-without-secrets) before sharing diagnostics. Never include credentials, environment dumps, private source, or sensitive patch contents.
-
-Support is best-effort community support with no response-time SLA and no guarantee of a fix. Reports may be closed when they cannot be reproduced on the supported matrix.
+Never post credentials, environment dumps, private source, or patch contents. Community support has no response-time SLA.
 
 ## Security reports
 
-Do not file an undisclosed vulnerability as a public support issue. Follow the private process in [SECURITY.md](SECURITY.md).
+Do not report undisclosed vulnerabilities in a public issue. Use the private process in [SECURITY.md](SECURITY.md).

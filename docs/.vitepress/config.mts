@@ -4,30 +4,36 @@ const repository = "https://github.com/gurkanguray/pi-docker-sandboxes";
 
 export default defineConfig({
 	title: "Pi Docker Sandboxes",
-	description: "Run Pi inside isolated Docker Sandboxes microVMs.",
+	description: "Run Pi inside an isolated Docker Sandboxes microVM.",
 	base: "/pi-docker-sandboxes/",
 	cleanUrls: true,
 	srcExclude: ["superpowers/**"],
 	themeConfig: {
 		nav: [
+			{ text: "Get Started", link: "/getting-started" },
+			{ text: "CLI Reference", link: "/cli-reference" },
+			{ text: "Configuration", link: "/configuration" },
+			{ text: "Troubleshooting", link: "/troubleshooting" },
+			{ text: "GitHub", link: repository },
+		],
+		sidebar: [
 			{
-				text: "Guide",
+				text: "Documentation",
 				items: [
 					{ text: "Getting Started", link: "/getting-started" },
+					{ text: "CLI Reference", link: "/cli-reference" },
 					{ text: "Configuration", link: "/configuration" },
-				],
-			},
-			{
-				text: "Operations",
-				items: [
 					{ text: "Troubleshooting", link: "/troubleshooting" },
-					{ text: "Migration", link: "/migration" },
 					{ text: "Uninstall", link: "/uninstall" },
 				],
 			},
 			{
-				text: "Community",
+				text: "Project",
 				items: [
+					{
+						text: "Compatibility",
+						link: "https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md",
+					},
 					{
 						text: "Support",
 						link: "https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/SUPPORT.md",
@@ -36,37 +42,7 @@ export default defineConfig({
 						text: "Security",
 						link: "https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/SECURITY.md",
 					},
-					{
-						text: "Contributing",
-						link: "https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/CONTRIBUTING.md",
-					},
 				],
-			},
-			{
-				text: "Maintainers",
-				items: [{ text: "Repository Settings", link: "/repository-settings" }],
-			},
-			{ text: "GitHub", link: repository },
-		],
-		sidebar: [
-			{
-				text: "Guide",
-				items: [
-					{ text: "Getting Started", link: "/getting-started" },
-					{ text: "Configuration", link: "/configuration" },
-				],
-			},
-			{
-				text: "Operations",
-				items: [
-					{ text: "Troubleshooting", link: "/troubleshooting" },
-					{ text: "Migration", link: "/migration" },
-					{ text: "Uninstall", link: "/uninstall" },
-				],
-			},
-			{
-				text: "Maintainers",
-				items: [{ text: "Repository Settings", link: "/repository-settings" }],
 			},
 		],
 		search: { provider: "local" },

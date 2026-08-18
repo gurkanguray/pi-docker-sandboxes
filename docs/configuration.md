@@ -1,10 +1,15 @@
 # Configuration
 
-Configuration is JSON. Global configuration is read from `~/.pi/agent/docker-sandboxes.json`. Project configuration is read from `.pi/docker-sandboxes.json` only after Pi trusts the project. The companion `pi-dsbx` CLI ignores project configuration unless `run` receives `--trust-project-config`.
+## Locations
 
-Unknown fields at any level are rejected. Secrets are not configuration values; store them with `sbx secret set <provider>`.
+| Scope | Path | Rule |
+| --- | --- | --- |
+| Global | `~/.pi/agent/docker-sandboxes.json` | Always read. |
+| Project | `.pi/docker-sandboxes.json` | Read after Pi trusts the project. `pi-dsbx run` also requires `--trust-project-config`. |
 
-## Fields and defaults
+Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, not in configuration.
+
+## Defaults
 
 ```json
 {
@@ -38,62 +43,57 @@ Unknown fields at any level are rejected. Secrets are not configuration values; 
 }
 ```
 
-Every accepted field is described below:
+## Fields
 
-- `version`: configuration schema version; only `1` is accepted.
-- `enabled`: enables whole-process sandbox re-execution.
-- `profile`: network/security profile: `hardened` or `development`.
-- `syncProfile`: `clean`, `mirror`, or `custom`. Built-in profiles use fixed policies; only `custom` uses the `sync` object.
-- `sync.settings`, `sync.models`, `sync.packages`, `sync.skills`, `sync.prompts`, `sync.themes`, `sync.extensions`: whether each sanitized personalization category is copied.
-- `sync.sessions`: `managed` or `sandbox` session behavior.
-- `sandbox.name`: optional sandbox name using letters, numbers, `.`, `+`, or `-`.
-- `sandbox.keep`: preserves the sandbox after exit when `true`. Clean sandboxes are removed by default when `false`.
-- `sandbox.dockerEngine`: enables the VM's private Docker Engine. If `false`, `sandbox.image` is required.
-- `sandbox.image`: optional digest-pinned image reference; tags are rejected.
-- `providers`: IDs of audited proxy services to request. Built-ins are `anthropic`, `google`, `openai`, `openrouter`, and `xai`; the service must also be available from `sbx`.
-- `network.allow`, `network.deny`: additional domain lists. Wildcards such as `*.example.com` are accepted here; schemes, paths, credentials, whitespace, and invalid ports are rejected.
-- `export.onExit`: `prompt`, `always`, or `never` for changed clone work.
-- `export.directory`: patch output directory. Parent traversal (`..`) is rejected.
+| Field | Values | Purpose |
+| --- | --- | --- |
+| `version` | `1` | Configuration schema. |
+| `enabled` | boolean | Enable sandbox re-execution. |
+| `profile` | `development`, `hardened` | Network and security policy. |
+| `syncProfile` | `custom`, `clean`, `mirror` | Select a built-in or custom sync policy. |
+| `sync.settings`, `sync.models` | boolean | Copy sanitized settings or model metadata. |
+| `sync.packages`, `sync.skills`, `sync.prompts`, `sync.themes`, `sync.extensions` | boolean | Copy each opted-in Pi resource. |
+| `sync.sessions` | `managed`, `sandbox` | Select session storage behavior. |
+| `sandbox.name` | name | Reuse a named sandbox. |
+| `sandbox.keep` | boolean | Keep the sandbox after exit. |
+| `sandbox.dockerEngine` | boolean | Enable the sandbox's private Docker Engine. |
+| `sandbox.image` | digest reference | Use an immutable custom image. |
+| `providers` | provider IDs | Request audited credential proxy services. |
+| `network.allow`, `network.deny` | domains | Extend the profile's network rules. |
+| `export.onExit` | `prompt`, `always`, `never` | Handle changed work on exit. |
+| `export.directory` | path | Store exported patches. Parent traversal is rejected. |
 
-The safe personalization default imports sanitized settings and model metadata only. Packages, skills, prompts, themes, and extensions remain off. `--docker-sandbox-sync mirror` copies `npm:`/`git:` package specs so sandbox Pi can install them, plus local skills and Pi-auto-discoverable extensions that are not credential stores. Extension runtime-state directories without a Pi entrypoint, including config/log storage, stay on the host. Host paths and detected secrets stay out. Every sandbox uses a private clone and disables Docker's shared writable skills store.
+## Profiles
 
-## CLI overrides
+| Option | Behavior |
+| --- | --- |
+| `development` | Allows network access to common package, GitHub, and model-provider destinations. |
+| `hardened` | Allows no additional network destinations. |
+| `clean` | Copies nothing from the host; sessions stay in the sandbox. |
+| `custom` | Copies sanitized settings and models by default; each resource is configurable. |
+| `mirror` | Copies eligible settings, models, packages, skills, prompts, themes, and extensions. |
 
-The primary launch is `pi --docker-sandbox`. Pi also accepts:
+Audited provider IDs: `anthropic`, `google`, `openai`, `openrouter`, `xai`.
 
-```text
---docker-sandbox-profile NAME
---docker-sandbox-sync NAME
---docker-sandbox-session SESSION_ID
---docker-sandbox-name NAME
---docker-sandbox-fresh
---docker-sandbox-keep
---docker-sandbox-discard-changes
---docker-sandbox-no-host-auth
+## Common choices
+
+Use command-line overrides for one launch:
+
+```bash
+pi --docker-sandbox --docker-sandbox-sync clean
+pi --docker-sandbox --docker-sandbox-sync mirror
+pi --docker-sandbox --docker-sandbox-profile hardened
+pi --docker-sandbox --docker-sandbox-keep
 ```
 
-The companion path is:
+To disable the exit prompt, set `export.onExit` to `never`. Changed work remains preserved.
 
-```text
-pi-dsbx run [--profile NAME] [--sync NAME] [--name NAME] [--image REF]
-             [--fresh] [--keep] [--discard-changes] [--no-host-auth]
-             [--trust-project-config] [--yes] [--cwd PATH] [-- PI_ARGS...]
-```
+## Images
 
-`--docker-sandbox-session SESSION_ID` resumes a backed-up managed session. Do not use the standard host `--session` form: Pi resolves it before the extension loads. Use `/resume` inside an attached sandbox, or `pi-dsbx run -- --session SESSION_ID`, as alternatives. `--keep` preserves the same sandbox and does not overwrite its sessions from a backup.
-
-Set `export.onExit` to `never` to suppress export prompting. `--discard-changes` is the dedicated authority for permanent loss; generic `--yes` is not.
-
-## Image behavior
-
-A configured image must be digest-pinned. With no configured image, a verified local image is required:
+Custom images must use an immutable SHA-256 digest. Without one, build the verified local image:
 
 ```bash
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
 ```
 
-The `hardened` profile cannot install Pi at runtime, so it requires this built image or an explicit pinned image.
-
-## Compatibility notes
-
-Removed legacy fields and values are rejected instead of guessed or silently migrated. Explicit `sandbox.keep` values are preserved. Review the effective merged configuration with `pi-dsbx config` before launch.
+See the [CLI reference](cli-reference.md) for all overrides.
