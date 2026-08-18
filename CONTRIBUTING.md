@@ -4,7 +4,7 @@ Thank you for contributing to pi-docker-sandboxes.
 
 ## Development setup
 
-Development requires Node.js `>=24.12.0 <25`, Pi 0.84.1, Docker 29+, and Docker Sandboxes (`sbx`) 0.38.x on macOS Apple Silicon. The release's exact tested versions are in [COMPATIBILITY.md](COMPATIBILITY.md).
+Unit development requires Node.js `>=24.12.0 <25` and Pi `>=0.84.1 <0.85.0`. Sandbox lifecycle work also needs Docker 29+ and Docker Sandboxes (`sbx`) 0.38.x on a documented host. Release validation still uses the exact hardware and versions in [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ```bash
 npm ci --ignore-scripts
@@ -19,7 +19,7 @@ npm run test:e2e
 npm pack --dry-run
 ```
 
-The E2E test creates and removes disposable sandboxes and Git repositories. It requires the supported host environment.
+The E2E test creates and removes disposable sandboxes and Git repositories. Release evidence requires the project-validated macOS ARM64 environment.
 
 ## Change workflow
 

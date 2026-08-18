@@ -94,8 +94,8 @@ Capture the minimum diagnostic bundle:
 
 ```bash
 {
-  sw_vers
-  uname -m
+  node -p 'process.platform + " " + process.arch'
+  node --version
   sbx version
   npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx doctor
 } > pi-dsbx-doctor.txt 2>&1

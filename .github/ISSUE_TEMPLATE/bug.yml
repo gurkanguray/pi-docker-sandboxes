@@ -1,6 +1,5 @@
 name: Bug report
-description: >-
-  Report a reproducible problem on the supported platform.
+description: Report a reproducible problem in a documented workflow.
 title: "[Bug]: "
 labels:
   - bug
@@ -8,14 +7,14 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Do not include credentials, private source,
-        raw environment dumps, or sensitive patch contents. Report undisclosed
-        vulnerabilities through private vulnerability reporting instead.
+        Do not include credentials, private source, raw environment dumps, or
+        sensitive patch contents. Report undisclosed vulnerabilities through
+        private vulnerability reporting instead.
   - type: input
     id: package_version
     attributes:
       label: Package version
-      description: Version shown by `pi list` or your npm installation record.
+      description: Version shown by `pi list` or your installation record.
       placeholder: 0.1.0
     validations:
       required: true
@@ -41,22 +40,24 @@ body:
     validations:
       required: true
   - type: input
-    id: macos_version
+    id: host_os
     attributes:
-      label: macOS version
-      description: >-
-        Give only the version number; do not paste system reports. Other macOS
-        versions: use the unsupported-platform form; reports are welcome.
-      placeholder: "26.5.2"
+      label: Host OS name
+      placeholder: macOS, Ubuntu, or Windows
     validations:
       required: true
-  - type: dropdown
+  - type: input
+    id: host_version
+    attributes:
+      label: Host OS version
+      description: Give only the version number; do not paste system reports.
+    validations:
+      required: true
+  - type: input
     id: architecture
     attributes:
       label: Architecture
-      options:
-        - Apple Silicon (ARM64)
-        - Other (use the unsupported-platform form)
+      placeholder: arm64 or x64
     validations:
       required: true
   - type: textarea
@@ -84,7 +85,7 @@ body:
     attributes:
       label: Reviewed `pi-dsbx doctor` output
       description: >-
-        Paste only output you have reviewed and redacted. Never include secrets,
+        Paste only output you reviewed and redacted. Never include secrets,
         credentials, environment dumps, private source, or sensitive patches.
       render: shell
     validations:

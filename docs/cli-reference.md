@@ -45,7 +45,7 @@ pi-dsbx image build
 | --- | --- |
 | `pi-dsbx run` | Launch Pi in a sandbox. |
 | `pi-dsbx status` | Show process status; on the host, also list sandboxes. |
-| `pi-dsbx doctor` | Check the platform, tools, image, repository, and configuration. |
+| `pi-dsbx doctor` | Check `sbx`, required capabilities, configuration, credential services, and Git eligibility. |
 | `pi-dsbx config` | Print the effective host configuration as JSON. |
 | `pi-dsbx export` | Export changed sandbox work as a patch. |
 | `pi-dsbx apply` | Apply a patch to the host checkout. |

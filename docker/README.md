@@ -1,8 +1,8 @@
 # Sandbox runtime image
 
-The local fallback and release image use the same `Dockerfile` and `image-lock.json`. The build context is that Dockerfile plus an `npm pack` tarball. Credentials and host personalization are never copied.
+The local fallback and release image use the same `Dockerfile` and `image-lock.json`. The standard image is exactly `linux/arm64`; image verification rejects other platforms. Credentials and host personalization are never copied.
 
-From a source checkout, `npm run image:build` builds and verifies the image. From the installed package, run:
+From a source checkout, `npm run image:build` builds and verifies the image. After the public release, installed-package users run:
 
 ```bash
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build

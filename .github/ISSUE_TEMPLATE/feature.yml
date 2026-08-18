@@ -14,7 +14,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What supported workflow is difficult or unavailable?
+      description: What documented workflow is difficult or unavailable?
     validations:
       required: true
   - type: textarea

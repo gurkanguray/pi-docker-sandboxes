@@ -1,40 +1,43 @@
 # Getting started
 
+::: warning Availability
+`0.1.0` is not yet published. Public installation opens when [release issue #8](https://github.com/gurkanguray/pi-docker-sandboxes/issues/8) is complete.
+:::
+
 ## Requirements
 
-| Component | Version |
+| Component | Requirement |
 | --- | --- |
-| Host | macOS 26.5.2 on Apple silicon |
-| Pi | 0.84.1 |
-| Node.js | 24.12.0 |
-| Docker | 29+ |
-| Docker Sandboxes | 0.38.0 |
+| Host | macOS 14+ on Apple silicon or Ubuntu 24.04+ on ARM64 |
+| Pi | `>=0.84.1 <0.85.0` |
+| Node.js | `>=24.12.0 <25` |
+| Docker | 29+ validated |
+| Docker Sandboxes | 0.38.x |
+| Locked image | `linux/arm64` |
 
-Other macOS releases, Linux, and Windows are unsupported. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md).
+macOS 26.5.2 on Apple silicon is the validated candidate host, with Pi 0.84.1, Node.js 24.12.0, and Docker Sandboxes 0.38.0. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md) for x64 and Windows limitations.
 
-Run from a Git repository. If the repository has no commits, create an empty one first:
+Run from a Git repository. If the repository has no commits:
 
 ```bash
 git init
 git commit --allow-empty --only -m "Initial commit"
 ```
 
-## Install
+## Install after release
 
 ```bash
 pi install npm:pi-docker-sandboxes@0.1.0
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx doctor
 ```
 
-Fix any error reported by `doctor` before continuing.
+Fix any reported error before continuing.
 
 ## Build the image
 
 ```bash
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
 ```
-
-This builds and verifies the locked local image.
 
 ## Run
 
@@ -64,7 +67,7 @@ Apply the reviewed patch:
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx apply PATCH --yes
 ```
 
-Clean sandboxes are removed by default. Changed or uninspectable sandboxes are preserved unless you explicitly discard their work.
+Clean sandboxes are removed by default. Changed or uninspectable sandboxes are preserved without explicit discard authority.
 
 ## Next steps
 

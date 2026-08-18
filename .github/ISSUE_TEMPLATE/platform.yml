@@ -1,0 +1,42 @@
+name: Platform report
+description: Share behavior from a Docker Sandboxes and Pi host platform.
+title: "[Platform]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        macOS 14+ on Apple Silicon and Ubuntu 24.04+ on ARM64 are documented
+        package hosts. Reports from other Docker Sandboxes and Pi hosts are also
+        welcome. The standard image is `linux/arm64`, and Windows process-group
+        execution is a known package limitation. A report does not establish or
+        guarantee a roadmap commitment. Do not include credentials, private
+        source, environment dumps, or other sensitive data.
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and version
+      description: Give concise OS and architecture versions only.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Package, Pi, Node.js, and `sbx` versions
+    validations:
+      required: true
+  - type: textarea
+    id: observation
+    attributes:
+      label: Observed behavior
+      description: Provide sanitized symptoms and minimal reproduction steps.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Roadmap acknowledgement
+      options:
+        - label: I understand this report does not guarantee a roadmap commitment.
+          required: true

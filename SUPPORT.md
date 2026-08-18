@@ -1,15 +1,17 @@
 # Support
 
-## Supported
+## Availability
 
-Support covers the latest `0.1.x` release on the tested [Compatibility](COMPATIBILITY.md) matrix.
+There is no public release yet. Support begins with the first published `0.1.x` release; prerelease evidence is tracked in [release issue #8](https://github.com/gurkanguray/pi-docker-sandboxes/issues/8).
 
-Supported surfaces:
+## Covered surfaces
 
-- `pi --docker-sandbox`
-- the `pi-dsbx` CLI
-- private clone workspaces
-- the documented image, credential, export, and cleanup flows
+Support covers the current [Compatibility](COMPATIBILITY.md) policy and:
+
+- `pi --docker-sandbox`;
+- the `pi-dsbx` CLI;
+- private clone workspaces;
+- documented image, credential, export, and cleanup flows.
 
 There is no stable programmatic library API.
 
@@ -19,16 +21,9 @@ Search [existing issues](https://github.com/gurkanguray/pi-docker-sandboxes/issu
 
 - [Bug report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=bug.yml)
 - [Usage question](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=question.yml)
-- [Unsupported platform report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=unsupported-platform.yml)
+- [Platform report](https://github.com/gurkanguray/pi-docker-sandboxes/issues/new?template=platform.yml)
 
-Include:
-
-- package version;
-- failed command;
-- sanitized error;
-- reviewed `pi-dsbx doctor` output;
-- minimal reproduction steps;
-- whether work remains in a retained sandbox.
+Include the package and tool versions, failed command, sanitized error, reviewed `pi-dsbx doctor` output, minimal reproduction, and whether work remains in a retained sandbox.
 
 Never post credentials, environment dumps, private source, or patch contents. Community support has no response-time SLA.
 
