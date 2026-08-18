@@ -415,7 +415,9 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			} catch (current) {
 				if (!(current instanceof UnbornHeadError)) throw current;
 				if (current.root !== root)
-					throw new Error("Git repository identity changed before initialization");
+					throw new Error(
+						"Git repository identity changed before initialization",
+					);
 				await createEmptyInitialCommit(root);
 				repository = await inspectHostRepository(cwd);
 			}

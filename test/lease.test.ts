@@ -98,9 +98,13 @@ test("abandoned leases stay busy without local-owner inference or reclamation", 
 				acquireSandboxLease(root, name, "export"),
 			),
 		);
-		assert.equal(attempts.every((attempt) => attempt.status === "rejected"), true);
+		assert.equal(
+			attempts.every((attempt) => attempt.status === "rejected"),
+			true,
+		);
 		for (const attempt of attempts) {
-			if (attempt.status === "rejected") assert.match(String(attempt.reason), diagnostic);
+			if (attempt.status === "rejected")
+				assert.match(String(attempt.reason), diagnostic);
 		}
 		assert.equal(await readFile(path, "utf8"), contents);
 	}
@@ -175,7 +179,10 @@ test("directory sync failures propagate through create and release", async (t) =
 
 	const root = await fixture(t);
 	const synced: string[] = [];
-	const syncDirectory = async (path: string, handle: { sync(): Promise<void> }) => {
+	const syncDirectory = async (
+		path: string,
+		handle: { sync(): Promise<void> },
+	) => {
 		synced.push(path);
 		await handle.sync();
 	};
@@ -199,14 +206,14 @@ test("directory sync failures propagate through create and release", async (t) =
 	await assert.rejects(
 		() =>
 			acquireSandboxLease(root, "sync-create", "run", {
-					syncDirectory: async (
-						path: string,
-						handle: { sync(): Promise<void> },
-					) => {
-						if (path.endsWith("/leases")) throw invalid;
-						await handle.sync();
-					},
-				} as SandboxLeaseRuntime),
+				syncDirectory: async (
+					path: string,
+					handle: { sync(): Promise<void> },
+				) => {
+					if (path.endsWith("/leases")) throw invalid;
+					await handle.sync();
+				},
+			} as SandboxLeaseRuntime),
 
 		(error: unknown) => error === invalid,
 	);
@@ -217,15 +224,16 @@ test("directory sync failures propagate through create and release", async (t) =
 
 	let leaseDirectorySyncs = 0;
 	const release = await acquireSandboxLease(root, "sync-release", "run", {
-		syncDirectory: async (
-			path: string,
-			handle: { sync(): Promise<void> },
-		) => {
-			if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2) throw invalid;
+		syncDirectory: async (path: string, handle: { sync(): Promise<void> }) => {
+			if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2)
+				throw invalid;
 			await handle.sync();
 		},
 	} as SandboxLeaseRuntime);
-	await assert.rejects(() => release.release(), (error: unknown) => error === invalid);
+	await assert.rejects(
+		() => release.release(),
+		(error: unknown) => error === invalid,
+	);
 	const reacquired = await acquireSandboxLease(root, "sync-release", "destroy");
 	await reacquired.release();
 });
@@ -278,41 +286,46 @@ test("Python launches two actual pi-dsbx run processes with one lifecycle owner"
 		cp(new URL("../docker", import.meta.url), join(harness, "docker"), {
 			recursive: true,
 		}),
-		symlink(new URL("../node_modules", import.meta.url), join(harness, "node_modules")),
+		symlink(
+			new URL("../node_modules", import.meta.url),
+			join(harness, "node_modules"),
+		),
 	]);
 	const image = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
 	await writeFile(
 		join(harness, "docker", "image-lock.json"),
-		`${JSON.stringify({
-			version: 2,
-			runtimeSchema: 1,
-			piVersion: "0.84.1",
-			images: {
-				standard: {
-					status: "published",
-					reference: image,
-					platforms: ["linux/amd64", "linux/arm64"],
-					privileged: false,
-				},
-				docker: {
-					status: "published",
-					reference: image,
-					platforms: ["linux/amd64", "linux/arm64"],
-					privileged: true,
+		`${JSON.stringify(
+			{
+				version: 2,
+				runtimeSchema: 1,
+				piVersion: "0.84.1",
+				images: {
+					standard: {
+						status: "published",
+						reference: image,
+						platforms: ["linux/amd64", "linux/arm64"],
+						privileged: false,
+					},
+					docker: {
+						status: "published",
+						reference: image,
+						platforms: ["linux/amd64", "linux/arm64"],
+						privileged: true,
+					},
 				},
 			},
-		}, null, 2)}\n`,
+			null,
+			2,
+		)}\n`,
 	);
 	const root = join(harness, "repository");
 	const home = join(harness, "home");
 	const bin = join(harness, "bin");
-	await Promise.all([
-		mkdir(root),
-		mkdir(home),
-		mkdir(bin),
-	]);
+	await Promise.all([mkdir(root), mkdir(home), mkdir(bin)]);
 	await exec("git", ["init", "-b", "main"], { cwd: root });
-	await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+	await exec("git", ["config", "user.email", "test@example.com"], {
+		cwd: root,
+	});
 	await exec("git", ["config", "user.name", "Test"], { cwd: root });
 	await writeFile(join(root, "file.txt"), "initial\n");
 	await exec("git", ["add", "file.txt"], { cwd: root });
@@ -395,7 +408,9 @@ if [first.returncode, second.returncode] != [0, int(busy)] or second_state_reads
 		],
 		{ timeout: 30_000 },
 	);
-	console.log(`python CLI lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`);
+	console.log(
+		`python CLI lease probe: ${result.stdout.trim().replaceAll("\n", "; ")}`,
+	);
 	assert.match(result.stdout, new RegExp(`codes=0,${LEASE_BUSY_EXIT_CODE}`));
 	assert.match(result.stdout, /second_state_reads=0/);
 	assert.match(result.stdout, /contender=.*busy.*run/i);
