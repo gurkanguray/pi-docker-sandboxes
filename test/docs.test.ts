@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { Ajv } from "ajv";
 import { parse } from "yaml";
+import { main as cliMain } from "../src/cli.ts";
+import { DEFAULT_CONFIG } from "../src/config.ts";
 
 const documents = [
 	"README.md",
@@ -57,6 +59,60 @@ test("README describes the supported Early Access onboarding path", async () => 
 	assert.match(readme, /--keep[^\r\n]*same sandbox/i);
 	assert.match(readme, /pi-dsbx run[^\n]*-- --session (?:ID|SESSION_ID)/);
 	assert.match(readme, /git commit --allow-empty -m ["']Initial commit["']/);
+});
+
+test("README command reference stays aligned with the CLI and extension", async () => {
+	const readme = await read("README.md");
+	const output: string[] = [];
+	const originalLog = console.log;
+	console.log = (message?: unknown) => output.push(String(message));
+	try {
+		assert.equal(await cliMain(["--help"]), 0);
+	} finally {
+		console.log = originalLog;
+	}
+	const usage = output.join("\n");
+	for (const command of usage.match(/^  pi-dsbx .+$/gm) ?? [])
+		assert.ok(readme.includes(command.trim()), command.trim());
+	for (const flag of usage.match(/--[a-z][a-z-]*/g) ?? [])
+		assert.ok(readme.includes("`" + flag + "`"), flag);
+
+	const extension = await read("extensions/docker-sandboxes/index.ts");
+	const extensionFlags = [...extension.matchAll(/registerFlag\("([^"]+)"/g)].map(
+		([, flag]) => `--${flag}`,
+	);
+	for (const flag of extensionFlags)
+		assert.ok(readme.includes("`" + flag + "`"), flag);
+	for (const command of ["status", "doctor", "config"])
+		assert.ok(readme.includes("`/docker-sandbox " + command + "`"), command);
+
+	assert.match(
+		readme,
+		new RegExp(
+			"`--profile`[^\\n]*`" +
+				DEFAULT_CONFIG.profile +
+				"` \\(default\\)[^\\n]*`hardened`",
+		),
+	);
+	assert.match(
+		readme,
+		new RegExp(
+			"`--sync`[^\\n]*`" +
+				DEFAULT_CONFIG.syncProfile +
+				"` \\(default\\)[^\\n]*`clean`[^\\n]*`mirror`",
+		),
+	);
+	assert.match(readme, /`--image`[^\n]*immutable[^\n]*digest/i);
+	assert.doesNotMatch(readme, /`--image`[^\n]*local content tag/i);
+	assert.match(readme, /`--fresh`[^\n]*cannot[^\n]*`--name`/i);
+	assert.match(readme, /`--discard-changes`[^\n]*noninteractive/i);
+	assert.match(
+		readme,
+		/interactive confirmation[^\n]*(?:changed|uninspectable)[^\n]*(?:remove|discard|destroy)/i,
+	);
+	assert.match(readme, /`pi-dsbx`[^\n]*same as `pi-dsbx run`/i);
+	assert.match(readme, /`pi-dsbx status`[^\n]*on the host[^\n]*list/i);
+	assert.doesNotMatch(readme, /`pi-dsbx image build`[^\n]*accepts no flags/i);
 });
 
 test("docs state the implemented safety, cleanup, and image defaults", async () => {
