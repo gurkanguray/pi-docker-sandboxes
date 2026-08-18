@@ -24,4 +24,4 @@ The project owns its package and image assembly, not inherited Docker-owned bina
 
 ## Supported versions
 
-Security fixes target the latest `0.1.x` release on the tested [compatibility matrix](COMPATIBILITY.md).
+No public release exists yet. After `0.1.0` is published, security fixes target the latest `0.1.x` release under the current [compatibility policy](COMPATIBILITY.md).

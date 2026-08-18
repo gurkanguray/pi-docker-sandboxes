@@ -8,7 +8,7 @@ Repository readiness is tracked in [release issue #8](https://github.com/gurkang
 
 - Main Protection requires pull requests, CODEOWNER review, resolved conversations, squash-only linear history, and the exact observed CI and security checks.
 - The protected `release` environment requires maintainer approval and permits only `main` and `v*` release refs.
-- `docs/release-signing.asc` contains the maintainer public signing key; no private key is stored in the repository.
+- `docs/release-signing.asc` is currently missing and must be committed with the maintainer public signing key before the first release; no private key belongs in the repository.
 - A repository-scoped macOS ARM64 self-hosted runner carries the required `docker-sandboxes` label.
 - npm trusted publishing is restricted to this repository, `publish-npm.yml`, and the `release` environment.
 - The signed tag and package, image, scan, SBOM, provenance, and hardware-E2E receipts all resolve to the same reviewed commit.

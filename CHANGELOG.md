@@ -1,5 +1,7 @@
 # Changelog
 
+> Release status: `0.1.0` is not yet published.
+
 ## 0.1.0 — 2026-08-12
 
 - Whole-Pi Docker Sandboxes launch through Pi flags and `pi-dsbx`.

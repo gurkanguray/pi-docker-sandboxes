@@ -35,7 +35,9 @@ test("README gives a concise path into the product documentation", async () => {
 	const top = readme.split("\n").slice(0, 12).join("\n");
 
 	assert.match(top, /Early Access/);
+	assert.match(top, /not (?:yet )?published|no public (?:package|release)/i);
 	assert.doesNotMatch(top, /tested on macOS|other macOS releases|Linux|Windows/i);
+	assert.match(readme, /install after (?:the )?release/i);
 	assert.match(readme, /pi install npm:pi-docker-sandboxes@0\.1\.0/);
 	assert.match(readme, /pi-dsbx image build/);
 	assert.match(readme, /pi --docker-sandbox/);
@@ -146,14 +148,17 @@ test("docs state the implemented safety, cleanup, and image defaults", async () 
 	);
 	assert.match(text, /verified local image/i);
 	assert.match(text, /pi remove npm:pi-docker-sandboxes/);
-	assert.doesNotMatch(text, /(?:Linux|Windows)[^\n]*(?:is|are) supported/i);
 });
 
-test("getting started follows the shortest supported path", async () => {
-	const gettingStarted = await read("docs/getting-started.md");
+test("getting started separates compatibility from release validation", async () => {
+	const [gettingStarted, packageJson, imageLock] = await Promise.all([
+		read("docs/getting-started.md"),
+		read("package.json").then(JSON.parse),
+		read("docker/image-lock.json").then(JSON.parse),
+	]);
 	const ordered = [
 		"## Requirements",
-		"## Install",
+		"## Install after release",
 		"## Build the image",
 		"## Run",
 		"## Keep your work",
@@ -161,14 +166,19 @@ test("getting started follows the shortest supported path", async () => {
 	].map((heading) => gettingStarted.indexOf(heading));
 	assert.ok(ordered.every((index) => index >= 0));
 	assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right));
-	for (const version of [
-		/macOS 26\.5\.2[^\n]*Apple silicon/i,
-		/Pi[^\n]*0\.84\.1/,
-		/Node\.js[^\n]*24\.12\.0/,
-		/Docker[^\n]*29\+/,
-		/Docker Sandboxes[^\n]*0\.38\.0/,
+	for (const value of [
+		packageJson.engines.node,
+		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
+		imageLock.platform,
 	])
-		assert.match(gettingStarted, version);
+		assert.ok(gettingStarted.includes(value), value);
+	assert.match(gettingStarted, /macOS 14\+[^\r\n]*Apple silicon/i);
+	assert.match(gettingStarted, /Ubuntu 24\.04\+[^\r\n]*(?:ARM64|Arm64)/i);
+	assert.match(gettingStarted, /macOS 26\.5\.2[^\r\n]*(?:validated|tested)/i);
+	assert.doesNotMatch(
+		gettingStarted,
+		/other macOS releases[^\n]*unsupported|Linux[^\n]*unsupported/i,
+	);
 	assert.match(gettingStarted, /if[^\n]*repository[^\n]*has no commits/i);
 	assert.match(
 		gettingStarted,
@@ -274,13 +284,16 @@ test("uninstall preserves data and follows the safe removal order", async () => 
 });
 
 test("support, compatibility, and security each have one job", async () => {
-	const [support, security, compatibility] = await Promise.all([
-		read("SUPPORT.md"),
-		read("SECURITY.md"),
-		read("COMPATIBILITY.md"),
-	]);
+	const [support, security, compatibility, packageJson, imageLock] =
+		await Promise.all([
+			read("SUPPORT.md"),
+			read("SECURITY.md"),
+			read("COMPATIBILITY.md"),
+			read("package.json").then(JSON.parse),
+			read("docker/image-lock.json").then(JSON.parse),
+		]);
 
-	assert.match(support, /latest `0\.1\.x`/);
+	assert.match(support, /no public release|support begins with/i);
 	assert.match(support, /\[Compatibility\]\(COMPATIBILITY\.md\)/);
 	assert.match(support, /no (?:response-time )?SLA/i);
 	assert.match(
@@ -291,20 +304,36 @@ test("support, compatibility, and security each have one job", async () => {
 		support,
 		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/issues\/new\?template=question\.yml/,
 	);
+	assert.match(support, /template=platform\.yml/);
+	assert.doesNotMatch(support, /unsupported platform/i);
 	assert.doesNotMatch(support, /26\.5\.2|Linux and Windows/i);
 
+	for (const heading of [
+		"## Package requirements",
+		"## Supported hosts",
+		"## Release validation",
+		"## Known limitations",
+	])
+		assert.ok(compatibility.includes(heading), heading);
+	for (const value of [
+		packageJson.engines.node,
+		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
+		imageLock.platform,
+	])
+		assert.ok(compatibility.includes(value), value);
 	for (const requirement of [
-		/macOS 26\.5\.2[^\n]*Apple Silicon/i,
-		/Pi[^\n]*0\.84\.1/,
-		/Node\.js[^\n]*24\.12\.0/,
-		/Docker[^\n]*29\+/,
-		/Docker Engine in VM[^\n]*29\.7\.1/,
-		/Docker Sandboxes[^\n]*0\.38\.0/,
-		/Linux[^\n]*unsupported/i,
-		/Windows[^\n]*unsupported/i,
-		/other macOS releases[^\n]*unsupported/i,
+		/macOS 14\+[^\r\n]*Apple Silicon[^\r\n]*supported/i,
+		/Ubuntu 24\.04\+[^\r\n]*(?:ARM64|Arm64)[^\r\n]*supported/i,
+		/macOS 26\.5\.2[^\r\n]*(?:validated|tested)/i,
+		/Docker Sandboxes[^\r\n]*0\.38\.x/i,
+		/Windows 11[^\r\n]*(?:current package|package currently)[^\r\n]*incompatible/i,
+		/(?:x64|amd64)[^\r\n]*`linux\/arm64`/i,
 	])
 		assert.match(compatibility, requirement);
+	assert.doesNotMatch(
+		compatibility,
+		/other macOS releases[^\n]*unsupported|Linux (?:is )?unsupported|Windows (?:is )?unsupported/i,
+	);
 
 	assert.match(
 		security,
@@ -325,7 +354,7 @@ test("community files define contribution, conduct, and governance", async () =>
 
 	for (const requirement of [
 		/Node(?:\.js)? `>=24\.12\.0 <25`/,
-		/Pi 0\.84\.1/,
+		/Pi `?>=0\.84\.1 <0\.85\.0`?/,
 		/Docker Sandboxes (?:\(`sbx`\) )?0\.38\.x/,
 		/npm ci --ignore-scripts/,
 		/npm run check/,
@@ -345,6 +374,7 @@ test("community files define contribution, conduct, and governance", async () =>
 	assert.match(conduct, /version 2\.1/);
 	assert.match(conduct, /@gurkanguray/);
 	assert.match(conduct, /private vulnerability reporting/i);
+	assert.match(conduct, /\[Code of Conduct\]/i);
 	assert.doesNotMatch(conduct, /[-\w.]+@[-\w.]+/);
 
 	assert.match(governance, /Guray Gurkan.*project maintainer/i);
@@ -384,8 +414,9 @@ test("issue forms match pinned GitHub schemas", async () => {
 		[".github/ISSUE_TEMPLATE/bug.yml", validateForm],
 		[".github/ISSUE_TEMPLATE/question.yml", validateForm],
 		[".github/ISSUE_TEMPLATE/feature.yml", validateForm],
-		[".github/ISSUE_TEMPLATE/unsupported-platform.yml", validateForm],
+		[".github/ISSUE_TEMPLATE/platform.yml", validateForm],
 	] as const;
+	await assert.rejects(access(".github/ISSUE_TEMPLATE/unsupported-platform.yml"));
 
 	for (const [path, validate] of templates) {
 		const yaml = await read(path);
@@ -416,13 +447,13 @@ body: []
 	assert.ok(validate.errors?.length);
 });
 
-test("issue forms provide structured public and private intake", async () => {
-	const [config, bug, question, feature, unsupported] = await Promise.all([
+test("issue forms accept every documented host status", async () => {
+	const [config, bug, question, feature, platform] = await Promise.all([
 		read(".github/ISSUE_TEMPLATE/config.yml"),
 		read(".github/ISSUE_TEMPLATE/bug.yml"),
 		read(".github/ISSUE_TEMPLATE/question.yml"),
 		read(".github/ISSUE_TEMPLATE/feature.yml"),
-		read(".github/ISSUE_TEMPLATE/unsupported-platform.yml"),
+		read(".github/ISSUE_TEMPLATE/platform.yml"),
 	]);
 
 	assert.match(config, /^blank_issues_enabled: false$/m);
@@ -437,7 +468,8 @@ test("issue forms provide structured public and private intake", async () => {
 		"pi_version",
 		"node_version",
 		"sbx_version",
-		"macos_version",
+		"host_os",
+		"host_version",
 		"architecture",
 		"reproduction",
 		"expected",
@@ -464,20 +496,15 @@ test("issue forms provide structured public and private intake", async () => {
 		bug,
 		/paste (?:your )?(?:raw )?(?:environment|credentials)/i,
 	);
-	const macosField =
-		bug.match(/id: macos_version[\s\S]*?(?=^ {2}- type:)/m)?.[0] ?? "";
-	assert.match(macosField, /placeholder: ["']26\.5\.2["']/);
-	assert.match(
-		macosField,
-		/other macOS\s+versions[\s\S]*?unsupported-platform form/i,
-	);
-	assert.match(macosField, /reports? (?:are )?welcome/i);
+	assert.doesNotMatch(bug, /macos_version|unsupported-platform/i);
+	assert.match(bug, /OS name/i);
+	assert.match(bug, /architecture/i);
 
-	assert.match(question, /supported platform boundary/i);
+	assert.doesNotMatch(question, /supported platform boundary/i);
 	assert.match(question, /do not include[^\n]*(?:credentials|secrets)/i);
 	assert.match(question, /private source/i);
 	for (const id of [
-		"supported_area",
+		"documented_area",
 		"package_version",
 		"question",
 		"redaction",
@@ -486,12 +513,36 @@ test("issue forms provide structured public and private intake", async () => {
 	assert.doesNotMatch(question, /id: (?:doctor|diagnostics|logs|environment)/i);
 
 	assert.match(feature, /security boundar/i);
-	assert.match(unsupported, /unsupported/i);
-	assert.match(
-		unsupported,
-		/does not\s+(?:imply|establish|guarantee) support/i,
+	assert.match(platform, /Platform report/i);
+	assert.match(platform, /upstream-supported|Docker Sandboxes/i);
+	assert.match(platform, /`linux\/arm64`/i);
+	assert.match(platform, /does not\s+(?:establish|guarantee)[^\n]*roadmap/i);
+	assert.doesNotMatch(platform, /Linux[^\n]*unsupported|Windows[^\n]*unsupported/i);
+});
+
+test("public availability and diagnostics stay truthful", async () => {
+	const [readme, gettingStarted, changelog, cli, troubleshooting, release] =
+		await Promise.all([
+			read("README.md"),
+			read("docs/getting-started.md"),
+			read("CHANGELOG.md"),
+			read("docs/cli-reference.md"),
+			read("docs/troubleshooting.md"),
+			read("RELEASE.md"),
+		]);
+	for (const document of [readme, gettingStarted, changelog])
+		assert.match(document, /not (?:yet )?published|no public release/i);
+	assert.doesNotMatch(
+		cli,
+		/`pi-dsbx doctor`[^\n]*(?:platform|tools|image)/i,
 	);
-	assert.doesNotMatch(unsupported, /(?:will|plan to) support/i);
+	assert.doesNotMatch(troubleshooting, /sw_vers/);
+	assert.match(troubleshooting, /process\.platform/);
+	assert.match(troubleshooting, /process\.arch/);
+	assert.match(
+		release,
+		/docs\/release-signing\.asc[^\n]*(?:missing|must be committed|before the first release)/i,
+	);
 });
 
 test("pull request template covers quality and release boundaries", async () => {

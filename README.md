@@ -1,10 +1,12 @@
 # pi-docker-sandboxes
 
-> Early Access
+> Early Access — `0.1.0` is not yet published.
 
 Run Pi in an isolated Docker Sandboxes workspace. Review changes before they reach your project.
 
-## Install
+## Install after the release
+
+Public installation opens when [release issue #8](https://github.com/gurkanguray/pi-docker-sandboxes/issues/8) is complete.
 
 Run from a Git repository. If the repository has no commits, create an empty one first:
 
@@ -13,7 +15,7 @@ git init
 git commit --allow-empty --only -m "Initial commit"
 ```
 
-Install, check the host, build the locked image, and run Pi:
+These commands will then install, check, build, and run the release:
 
 ```bash
 pi install npm:pi-docker-sandboxes@0.1.0
@@ -24,7 +26,7 @@ pi --docker-sandbox
 
 ## How it works
 
-- **Isolated:** Pi runs inside a Docker Sandboxes microVM with a private Git clone and private Docker Engine.
+- **Isolated:** Pi runs inside a Docker Sandboxes microVM with a private Git clone and, by default, a private Docker Engine.
 - **Familiar:** Eligible Pi settings, models, and credentials sync from the host. Use `--docker-sandbox-no-host-auth` to skip credentials.
 - **Reviewable:** Sandbox work returns as a patch that you review before applying.
 

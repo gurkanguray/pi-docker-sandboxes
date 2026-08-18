@@ -90,7 +90,7 @@ To disable the exit prompt, set `export.onExit` to `never`. Changed work remains
 
 ## Images
 
-Custom images must use an immutable SHA-256 digest. Without one, build the verified local image:
+The standard verified image is `linux/arm64`. Custom images must use an immutable SHA-256 digest, but supplying one does not establish a supported cross-architecture path. Without one, build the verified local image:
 
 ```bash
 npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
