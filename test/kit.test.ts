@@ -44,8 +44,16 @@ test("Kit v2 generation is deterministic, strict, and secret-free", async () => 
 	assert.equal(spec.kind, "sandbox");
 	assert.equal(spec.security.privileged, true);
 	assert.deepEqual(spec.sandbox.command.interactive, []);
-	assert.ok(spec.permissions.network.allow.includes("api.openai.com"));
-	assert.ok(spec.permissions.network.allow.includes("registry.npmjs.org"));
+	assert.ok(
+		spec.permissions.network.allow.some(
+			(domain) => domain === "api.openai.com",
+		),
+	);
+	assert.ok(
+		spec.permissions.network.allow.some(
+			(domain) => domain === "registry.npmjs.org",
+		),
+	);
 	assert.equal(spec.credentials?.[0]?.required, false);
 	assert.equal(spec.credentials?.[0]?.apiKey.proxyManaged, true);
 	assert.equal(spec.environment.variables.OPENAI_API_KEY, undefined);

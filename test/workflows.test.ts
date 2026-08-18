@@ -49,7 +49,32 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(docsText, /node-version:\s*24\.12\.0/);
 	assert.match(docsText, /npm ci --ignore-scripts/);
 	assert.match(docsText, /npm run docs:build/);
-	assert.match(docsText, /path:\s*docs\/\.vitepress\/dist/);
+	const docsSteps = docs.jobs.build.steps ?? [];
+	const archive = docsSteps.find(
+		(step) => step.name === "Archive documentation",
+	)?.run;
+	assert.match(archive ?? "", /--dereference --hard-dereference/);
+	assert.match(archive ?? "", /--directory docs\/\.vitepress\/dist/);
+	assert.match(archive ?? "", /\$RUNNER_TEMP\/artifact\.tar/);
+	const upload = docsSteps.find(
+		(step) => step.name === "Upload Pages artifact",
+	);
+	assert.equal(
+		upload?.uses,
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+	);
+	assert.deepEqual(upload?.with, {
+		name: "github-pages",
+		path: "${{ runner.temp }}/artifact.tar",
+		"retention-days": 1,
+		"if-no-files-found": "error",
+	});
+	assert.equal(
+		docsSteps.some((step) =>
+			step.uses?.startsWith("actions/upload-pages-artifact@"),
+		),
+		false,
+	);
 	assert.doesNotMatch(
 		docsText,
 		/npm publish|docker\/build-push-action|packages:\s*write/,
