@@ -14,10 +14,11 @@ const documents = [
 	"CONTRIBUTING.md",
 	"CODE_OF_CONDUCT.md",
 	"GOVERNANCE.md",
+	"RELEASE.md",
 	"docs/getting-started.md",
+	"docs/cli-reference.md",
 	"docs/configuration.md",
 	"docs/troubleshooting.md",
-	"docs/migration.md",
 	"docs/uninstall.md",
 ] as const;
 
@@ -29,40 +30,36 @@ async function schema(path: string): Promise<object> {
 	return JSON.parse(await read(path)) as object;
 }
 
-test("README describes the supported Early Access onboarding path", async () => {
+test("README gives a concise path into the product documentation", async () => {
 	const readme = await read("README.md");
 	const top = readme.split("\n").slice(0, 12).join("\n");
 
 	assert.match(top, /Early Access/);
-	assert.match(top, /tested on macOS 26\.5\.2[^\n]*Apple Silicon/i);
-	assert.match(
-		top,
-		/other macOS releases[^\n]*(?:not yet validated|not supported|unsupported)/i,
-	);
-	for (const version of [
-		/Pi 0\.84\.1/,
-		/Node\.js 24\.12\.0/,
-		/Docker Engine 29\.7\.1/,
-		/Docker Sandboxes \(`sbx`\) 0\.38\.0/,
-	])
-		assert.match(top, version);
-	assert.match(top, /Linux[^\n]*Windows[^\n]*(?:not supported|unsupported)/i);
+	assert.doesNotMatch(top, /tested on macOS|other macOS releases|Linux|Windows/i);
 	assert.match(readme, /pi install npm:pi-docker-sandboxes@0\.1\.0/);
+	assert.match(readme, /pi-dsbx image build/);
 	assert.match(readme, /pi --docker-sandbox/);
-	assert.match(readme, /--docker-sandbox-no-host-auth/);
+	assert.match(readme, /if[^\n]*repository[^\n]*has no commits/i);
 	assert.match(
 		readme,
-		/pi --docker-sandbox --docker-sandbox-session (?:ID|SESSION_ID)/,
+		/git commit --allow-empty --only -m ["']Initial commit["']/,
 	);
-	assert.match(readme, /host `--session`[^\r\n]*unsupported/i);
-	assert.match(readme, /\/resume/);
-	assert.match(readme, /--keep[^\r\n]*same sandbox/i);
-	assert.match(readme, /pi-dsbx run[^\n]*-- --session (?:ID|SESSION_ID)/);
-	assert.match(readme, /git commit --allow-empty -m ["']Initial commit["']/);
+	for (const route of [
+		"getting-started",
+		"cli-reference",
+		"configuration",
+		"troubleshooting",
+	])
+		assert.match(
+			readme,
+			new RegExp(
+				`https://gurkanguray\\.github\\.io/pi-docker-sandboxes/${route}`,
+			),
+		);
 });
 
-test("README command reference stays aligned with the CLI and extension", async () => {
-	const readme = await read("README.md");
+test("CLI reference stays aligned with the CLI and extension", async () => {
+	const reference = await read("docs/cli-reference.md");
 	const output: string[] = [];
 	const originalLog = console.log;
 	console.log = (message?: unknown) => output.push(String(message));
@@ -73,21 +70,24 @@ test("README command reference stays aligned with the CLI and extension", async 
 	}
 	const usage = output.join("\n");
 	for (const command of usage.match(/^  pi-dsbx .+$/gm) ?? [])
-		assert.ok(readme.includes(command.trim()), command.trim());
+		assert.ok(reference.includes(command.trim()), command.trim());
 	for (const flag of usage.match(/--[a-z][a-z-]*/g) ?? [])
-		assert.ok(readme.includes("`" + flag + "`"), flag);
+		assert.ok(reference.includes("`" + flag + "`"), flag);
 
 	const extension = await read("extensions/docker-sandboxes/index.ts");
 	const extensionFlags = [...extension.matchAll(/registerFlag\("([^"]+)"/g)].map(
 		([, flag]) => `--${flag}`,
 	);
 	for (const flag of extensionFlags)
-		assert.ok(readme.includes("`" + flag + "`"), flag);
+		assert.ok(reference.includes("`" + flag + "`"), flag);
 	for (const command of ["status", "doctor", "config"])
-		assert.ok(readme.includes("`/docker-sandbox " + command + "`"), command);
+		assert.ok(
+			reference.includes("`/docker-sandbox " + command + "`"),
+			command,
+		);
 
 	assert.match(
-		readme,
+		reference,
 		new RegExp(
 			"`--profile`[^\\n]*`" +
 				DEFAULT_CONFIG.profile +
@@ -95,24 +95,35 @@ test("README command reference stays aligned with the CLI and extension", async 
 		),
 	);
 	assert.match(
-		readme,
+		reference,
 		new RegExp(
 			"`--sync`[^\\n]*`" +
 				DEFAULT_CONFIG.syncProfile +
 				"` \\(default\\)[^\\n]*`clean`[^\\n]*`mirror`",
 		),
 	);
-	assert.match(readme, /`--image`[^\n]*immutable[^\n]*digest/i);
-	assert.doesNotMatch(readme, /`--image`[^\n]*local content tag/i);
-	assert.match(readme, /`--fresh`[^\n]*cannot[^\n]*`--name`/i);
-	assert.match(readme, /`--discard-changes`[^\n]*noninteractive/i);
+	assert.match(reference, /`--image`[^\n]*immutable[^\n]*digest/i);
+	assert.doesNotMatch(reference, /`--image`[^\n]*local content tag/i);
+	assert.match(reference, /`--fresh`[^\n]*cannot[^\n]*`--name`/i);
+	assert.match(reference, /`--discard-changes`[^\n]*noninteractive/i);
 	assert.match(
-		readme,
+		reference,
 		/interactive confirmation[^\n]*(?:changed|uninspectable)[^\n]*(?:remove|discard|destroy)/i,
 	);
-	assert.match(readme, /`pi-dsbx`[^\n]*same as `pi-dsbx run`/i);
-	assert.match(readme, /`pi-dsbx status`[^\n]*on the host[^\n]*list/i);
-	assert.doesNotMatch(readme, /`pi-dsbx image build`[^\n]*accepts no flags/i);
+	assert.match(reference, /`pi-dsbx`[^\n]*same as `pi-dsbx run`/i);
+	assert.match(reference, /`pi-dsbx status`[^\n]*on the host[^\n]*list/i);
+	assert.match(
+		reference,
+		/pi --docker-sandbox --docker-sandbox-session (?:ID|SESSION_ID)/,
+	);
+	assert.match(reference, /host `--session`[^\r\n]*unsupported/i);
+	assert.match(reference, /\/resume/);
+	assert.match(reference, /--keep[^\r\n]*same sandbox/i);
+	assert.match(reference, /pi-dsbx run[^\n]*-- --session (?:ID|SESSION_ID)/);
+	assert.doesNotMatch(
+		reference,
+		/`pi-dsbx image build`[^\n]*accepts no flags/i,
+	);
 });
 
 test("docs state the implemented safety, cleanup, and image defaults", async () => {
@@ -138,70 +149,87 @@ test("docs state the implemented safety, cleanup, and image defaults", async () 
 	assert.doesNotMatch(text, /(?:Linux|Windows)[^\n]*(?:is|are) supported/i);
 });
 
-test("getting started documents the ordered native first-launch transcript", async () => {
+test("getting started follows the shortest supported path", async () => {
 	const gettingStarted = await read("docs/getting-started.md");
-	const transcript = [
-		"pi-dsbx: checking Docker Sandboxes",
-		"pi-dsbx: syncing host credentials",
-		"2 packages need a compiler in this sandbox (npm:context-mode, npm:pi-hermes-memory).",
-		"Install toolchain here? ~1–2 min, not saved. [y/N] y",
-		"pi-dsbx: copying host profile",
-		"pi-dsbx: creating sandbox",
-		"pi-dsbx: installing compiler (12s)",
-		"pi-dsbx: installing npm:context-mode (18s)",
-		"pi-dsbx: starting Pi",
-	];
-	let previous = -1;
-	for (const line of transcript) {
-		const index = gettingStarted.indexOf(line);
-		assert.ok(index > previous, `${line} must appear in transcript order`);
-		previous = index;
-	}
+	const ordered = [
+		"## Requirements",
+		"## Install",
+		"## Build the image",
+		"## Run",
+		"## Keep your work",
+		"## Next steps",
+	].map((heading) => gettingStarted.indexOf(heading));
+	assert.ok(ordered.every((index) => index >= 0));
+	assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right));
+	for (const version of [
+		/macOS 26\.5\.2[^\n]*Apple silicon/i,
+		/Pi[^\n]*0\.84\.1/,
+		/Node\.js[^\n]*24\.12\.0/,
+		/Docker[^\n]*29\+/,
+		/Docker Sandboxes[^\n]*0\.38\.0/,
+	])
+		assert.match(gettingStarted, version);
+	assert.match(gettingStarted, /if[^\n]*repository[^\n]*has no commits/i);
 	assert.match(
 		gettingStarted,
-		/all mirrored remote packages[^\n]*before (?:Pi starts|attach)/i,
+		/git commit --allow-empty --only -m ["']Initial commit["']/,
 	);
-	assert.match(
-		gettingStarted,
-		/compiler consent[^\n]*only[^\n]*native packages/i,
-	);
-	assert.match(gettingStarted, /declin[^\n]*skills only/i);
+	assert.match(gettingStarted, /eligible host credentials[^\n]*sync/i);
+	assert.match(gettingStarted, /--docker-sandbox-no-host-auth/);
+	assert.match(gettingStarted, /sandbox-local `?\/login`?[^\n]*unsupported/i);
+	assert.match(gettingStarted, /accept[^\n]*exit prompt[^\n]*export/i);
+	assert.match(gettingStarted, /accept[^\n]*\.git\/pi-docker-sandbox\/patches\//i);
+	assert.match(gettingStarted, /decline[^\n]*export[^\n]*later/i);
+	assert.doesNotMatch(gettingStarted, /printed patch/i);
+	assert.doesNotMatch(gettingStarted, /pi-dsbx: checking Docker Sandboxes/);
 });
 
-test("README links to dedicated operations guidance", async () => {
+test("configuration explains every user-facing choice", async () => {
+	const configuration = await read("docs/configuration.md");
+	for (const choice of [
+		/development[^\n]*network/i,
+		/hardened[^\n]*network/i,
+		/clean[^\n]*(?:nothing|minimal)/i,
+		/custom[^\n]*settings[^\n]*models/i,
+		/mirror[^\n]*packages[^\n]*skills/i,
+		/anthropic[^\n]*google[^\n]*openai[^\n]*openrouter[^\n]*xai/i,
+	])
+		assert.match(configuration, choice);
+});
+
+test("README links to product and policy documentation", async () => {
 	const readme = await read("README.md");
 
-	assert.match(readme, /\[Troubleshooting\]\(docs\/troubleshooting\.md\)/);
-	assert.match(readme, /\[Migration\]\(docs\/migration\.md\)/);
-	assert.match(readme, /\[Uninstall\]\(docs\/uninstall\.md\)/);
-	assert.match(readme, /\[Support\]\(SUPPORT\.md\)/);
-	assert.match(
-		readme,
-		/\[Documentation source\]\(https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/tree\/main\/docs\)/,
-	);
-	assert.doesNotMatch(readme, /gurkanguray\.github\.io/);
-	assert.doesNotMatch(
-		readme,
-		/docs\/(?:getting-started|configuration)\.md#(?:troubleshooting|migration-notes|uninstall)/,
-	);
+	for (const [text, target] of [
+		["Get started", "getting-started"],
+		["CLI reference", "cli-reference"],
+		["Configuration", "configuration"],
+		["Troubleshooting", "troubleshooting"],
+	] as const)
+		assert.match(
+			readme,
+			new RegExp(
+				`\\[${text}\\]\\(https://gurkanguray\\.github\\.io/pi-docker-sandboxes/${target}\\)`,
+				"i",
+			),
+		);
+	for (const [text, target] of [
+		["Compatibility", "COMPATIBILITY.md"],
+		["Support", "SUPPORT.md"],
+		["Security", "SECURITY.md"],
+		["Contributing", "CONTRIBUTING.md"],
+	] as const)
+		assert.ok(readme.includes(`[${text}](${target})`));
+	assert.doesNotMatch(readme, /Migration|docs\/migration\.md/);
 });
 
-test("troubleshooting documents supported failures and recovery", async () => {
+test("troubleshooting puts common fixes before work recovery", async () => {
 	const troubleshooting = await read("docs/troubleshooting.md");
+	const common = troubleshooting.indexOf("## Common fixes");
+	const recovery = troubleshooting.indexOf("## Recover your work");
+	assert.ok(common >= 0 && recovery > common);
 
-	for (const heading of [
-		"sbx is missing or unsupported",
-		"Git repository has no initial commit",
-		"No models or credentials",
-		"Image pull or build fails",
-		"Sandbox is retained with unexported changes",
-		"Patch export or apply fails",
-		"State is missing or corrupt",
-		"Host cleanup leaves residue",
-		"Collect doctor output without secrets",
-	])
-		assert.match(troubleshooting, new RegExp(`^## ${heading}$`, "im"));
-
+	assert.match(troubleshooting, /pi-dsbx doctor/);
 	assert.match(troubleshooting, /sbx version/);
 	assert.match(
 		troubleshooting,
@@ -218,43 +246,21 @@ test("troubleshooting documents supported failures and recovery", async () => {
 	assert.doesNotMatch(troubleshooting, /(?:API[_ -]?KEY|TOKEN|SECRET)=\S+/i);
 });
 
-test("migration documents changed defaults and rollback", async () => {
-	const migration = await read("docs/migration.md");
-
-	for (const claim of [
-		/verified image/i,
-		/no runtime installation/i,
-		/remove clean sandboxes/i,
-		/safe personalization/i,
-		/dynamic proxy support/i,
-		/dedicated discard/i,
-		/temporary owner-only file[\s\S]*atomically rename/i,
-		/original remains intact/i,
-		/warnings and rollback/i,
-	])
-		assert.match(migration, claim);
-	assert.doesNotMatch(migration, /delete state blindly/i);
-});
-
 test("uninstall preserves data and follows the safe removal order", async () => {
 	const uninstall = await read("docs/uninstall.md");
 	const ordered = [
-		"## 1. List and export changed sandboxes",
-		"## 2. Remove confirmed sandboxes",
+		"## 1. Export wanted work",
+		"## 2. Remove sandboxes",
 		"## 3. Remove the package",
-		"## 4. Optionally remove images",
-		"## 5. Optionally archive or remove configuration and state",
-		"## 6. Retain or archive patches",
+		"## 4. Optional cleanup",
 	].map((heading) => uninstall.indexOf(heading));
 
 	assert.ok(ordered.every((index) => index >= 0));
-	assert.deepEqual(
-		ordered,
-		[...ordered].sort((left, right) => left - right),
-	);
+	assert.deepEqual(ordered, [...ordered].sort((left, right) => left - right));
 	assert.match(uninstall, /sbx ls/);
 	assert.match(uninstall, /pi-dsbx export --name NAME/);
 	assert.match(uninstall, /pi-dsbx destroy --name NAME/);
+	assert.match(uninstall, /--discard-changes/);
 	assert.match(uninstall, /pi remove npm:pi-docker-sandboxes/);
 	assert.match(
 		uninstall,
@@ -262,26 +268,20 @@ test("uninstall preserves data and follows the safe removal order", async () => 
 	);
 	assert.match(uninstall, /~\/\.pi\/agent\/docker-sandboxes\.json/);
 	assert.match(uninstall, /\.pi\/docker-sandboxes\.json/);
-	assert.match(uninstall, /\.git\/pi-docker-sandbox\/state/);
-	assert.match(uninstall, /\.git\/pi-docker-sandbox\/patches/);
-	assert.match(uninstall, /dry run/i);
-	assert.match(uninstall, /back(?:up|ed up)/i);
-	assert.match(uninstall, /Do not delete[\s\S]*patch/i);
+	assert.match(uninstall, /\.git\/pi-docker-sandbox\/(?:state|patches)/);
+	assert.match(uninstall, /configuration[^\n]*state[^\n]*remove[^\n]*after[^\n]*sandbox/i);
+	assert.match(uninstall, /patch[^\n]*(?:keep|retain|preserve)/i);
 });
 
-test("support and security policies state the Early Access boundary", async () => {
+test("support, compatibility, and security each have one job", async () => {
 	const [support, security, compatibility] = await Promise.all([
 		read("SUPPORT.md"),
 		read("SECURITY.md"),
 		read("COMPATIBILITY.md"),
 	]);
 
-	assert.match(support, /macOS ARM64/);
 	assert.match(support, /latest `0\.1\.x`/);
-	assert.match(
-		support,
-		/Linux and Windows reports are welcome but unsupported/i,
-	);
+	assert.match(support, /\[Compatibility\]\(COMPATIBILITY\.md\)/);
 	assert.match(support, /no (?:response-time )?SLA/i);
 	assert.match(
 		support,
@@ -291,16 +291,27 @@ test("support and security policies state the Early Access boundary", async () =
 		support,
 		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/issues\/new\?template=question\.yml/,
 	);
-	assert.match(compatibility, /macOS 26\.5\.2 \/ Apple Silicon/);
-	assert.match(
-		compatibility,
-		/does not (?:establish|imply) support[^\n]*other macOS releases/i,
-	);
+	assert.doesNotMatch(support, /26\.5\.2|Linux and Windows/i);
+
+	for (const requirement of [
+		/macOS 26\.5\.2[^\n]*Apple Silicon/i,
+		/Pi[^\n]*0\.84\.1/,
+		/Node\.js[^\n]*24\.12\.0/,
+		/Docker[^\n]*29\+/,
+		/Docker Engine in VM[^\n]*29\.7\.1/,
+		/Docker Sandboxes[^\n]*0\.38\.0/,
+		/Linux[^\n]*unsupported/i,
+		/Windows[^\n]*unsupported/i,
+		/other macOS releases[^\n]*unsupported/i,
+	])
+		assert.match(compatibility, requirement);
+
 	assert.match(
 		security,
 		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/security\/advisories\/new/,
 	);
 	assert.match(security, /Do not open a public issue/i);
+	assert.match(security, /\[threat model\]\(THREAT_MODEL\.md\)/i);
 	assert.doesNotMatch(security, /(?:security|vulnerability)[-\w.]*@[-\w.]+/i);
 });
 
@@ -498,49 +509,42 @@ test("pull request template covers quality and release boundaries", async () => 
 		assert.match(template, requirement);
 });
 
-test("release instructions bind dispatch to the signed tag on main", async () => {
-	const [release, settings] = await Promise.all([
-		read("RELEASE.md"),
-		read("docs/repository-settings.md"),
-	]);
-
+test("release instructions bind dispatch and repository prerequisites", async () => {
+	const release = await read("RELEASE.md");
 	const dispatch =
 		'gh workflow run release-candidate.yml --ref "$TAG" -f tag="$TAG"';
-	for (const document of [release, settings]) {
-		assert.ok(document.includes(dispatch));
-		assert.match(document, /workflow ref and tag input must be identical/i);
-		assert.match(
-			document,
-			/tag commit[^\r\n]*ancestor of[^\r\n]*origin\/main/i,
-		);
-		assert.doesNotMatch(document, /select the exact signed tag/i);
-	}
-});
-
-test("repository settings record partial verification without overstating readiness", async () => {
-	const settings = await read("docs/repository-settings.md");
-
-	assert.match(settings, /Current status: Partially verified/i);
-	assert.match(settings, /2026-08-15/);
-	assert.match(settings, /Owner: `gurkanguray`/);
+	assert.ok(release.includes(dispatch));
+	assert.match(release, /workflow ref and tag input must be identical/i);
 	assert.match(
-		settings,
+		release,
+		/tag commit[^\r\n]*ancestor of[^\r\n]*origin\/main/i,
+	);
+	assert.match(
+		release,
 		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/issues\/8/,
 	);
-	assert.match(
-		settings,
-		/https:\/\/gurkanguray\.github\.io\/pi-docker-sandboxes\//,
-	);
-	assert.match(settings, /build_type: `workflow`/);
-	assert.match(settings, /no candidate content (?:has been|was) deployed/i);
-	assert.match(settings, /required status (?:check )?contexts[^\n]*pending/i);
-	assert.match(settings, /npm trusted publisher[^\n]*pending/i);
-	assert.match(settings, /self-hosted (?:release )?runner[^\n]*pending/i);
-	assert.match(settings, /signing key[^\n]*pending/i);
-	assert.match(settings, /signed tag[^\n]*pending/i);
-	assert.match(settings, /hosted receipts[^\n]*pending/i);
-	assert.match(settings, /publication[^\n]*pending/i);
-	assert.doesNotMatch(settings, /Current status: (?:Ready|Fully verified)/i);
+	for (const prerequisite of [
+		/Main Protection/i,
+		/protected `release` environment/i,
+		/signing key/i,
+		/self-hosted runner/i,
+		/npm trusted publish/i,
+	])
+		assert.match(release, prerequisite);
+	const manualE2E =
+		release.match(/For manual `workflow_dispatch`[\s\S]*?does not[\s\S]*?candidate\./i)?.[0] ?? "";
+	for (const input of [
+		"source_sha",
+		"package_artifact",
+		"image_artifact",
+		"image_digest",
+		"run_id",
+	])
+		assert.match(manualE2E, new RegExp("`" + input + "`"));
+	assert.match(manualE2E, /image-verification\.json[^\n]*`ociDigest`/i);
+	assert.doesNotMatch(release, /docs\/repository-settings\.md/);
+	assert.doesNotMatch(release, /proved red locally|disposable `?\/tmp/i);
+	assert.doesNotMatch(release, /select the exact signed tag/i);
 });
 
 test("dependency updates follow the conservative review policy", async () => {

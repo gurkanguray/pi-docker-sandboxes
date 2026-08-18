@@ -2,7 +2,16 @@
 
 Releases require explicit maintainer approval in the protected `release` GitHub environment. Candidate checks prepare and verify artifacts; they do not publish anything.
 
-Repository-admin prerequisites are tracked in the auditable [repository release protections checklist](docs/repository-settings.md). Publication is blocked until every checklist item is verified and its date, owner, and evidence URL are recorded in the release issue.
+Repository readiness is tracked in [release issue #8](https://github.com/gurkanguray/pi-docker-sandboxes/issues/8). Publication is blocked until the issue records a current date, owner, and evidence URL for every prerequisite below.
+
+## Repository prerequisites
+
+- Main Protection requires pull requests, CODEOWNER review, resolved conversations, squash-only linear history, and the exact observed CI and security checks.
+- The protected `release` environment requires maintainer approval and permits only `main` and `v*` release refs.
+- `docs/release-signing.asc` contains the maintainer public signing key; no private key is stored in the repository.
+- A repository-scoped macOS ARM64 self-hosted runner carries the required `docker-sandboxes` label.
+- npm trusted publishing is restricted to this repository, `publish-npm.yml`, and the `release` environment.
+- The signed tag and package, image, scan, SBOM, provenance, and hardware-E2E receipts all resolve to the same reviewed commit.
 
 ## Protected release graph
 
@@ -42,13 +51,18 @@ Every dependency update requires the unit and package checks (`npm run check` an
 
 The reusable `.github/workflows/e2e.yml` gate consumes the exact package and
 OCI candidate artifacts. A calling workflow downloads both current-run
-artifacts. For manual `workflow_dispatch`, provide the completed CI `run_id`,
-package artifact `npm-package-<source_sha>`, and OCI artifact
-`oci-candidate-<source_sha>`; the workflow uses its read-only GitHub token and
-fails closed if either artifact or its bound digest is absent. It verifies the
-OCI index digest, imports that archive into the local Docker daemon, and loads
-the resulting content-addressed image into Docker Sandboxes. This gate does not
-pull or publish the candidate.
+artifacts. For manual `workflow_dispatch`, provide all five required inputs:
+
+- `source_sha`: the exact commit tested by the completed CI run;
+- `run_id`: that completed CI run;
+- `package_artifact`: normally `npm-package-<source_sha>`;
+- `image_artifact`: normally `oci-candidate-<source_sha>`; and
+- `image_digest`: the image artifact's `image-verification.json` `ociDigest` value.
+
+The workflow uses its read-only GitHub token and fails closed if either artifact
+or its bound digest is absent. It verifies the OCI index digest, imports that
+archive into the local Docker daemon, and loads the resulting content-addressed
+image into Docker Sandboxes. This gate does not pull or publish the candidate.
 
 The uploaded receipt records required and selected image identities, test
 status/count, and a `passedAt` timestamp only for successful E2E. Logs and the
@@ -74,10 +88,6 @@ to exact image paths, and the release check binds the approved policy bytes,
 locked base digest, and review date. Do not lower the severity threshold or use a
 blanket `ignore-unfixed` policy. No workflow logs in to an OCI registry or
 publishes an image.
-
-The image gate was also proved red locally with a disposable `/tmp` Dockerfile
-that removed `fd`; `npm run image:verify` rejected it with `fd: not found`. The
-broken Dockerfile was never committed.
 
 ## Publication
 
