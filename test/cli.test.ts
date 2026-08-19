@@ -297,8 +297,16 @@ test("CLI session restore rejects mismatched custody and accepts exact state", a
 		}
 	};
 	for (const [label, state, diagnostic] of [
-		["state", { ...valid, phase: "creating", imageAttestation: undefined }, /ready/i],
-		["repository", { ...valid, hostRepoIdentity: "local:other" }, /repository/i],
+		[
+			"state",
+			{ ...valid, phase: "creating", imageAttestation: undefined },
+			/ready/i,
+		],
+		[
+			"repository",
+			{ ...valid, hostRepoIdentity: "local:other" },
+			/repository/i,
+		],
 		[
 			"image",
 			{
@@ -308,7 +316,11 @@ test("CLI session restore rejects mismatched custody and accepts exact state", a
 			},
 			/image|runtime/i,
 		],
-		["worktree", { ...valid, hostWorktreeIdentity: `${subject.root}-other` }, /worktree/i],
+		[
+			"worktree",
+			{ ...valid, hostWorktreeIdentity: `${subject.root}-other` },
+			/worktree/i,
+		],
 		["attestation", { ...valid, imageAttestation: undefined }, /attest|ready/i],
 	] as const) {
 		await saveSandboxState(state);
@@ -324,7 +336,10 @@ test("CLI session restore rejects mismatched custody and accepts exact state", a
 	await saveSandboxState(valid);
 	const restored = await run();
 	assert.equal(restored.code, 0, restored.stderr);
-	assert.equal(restored.calls.some((call) => call[0] === "cp"), true);
+	assert.equal(
+		restored.calls.some((call) => call[0] === "cp"),
+		true,
+	);
 	assert.equal(restored.calls.filter((call) => call[0] === "exec").length, 3);
 });
 

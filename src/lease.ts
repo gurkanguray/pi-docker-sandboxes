@@ -93,7 +93,8 @@ function flags(): { directory: number; create: number; read: number } {
 		if (typeof constants[name] !== "number")
 			throw new Error(`Lifecycle leases are unsupported: ${name} unavailable`);
 	return {
-		directory: constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		directory:
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
 		create:
 			constants.O_CREAT |
 			constants.O_EXCL |
@@ -152,7 +153,9 @@ async function createPrivateDirectoryPath(
 			(created.mode & 0o077) !== 0 ||
 			(typeof process.getuid === "function" && created.uid !== process.getuid())
 		)
-			throw new Error("Lifecycle lease base creation was not private and stable");
+			throw new Error(
+				"Lifecycle lease base creation was not private and stable",
+			);
 		const parentPath = dirname(directory);
 		const parent = await open(parentPath, flags().directory);
 		try {
@@ -179,7 +182,8 @@ async function prepareLeaseDirectory(
 		join(canonicalAgentDir, "docker-sandboxes", "leases"),
 	];
 	const identities: FileIdentity[] = [];
-	const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	const uid =
+		typeof process.getuid === "function" ? process.getuid() : undefined;
 	const validate = async (): Promise<void> => {
 		for (let index = 0; index < identities.length; index++) {
 			const current = await lstat(paths[index]!);
@@ -208,7 +212,10 @@ async function prepareLeaseDirectory(
 			const parent = await open(parentPath, flags().directory);
 			try {
 				const opened = await parent.stat();
-				if (!opened.isDirectory() || !sameIdentity(identities[index - 1]!, opened))
+				if (
+					!opened.isDirectory() ||
+					!sameIdentity(identities[index - 1]!, opened)
+				)
 					throw new Error("Lifecycle lease parent changed while syncing");
 				await sync(parentPath, parent);
 			} finally {
@@ -336,7 +343,8 @@ async function openLeaseSnapshot(
 		join(canonicalAgentDir, "docker-sandboxes"),
 		join(canonicalAgentDir, "docker-sandboxes", "leases"),
 	];
-	const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	const uid =
+		typeof process.getuid === "function" ? process.getuid() : undefined;
 	let expectedParentIdentity: FileIdentity | undefined;
 	for (const [index, directory] of directories.entries()) {
 		let metadata;
@@ -619,7 +627,9 @@ export async function acquireSandboxLease(
 							!sameIdentity(identity, opened) ||
 							!sameIdentity(identity, current)
 						)
-							throw new Error("Lifecycle lease ownership changed before release");
+							throw new Error(
+								"Lifecycle lease ownership changed before release",
+							);
 						await unlink(path);
 						await actual.syncDirectory(parent.directory, parent.handle);
 					} finally {

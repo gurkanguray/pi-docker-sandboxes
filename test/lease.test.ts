@@ -35,7 +35,10 @@ async function fixture(t: {
 }): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-"));
 	const agentDir = join(root, "agent");
-	await Promise.all([mkdir(join(root, ".git")), mkdir(agentDir, { mode: 0o700 })]);
+	await Promise.all([
+		mkdir(join(root, ".git")),
+		mkdir(agentDir, { mode: 0o700 }),
+	]);
 	leaseAgentDirs.set(root, agentDir);
 	t.after(async () => {
 		leaseAgentDirs.delete(root);
@@ -48,7 +51,10 @@ function runtime(
 	root: string,
 	overrides: SandboxLeaseRuntime = {},
 ): SandboxLeaseRuntime {
-	return { agentDir: leaseAgentDirs.get(root) ?? join(root, "agent"), ...overrides };
+	return {
+		agentDir: leaseAgentDirs.get(root) ?? join(root, "agent"),
+		...overrides,
+	};
 }
 
 async function preparedLeasePath(root: string, name = "box"): Promise<string> {
@@ -117,7 +123,9 @@ test("abandoned leases stay busy without local-owner inference or reclamation", 
 		const path = await preparedLeasePath(root, name);
 		await writeFile(path, contents, { mode: 0o600 });
 		const attempts = await Promise.allSettled(
-			Array.from({ length: 16 }, () => acquireSandboxLease(root, name, "export", runtime(root))),
+			Array.from({ length: 16 }, () =>
+				acquireSandboxLease(root, name, "export", runtime(root)),
+			),
 		);
 		assert.equal(
 			attempts.every((attempt) => attempt.status === "rejected"),
@@ -203,8 +211,7 @@ test("unrelated repositories contend globally by explicit sandbox name", async (
 	);
 	try {
 		await assert.rejects(
-			() =>
-				acquireSandboxLease(secondRoot, "shared", "destroy", sharedRuntime),
+			() => acquireSandboxLease(secondRoot, "shared", "destroy", sharedRuntime),
 			/busy.*run/i,
 		);
 		assert.notEqual(sandboxName(firstRoot), sandboxName(secondRoot));
@@ -335,8 +342,7 @@ test("directory sync failures propagate through create and release", async (t) =
 		(error: unknown) => error === invalid,
 	);
 	await assert.rejects(
-		() =>
-			acquireSandboxLease(root, "sync-create", "destroy", runtime(root)),
+		() => acquireSandboxLease(root, "sync-create", "destroy", runtime(root)),
 		/busy.*run/i,
 	);
 
@@ -412,7 +418,8 @@ test("concurrent in-process acquisition has exactly one winner", async (t) => {
 		attempts.filter(
 			(result) =>
 				result.status === "rejected" &&
-				(result.reason as { exitCode?: number }).exitCode === LEASE_BUSY_EXIT_CODE,
+				(result.reason as { exitCode?: number }).exitCode ===
+					LEASE_BUSY_EXIT_CODE,
 		).length,
 		15,
 	);

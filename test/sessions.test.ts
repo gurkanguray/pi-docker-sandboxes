@@ -252,7 +252,9 @@ test("session list/delete and owned stale staging are explicit and bounded", asy
 			kind: "pi-dsbx-session-staging",
 			path: partialName,
 			pid: 999_999_999,
-			...(typeof process.getuid === "function" ? { uid: process.getuid() } : {}),
+			...(typeof process.getuid === "function"
+				? { uid: process.getuid() }
+				: {}),
 		}),
 	);
 	await mkdir(join(root, ".partial-unowned"));
@@ -285,13 +287,10 @@ test("restore selects only the latest backup and atomically swaps exact sessions
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
-	assert.deepEqual(
-		await restoreSessions(client, agentDir, "repo", "sandbox"),
-		{
-			backupDirectory: join(root, "2026-08-14T12-34-56-789Z"),
-			warnings: [],
-		},
-	);
+	assert.deepEqual(await restoreSessions(client, agentDir, "repo", "sandbox"), {
+		backupDirectory: join(root, "2026-08-14T12-34-56-789Z"),
+		warnings: [],
+	});
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]?.[0], "sandbox");
 	assert.equal(
@@ -302,6 +301,70 @@ test("restore selects only the latest backup and atomically swaps exact sessions
 		calls[0]?.[2] ?? "",
 		/^\/home\/agent\/\.pi\/agent\/\.sessions-restore-/,
 	);
+});
+
+test("restore copy failure removes only partial staging and preserves cleanup failure", async (t) => {
+	for (const cleanupFails of [false, true])
+		await t.test(
+			cleanupFails ? "cleanup failure" : "copy failure",
+			async () => {
+				const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-copy-"));
+				const id = "2026-08-14T12-34-56-789Z";
+				await mkdir(
+					join(sessionBackupRoot(agentDir, "repo", "sandbox"), id, "sessions"),
+					{ recursive: true },
+				);
+				const copyFailure = new Error("injected restore copy failure");
+				const cleanupFailure = new Error("injected staging cleanup failure");
+				let staging = "";
+				const execCalls: string[][] = [];
+				const client = {
+					copyTo: async (
+						_name: string,
+						_source: string,
+						destination: string,
+					) => {
+						staging = destination;
+						throw copyFailure;
+					},
+					exec: async (_name: string, argv: string[]) => {
+						execCalls.push(argv);
+						if (cleanupFails) throw cleanupFailure;
+						return { stdout: "", stderr: "", code: 0 };
+					},
+				} as unknown as SbxClient;
+
+				if (cleanupFails) {
+					await assert.rejects(
+						restoreSessions(client, agentDir, "repo", "sandbox", id),
+						(error: AggregateError) =>
+							error instanceof AggregateError &&
+							error.errors[0] === copyFailure &&
+							error.errors[1] === cleanupFailure,
+					);
+				} else {
+					await assert.rejects(
+						restoreSessions(client, agentDir, "repo", "sandbox", id),
+						copyFailure,
+					);
+				}
+				assert.match(staging, /\/\.sessions-restore-/);
+				assert.equal(execCalls.length, 1);
+				assert.equal(execCalls[0]?.includes(staging), true);
+				assert.equal(
+					execCalls[0]?.some((argument) =>
+						argument.includes("/home/agent/.pi/agent/sessions"),
+					),
+					false,
+				);
+				assert.equal(
+					execCalls[0]?.some((argument) =>
+						argument.includes(".sessions-rollback-"),
+					),
+					false,
+				);
+			},
+		);
 });
 
 test("real restore shell rolls back swap, lost-response, and validation failures", async (t) => {
@@ -351,9 +414,9 @@ test("real restore shell rolls back swap, lost-response, and validation failures
 					shellCalls++;
 					if (mode === "validation-failure" && shellCalls === 2)
 						throw new Error("injected target validation failure");
-					const args = argv.slice(1).map((value, index) =>
-						index >= 3 ? map(value) : value,
-					);
+					const args = argv
+						.slice(1)
+						.map((value, index) => (index >= 3 ? map(value) : value));
 					await exec("sh", args, {
 						env: {
 							...process.env,
@@ -425,7 +488,9 @@ test("restore cleanup residue is a warning after a valid target", async () => {
 	assert.match(result?.warnings[0] ?? "", /cleanup.*residue/i);
 	assert.equal(await readFile(join(target, "value"), "utf8"), "new\n");
 	assert.equal(
-		(await readdir(sandbox)).some((entry) => entry.startsWith(".sessions-rollback-")),
+		(await readdir(sandbox)).some((entry) =>
+			entry.startsWith(".sessions-rollback-"),
+		),
 		true,
 	);
 });
@@ -480,10 +545,10 @@ test("restore ignores partial and arbitrary entries when selecting newest backup
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
-	assert.deepEqual(
-		await restoreSessions(client, agentDir, "repo", "sandbox"),
-		{ backupDirectory: join(root, valid), warnings: [] },
-	);
+	assert.deepEqual(await restoreSessions(client, agentDir, "repo", "sandbox"), {
+		backupDirectory: join(root, valid),
+		warnings: [],
+	});
 	assert.equal(source, join(root, valid, "sessions"));
 });
 

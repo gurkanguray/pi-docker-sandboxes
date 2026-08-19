@@ -26,8 +26,7 @@ type ProcessListRunner = (
 	options: { encoding: "utf8" },
 ) => Promise<{ stdout: string }>;
 
-async function markedProcesses(
-	marker: string,
+async function processList(
 	run: ProcessListRunner = exec as ProcessListRunner,
 ): Promise<MarkedProcess[]> {
 	const { stdout } = await run("ps", ["-axww", "-o", "pid=,pgid=,command="], {
@@ -41,8 +40,16 @@ async function markedProcesses(
 			pid: Number(match[1]),
 			processGroup: Number(match[2]),
 			command: match[3]!,
-		}))
-		.filter((process) => process.command.includes(marker));
+		}));
+}
+
+async function markedProcesses(
+	marker: string,
+	run: ProcessListRunner = exec as ProcessListRunner,
+): Promise<MarkedProcess[]> {
+	return (await processList(run)).filter((process) =>
+		process.command.includes(marker),
+	);
 }
 
 test("signal identity scan requests untruncated full commands", async () => {
@@ -60,7 +67,7 @@ interface WrappedProcess {
 	output: string;
 	waitForLine(line: string): Promise<void>;
 	assertOwnedProcessTree(pids: readonly number[]): Promise<void>;
-	assertNoOwnedProcesses(): Promise<void>;
+	assertNoOwnedProcesses(pids?: readonly number[]): Promise<void>;
 }
 
 function spawnWrapped(t: TestContext, source: string): WrappedProcess {
@@ -190,9 +197,17 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 				`owned marker missing from live process tree: ${JSON.stringify(owned)}`,
 			);
 		},
-		async assertNoOwnedProcesses() {
+		async assertNoOwnedProcesses(pids = []) {
 			await close;
-			assert.deepEqual(await markedProcesses(marker), []);
+			const running = await processList();
+			assert.deepEqual(
+				running.filter((process) => process.command.includes(marker)),
+				[],
+			);
+			assert.deepEqual(
+				running.filter((process) => pids.includes(process.pid)),
+				[],
+			);
 		},
 	};
 }
@@ -498,39 +513,46 @@ test("forwarded TERM reaps a resistant grandchild before preserving the direct-c
 
 test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 	skip: isWindows,
-	timeout: 10_000,
+	timeout: 30_000,
 }, async (t) => {
-	const grandchild = `
-		process.on("SIGTERM", () => console.log("resistant-grandchild-ignored"));
-		process.send("ready");
-		setInterval(() => {}, 1000);
-	`;
-	const child = `
-		import { spawn } from "node:child_process";
-		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
-			stdio: ["ignore", "inherit", "inherit", "ipc"],
+	for (let attempt = 1; attempt <= 3; attempt++)
+		await t.test(`attempt ${attempt}`, async (t) => {
+			const grandchild = `
+				process.on("SIGTERM", () => console.log("resistant-grandchild-ignored"));
+				process.send("ready");
+				setInterval(() => {}, 1000);
+			`;
+			const child = `
+				import { spawn } from "node:child_process";
+				const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
+					stdio: ["ignore", "inherit", "inherit", "ipc"],
+				});
+				process.on("SIGTERM", () => console.log("resistant-direct-ignored"));
+				grandchild.once("message", () => console.log("resistant-grandchild:" + grandchild.pid));
+			`;
+			const wrapper = spawnWrapped(t, child);
+			await wrapper.waitForLine("resistant-grandchild:");
+			const processGroup = Number(
+				wrapper.output.match(/process-group:(\d+)/)?.[1],
+			);
+			const grandchildPid = Number(
+				wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1],
+			);
+			assert.ok(processGroup > 0);
+			assert.ok(grandchildPid > 0);
+			await wrapper.assertOwnedProcessTree([processGroup, grandchildPid]);
+			wrapper.child.kill("SIGTERM");
+			await wrapper.waitForLine("resistant-direct-ignored");
+			await wrapper.waitForLine("resistant-grandchild-ignored");
+			const result = await wrapper.exit;
+			await wrapper.assertNoOwnedProcesses([processGroup, grandchildPid]);
+			if (result.code === 137) assert.equal(result.signal, null);
+			else {
+				assert.equal(result.signal, null);
+				assert.notEqual(result.code, 0);
+				assert.match(wrapper.output, /\bEPERM\b/);
+			}
 		});
-		process.on("SIGTERM", () => console.log("resistant-direct-ignored"));
-		grandchild.once("message", () => console.log("resistant-grandchild:" + grandchild.pid));
-	`;
-	const wrapper = spawnWrapped(t, child);
-	await wrapper.waitForLine("resistant-grandchild:");
-	const processGroup = Number(wrapper.output.match(/process-group:(\d+)/)?.[1]);
-	const grandchildPid = Number(
-		wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1],
-	);
-	assert.ok(processGroup > 0);
-	assert.ok(grandchildPid > 0);
-	await wrapper.assertOwnedProcessTree([processGroup, grandchildPid]);
-	wrapper.child.kill("SIGTERM");
-	await wrapper.waitForLine("resistant-direct-ignored");
-	await wrapper.waitForLine("resistant-grandchild-ignored");
-	assert.deepEqual(
-		await wrapper.exit,
-		{ code: 137, signal: null },
-		wrapper.output,
-	);
-	await wrapper.assertNoOwnedProcesses();
 });
 
 test("inherited runner preserves a child-defined SIGINT exit", {

@@ -18,7 +18,9 @@ const exec = promisify(execFile);
 async function repository(): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-diagnostics-"));
 	await exec("git", ["init", "-b", "main"], { cwd: root });
-	await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+	await exec("git", ["config", "user.email", "test@example.com"], {
+		cwd: root,
+	});
 	await exec("git", ["config", "user.name", "Test"], { cwd: root });
 	await writeFile(join(root, "file"), "test\n");
 	await exec("git", ["add", "file"], { cwd: root });
@@ -253,7 +255,9 @@ test("Docker Desktop VM storage reports usage without host statfs ENOENT", async
 		statFilesystem: (async (path: string) => {
 			statted.push(path);
 			if (path === "/var/lib/docker") {
-				const error = new Error("not host-addressable") as NodeJS.ErrnoException;
+				const error = new Error(
+					"not host-addressable",
+				) as NodeJS.ErrnoException;
 				error.code = "ENOENT";
 				throw error;
 			}
@@ -265,7 +269,10 @@ test("Docker Desktop VM storage reports usage without host statfs ENOENT", async
 	assert.match(dockerDisk?.summary ?? "", /VM-managed/);
 	assert.equal(dockerDisk?.data?.usage, usage);
 	assert.equal(statted.includes("/var/lib/docker"), true);
-	assert.equal(receipt.checks.find((entry) => entry.id === "disk")?.level, "warning");
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "disk")?.level,
+		"warning",
+	);
 });
 
 test("Linux host-addressable Docker storage contributes low disk warning", async () => {
@@ -305,7 +312,10 @@ test("Linux host-addressable Docker storage contributes low disk warning", async
 			?.availableBytes,
 		512 * 1024,
 	);
-	assert.equal(receipt.checks.find((entry) => entry.id === "disk")?.level, "warning");
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "disk")?.level,
+		"warning",
+	);
 });
 
 test("status receipt is observational and skips doctor probes", async () => {

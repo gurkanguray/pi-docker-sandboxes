@@ -198,7 +198,11 @@ export async function reconcileSessionStaging(
 		let owner: unknown;
 		try {
 			const metadata = await lstat(ownerPath);
-			if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1)
+			if (
+				!metadata.isFile() ||
+				metadata.isSymbolicLink() ||
+				metadata.nlink !== 1
+			)
 				continue;
 			owner = JSON.parse(await readFile(ownerPath, "utf8"));
 		} catch {
@@ -325,7 +329,8 @@ export async function pruneSessionBackups(
 	const cutoff = now.getTime() - retention.maxAgeDays * 86_400_000;
 	for (const backup of retained.slice())
 		if (backupDate(backup.id).getTime() < cutoff) remove(backup);
-	while (retained.length > Math.max(1, retention.maxCount)) remove(retained[0]!);
+	while (retained.length > Math.max(1, retention.maxCount))
+		remove(retained[0]!);
 	while (
 		retained.length > 1 &&
 		retained
@@ -379,7 +384,9 @@ export async function backupSessions(
 			kind: "pi-dsbx-session-staging",
 			path: basename(partial),
 			pid: process.pid,
-			...(typeof process.getuid === "function" ? { uid: process.getuid() } : {}),
+			...(typeof process.getuid === "function"
+				? { uid: process.getuid() }
+				: {}),
 		})}\n`,
 		{ flag: "wx", mode: 0o600 },
 	);
@@ -473,7 +480,9 @@ export async function restoreSessions(
 				!current.isDirectory() ||
 				!sameIdentity(metadata, current)
 			)
-				throw new TypeError(`Managed session ${label} directory identity changed`);
+				throw new TypeError(
+					`Managed session ${label} directory identity changed`,
+				);
 		}
 	};
 	await validateSelected();
@@ -487,22 +496,28 @@ export async function restoreSessions(
 	): Promise<unknown> =>
 		client.exec(
 			sandboxName,
-			[
-				"sh",
-				"-ceu",
-				script.join("\n"),
-				"pi-dsbx-session-restore",
-				...paths,
-			],
+			["sh", "-ceu", script.join("\n"), "pi-dsbx-session-restore", ...paths],
 			{ user: "root" },
 		);
-	await client.copyTo(sandboxName, sessions, staging);
 	try {
+		await client.copyTo(sandboxName, sessions, staging);
 		await validateSelected();
 	} catch (cause) {
-		await client
-			.exec(sandboxName, ["rm", "-rf", "--", staging], { user: "root" })
-			.catch(() => undefined);
+		try {
+			await shell(
+				[
+					'staged="$1"',
+					'rm -rf -- "$staged"',
+					'test ! -e "$staged" && test ! -L "$staged"',
+				],
+				staging,
+			);
+		} catch (cleanupCause) {
+			throw new AggregateError(
+				[cause, cleanupCause],
+				"Session restore staging failed and cleanup could not complete",
+			);
+		}
 		throw cause;
 	}
 	try {
@@ -520,10 +535,7 @@ export async function restoreSessions(
 			marker,
 		);
 		await shell(
-			[
-				'target="$1"',
-				'test -d "$target" && test ! -L "$target"',
-			],
+			['target="$1"', 'test -d "$target" && test ! -L "$target"'],
 			SANDBOX_SESSIONS,
 		);
 		await validateSelected();

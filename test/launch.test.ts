@@ -137,7 +137,11 @@ test("production launch succeeds from a real linked worktree", async (t) => {
 			requestName = request.name;
 		},
 	} as unknown as SbxClient;
-	const result = await launch({ cwd: canonicalLinked, client, config: launchConfig });
+	const result = await launch({
+		cwd: canonicalLinked,
+		client,
+		config: launchConfig,
+	});
 	const repository = await inspectRepository(canonicalLinked);
 	assert.equal(repository.mainWorktree, false);
 	assert.equal(result.name, sandboxName(canonicalLinked));
