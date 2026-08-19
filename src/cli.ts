@@ -494,7 +494,9 @@ export async function main(
 						backupId,
 					);
 					if (!restored) throw new Error("No managed session backup exists");
-					console.log(`Restored ${restored}`);
+					for (const warning of restored.warnings)
+						console.warn(`pi-dsbx: warning: ${warning}`);
+					console.log(`Restored ${restored.backupDirectory}`);
 					return 0;
 				},
 			);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
 	chmod,
+	mkdir,
 	mkdtemp,
 	readFile,
 	realpath,
@@ -20,7 +21,9 @@ import {
 	main,
 } from "../src/cli.ts";
 import { LauncherExitCode } from "../src/exit-codes.ts";
+import { IMAGE_LOCK } from "../src/image-lock.ts";
 import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
+import { sessionBackupRoot } from "../src/sessions.ts";
 import {
 	inspectRepository,
 	loadSandboxState,
@@ -198,6 +201,131 @@ test("all management mutations contend on the sandbox lifecycle lease", async ()
 			await held.release();
 		}
 	}
+});
+
+test("CLI session restore rejects mismatched custody and accepts exact state", async () => {
+	const subject = await fixture();
+	const repository = await inspectRepository(subject.root);
+	const name = sandboxName(subject.root);
+	const image = IMAGE_LOCK.images.standard;
+	assert.equal(image.status, "published");
+	if (image.status !== "published") return;
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-sessions-home-"));
+	const agentDir = join(home, ".pi", "agent");
+	await chmod(home, 0o700);
+	await mkdir(agentDir, { recursive: true, mode: 0o700 });
+	const backupId = "2026-08-14T12-34-56-789Z";
+	await mkdir(
+		join(
+			sessionBackupRoot(agentDir, repository.identity, name),
+			backupId,
+			"sessions",
+		),
+		{ recursive: true },
+	);
+	await chmod(join(agentDir, "docker-sandboxes"), 0o700);
+	const original = await loadSandboxState(subject.root, name);
+	const valid = {
+		...original,
+		version: 2 as const,
+		phase: "ready" as const,
+		hostRepoIdentity: repository.identity,
+		hostWorktreeIdentity: repository.worktreeIdentity,
+		hostRoot: repository.root,
+		runtimeImage: image.reference,
+		runtimeSchema: IMAGE_LOCK.runtimeSchema,
+		packageVersion: "1.0.0",
+		imageAttestation: {
+			status: "verified" as const,
+			image: image.reference,
+		},
+		updatedAt: "2026-08-18T00:00:00.000Z",
+	};
+	const run = async (): Promise<{
+		code: number;
+		stderr: string;
+		calls: string[][];
+	}> => {
+		await writeFile(subject.log, "");
+		try {
+			await exec(
+				process.execPath,
+				[
+					"--experimental-strip-types",
+					cli,
+					"sessions",
+					"restore",
+					backupId,
+					"--name",
+					name,
+				],
+				{
+					cwd: subject.root,
+					env: {
+						...process.env,
+						HOME: home,
+						PATH: `${subject.bin}:${process.env.PATH}`,
+						FAKE_SBX_LOG: subject.log,
+						FAKE_DIRTY: "0",
+						FAKE_DAEMON: subject.daemon,
+						FAKE_NAME: name,
+						FAKE_IMAGE: image.reference,
+						FAKE_LIST_ERROR: "0",
+					},
+				},
+			);
+			return {
+				code: 0,
+				stderr: "",
+				calls: (await readFile(subject.log, "utf8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line)),
+			};
+		} catch (cause) {
+			const error = cause as { code: number; stderr: string };
+			return {
+				code: error.code,
+				stderr: error.stderr,
+				calls: (await readFile(subject.log, "utf8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line)),
+			};
+		}
+	};
+	for (const [label, state, diagnostic] of [
+		["state", { ...valid, phase: "creating", imageAttestation: undefined }, /ready/i],
+		["repository", { ...valid, hostRepoIdentity: "local:other" }, /repository/i],
+		[
+			"image",
+			{
+				...valid,
+				runtimeImage: fixtureImage,
+				imageAttestation: { status: "verified", image: fixtureImage },
+			},
+			/image|runtime/i,
+		],
+		["worktree", { ...valid, hostWorktreeIdentity: `${subject.root}-other` }, /worktree/i],
+		["attestation", { ...valid, imageAttestation: undefined }, /attest|ready/i],
+	] as const) {
+		await saveSandboxState(state);
+		const result = await run();
+		assert.notEqual(result.code, 0, label);
+		assert.match(result.stderr, diagnostic, `${label}: ${result.stderr}`);
+		assert.equal(
+			result.calls.some((call) => call[0] === "cp"),
+			false,
+			label,
+		);
+	}
+	await saveSandboxState(valid);
+	const restored = await run();
+	assert.equal(restored.code, 0, restored.stderr);
+	assert.equal(restored.calls.some((call) => call[0] === "cp"), true);
+	assert.equal(restored.calls.filter((call) => call[0] === "exec").length, 3);
 });
 
 test("management commands reject trailing arguments", async () => {

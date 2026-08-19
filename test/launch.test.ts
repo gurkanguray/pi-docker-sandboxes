@@ -123,6 +123,33 @@ const launchConfig = {
 	export: { onExit: "never" as const },
 };
 
+test("production launch succeeds from a real linked worktree", async (t) => {
+	const root = await committedRepository();
+	const linked = `${root}-linked`;
+	t.after(() => rm(root, { recursive: true, force: true }));
+	t.after(() => rm(linked, { recursive: true, force: true }));
+	await git(root, "worktree", "add", "-b", "linked-launch", linked);
+	const canonicalLinked = await realpath(linked);
+	let requestName = "";
+	const client = {
+		...launchClient,
+		create: async (request: { name: string }) => {
+			requestName = request.name;
+		},
+	} as unknown as SbxClient;
+	const result = await launch({ cwd: canonicalLinked, client, config: launchConfig });
+	const repository = await inspectRepository(canonicalLinked);
+	assert.equal(repository.mainWorktree, false);
+	assert.equal(result.name, sandboxName(canonicalLinked));
+	assert.equal(requestName, result.name);
+	assert.equal(result.state?.hostRepoIdentity, repository.identity);
+	assert.equal(result.state?.hostWorktreeIdentity, canonicalLinked);
+	assert.equal(
+		(await loadSandboxState(canonicalLinked, result.name)).hostWorktreeIdentity,
+		canonicalLinked,
+	);
+});
+
 test("production launch resolves the published runtime before SBX preflight", async () => {
 	const root = await committedRepository();
 	let created = false;

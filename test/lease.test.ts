@@ -24,20 +24,35 @@ import {
 	unlockSandboxLease,
 	withSandboxLease,
 } from "../src/lease.ts";
+import { sandboxName } from "../src/workspace.ts";
 
 const exec = promisify(execFile);
+
+const leaseAgentDirs = new Map<string, string>();
 
 async function fixture(t: {
 	after(fn: () => Promise<void>): void;
 }): Promise<string> {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-"));
-	await mkdir(join(root, ".git"));
-	t.after(() => rm(root, { recursive: true, force: true }));
+	const agentDir = join(root, "agent");
+	await Promise.all([mkdir(join(root, ".git")), mkdir(agentDir, { mode: 0o700 })]);
+	leaseAgentDirs.set(root, agentDir);
+	t.after(async () => {
+		leaseAgentDirs.delete(root);
+		await rm(root, { recursive: true, force: true });
+	});
 	return root;
 }
 
+function runtime(
+	root: string,
+	overrides: SandboxLeaseRuntime = {},
+): SandboxLeaseRuntime {
+	return { agentDir: leaseAgentDirs.get(root) ?? join(root, "agent"), ...overrides };
+}
+
 async function preparedLeasePath(root: string, name = "box"): Promise<string> {
-	const lease = await acquireSandboxLease(root, name, "run");
+	const lease = await acquireSandboxLease(root, name, "run", runtime(root));
 	const { path } = lease;
 	await lease.release();
 	return path;
@@ -57,9 +72,9 @@ function record(overrides: Record<string, unknown> = {}): string {
 
 test("live leases are exclusive and report their owning operation", async (t) => {
 	const root = await fixture(t);
-	const first = await acquireSandboxLease(root, "box", "run");
+	const first = await acquireSandboxLease(root, "box", "run", runtime(root));
 	await assert.rejects(
-		() => acquireSandboxLease(root, "box", "destroy"),
+		() => acquireSandboxLease(root, "box", "destroy", runtime(root)),
 		(error: unknown) => {
 			assert.equal(
 				(error as { exitCode?: number }).exitCode,
@@ -70,7 +85,12 @@ test("live leases are exclusive and report their owning operation", async (t) =>
 		},
 	);
 	await first.release();
-	const second = await acquireSandboxLease(root, "box", "destroy");
+	const second = await acquireSandboxLease(
+		root,
+		"box",
+		"destroy",
+		runtime(root),
+	);
 	await second.release();
 });
 
@@ -97,9 +117,7 @@ test("abandoned leases stay busy without local-owner inference or reclamation", 
 		const path = await preparedLeasePath(root, name);
 		await writeFile(path, contents, { mode: 0o600 });
 		const attempts = await Promise.allSettled(
-			Array.from({ length: 16 }, () =>
-				acquireSandboxLease(root, name, "export"),
-			),
+			Array.from({ length: 16 }, () => acquireSandboxLease(root, name, "export", runtime(root))),
 		);
 		assert.equal(
 			attempts.every((attempt) => attempt.status === "rejected"),
@@ -125,16 +143,28 @@ test("explicit unlock requires a demonstrably absent recorded Python process", a
 		path,
 		record({ pid: child.pid, host: hostname(), sandbox: "box" }),
 	);
-	assert.equal((await inspectSandboxLease(root, "box")).status, "live");
+	assert.equal(
+		(await inspectSandboxLease(root, "box", runtime(root))).status,
+		"live",
+	);
 	await assert.rejects(
-		unlockSandboxLease(root, "box", true),
+		unlockSandboxLease(root, "box", true, runtime(root)),
 		/still present/,
 	);
 	child.kill("SIGKILL");
 	await once(child, "exit");
-	assert.equal((await inspectSandboxLease(root, "box")).status, "abandoned");
-	assert.equal((await unlockSandboxLease(root, "box", true)).pid, child.pid);
-	assert.equal((await inspectSandboxLease(root, "box")).status, "absent");
+	assert.equal(
+		(await inspectSandboxLease(root, "box", runtime(root))).status,
+		"abandoned",
+	);
+	assert.equal(
+		(await unlockSandboxLease(root, "box", true, runtime(root))).pid,
+		child.pid,
+	);
+	assert.equal(
+		(await inspectSandboxLease(root, "box", runtime(root))).status,
+		"absent",
+	);
 });
 
 test("canonical repository roots share one sandbox lease", async (t) => {
@@ -142,43 +172,64 @@ test("canonical repository roots share one sandbox lease", async (t) => {
 	const alias = `${root}-alias`;
 	await symlink(root, alias);
 	t.after(() => rm(alias, { force: true }));
-	const first = await acquireSandboxLease(alias, "box", "run");
+	const first = await acquireSandboxLease(alias, "box", "run", runtime(root));
 	try {
 		await assert.rejects(
-			() => acquireSandboxLease(root, "box", "export"),
+			() => acquireSandboxLease(root, "box", "export", runtime(root)),
 			/busy.*run/i,
 		);
-		const otherSandbox = await acquireSandboxLease(root, "other", "run");
+		const otherSandbox = await acquireSandboxLease(
+			root,
+			"other",
+			"run",
+			runtime(root),
+		);
 		await otherSandbox.release();
 	} finally {
 		await first.release();
 	}
 });
 
-test("linked worktrees share daemon-global names but isolate generated names", async (t) => {
-	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-worktrees-"));
-	const linked = `${root}-linked`;
-	t.after(() => rm(root, { recursive: true, force: true }));
-	t.after(() => rm(linked, { recursive: true, force: true }));
-	await exec("git", ["init", "-b", "main"], { cwd: root });
-	await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
-	await exec("git", ["config", "user.name", "Test"], { cwd: root });
-	await writeFile(join(root, "file"), "test\n");
-	await exec("git", ["add", "file"], { cwd: root });
-	await exec("git", ["commit", "-m", "initial"], { cwd: root });
-	await exec("git", ["worktree", "add", "-b", "linked", linked], { cwd: root });
-
-	const explicit = await acquireSandboxLease(root, "shared", "run");
+test("unrelated repositories contend globally by explicit sandbox name", async (t) => {
+	const firstRoot = await fixture(t);
+	const secondRoot = await fixture(t);
+	const sharedAgentDir = leaseAgentDirs.get(firstRoot)!;
+	const sharedRuntime = { agentDir: sharedAgentDir };
+	const explicit = await acquireSandboxLease(
+		firstRoot,
+		"shared",
+		"run",
+		sharedRuntime,
+	);
 	try {
 		await assert.rejects(
-			() => acquireSandboxLease(linked, "shared", "destroy"),
+			() =>
+				acquireSandboxLease(secondRoot, "shared", "destroy", sharedRuntime),
 			/busy.*run/i,
 		);
-		const isolated = await acquireSandboxLease(linked, "generated-linked", "run");
+		assert.notEqual(sandboxName(firstRoot), sandboxName(secondRoot));
+		const isolated = await acquireSandboxLease(
+			secondRoot,
+			sandboxName(secondRoot),
+			"run",
+			sharedRuntime,
+		);
 		await isolated.release();
 	} finally {
 		await explicit.release();
 	}
+});
+
+test("global lease directory symlinks fail closed", async (t) => {
+	const root = await fixture(t);
+	const agentDir = leaseAgentDirs.get(root)!;
+	const outside = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-outside-"));
+	t.after(() => rm(outside, { recursive: true, force: true }));
+	await symlink(outside, join(agentDir, "docker-sandboxes"));
+	await assert.rejects(
+		() => acquireSandboxLease(root, "box", "run", runtime(root)),
+		/symlink|without symlinks/i,
+	);
 });
 
 test("symlinked and hard-linked lease paths fail closed", async (t) => {
@@ -188,7 +239,7 @@ test("symlinked and hard-linked lease paths fail closed", async (t) => {
 	await writeFile(target, record({ pid: 2_147_483_647 }));
 	await symlink(target, path);
 	await assert.rejects(
-		() => acquireSandboxLease(root, "box", "run"),
+		() => acquireSandboxLease(root, "box", "run", runtime(root)),
 		/busy.*uncertain/i,
 	);
 	assert.equal(await readFile(target, "utf8"), record({ pid: 2_147_483_647 }));
@@ -196,7 +247,7 @@ test("symlinked and hard-linked lease paths fail closed", async (t) => {
 
 	await link(target, path);
 	await assert.rejects(
-		() => acquireSandboxLease(root, "box", "run"),
+		() => acquireSandboxLease(root, "box", "run", runtime(root)),
 		/busy.*uncertain/i,
 	);
 	assert.equal(await readFile(path, "utf8"), record({ pid: 2_147_483_647 }));
@@ -204,7 +255,7 @@ test("symlinked and hard-linked lease paths fail closed", async (t) => {
 
 test("release refuses to unlink a replacement lease", async (t) => {
 	const root = await fixture(t);
-	const lease = await acquireSandboxLease(root, "box", "run");
+	const lease = await acquireSandboxLease(root, "box", "run", runtime(root));
 	const { path } = lease;
 	await unlink(path);
 	await writeFile(path, record({ operation: "destroy" }), { mode: 0o600 });
@@ -221,11 +272,16 @@ test("directory sync failures propagate through create and release", async (t) =
 		);
 		await assert.rejects(
 			() =>
-				acquireSandboxLease(directoryRoot, `directory-${code}`, "run", {
-					syncDirectory: async () => {
-						throw failure;
-					},
-				} as SandboxLeaseRuntime),
+				acquireSandboxLease(
+					directoryRoot,
+					`directory-${code}`,
+					"run",
+					runtime(directoryRoot, {
+						syncDirectory: async () => {
+							throw failure;
+						},
+					}),
+				),
 			(error: unknown) => error === failure,
 		);
 	}
@@ -239,17 +295,20 @@ test("directory sync failures propagate through create and release", async (t) =
 		synced.push(path);
 		await handle.sync();
 	};
-	const lease = await acquireSandboxLease(root, "box", "run", {
-		syncDirectory,
-	} as SandboxLeaseRuntime);
+	const lease = await acquireSandboxLease(
+		root,
+		"box",
+		"run",
+		runtime(root, { syncDirectory }),
+	);
 	await lease.release();
 	assert.deepEqual(
-		synced.map((path) => path.slice(path.indexOf(".git"))),
+		synced.map((path) => path.slice(path.indexOf("agent"))),
 		[
-			".git",
-			".git/pi-docker-sandbox",
-			".git/pi-docker-sandbox/leases",
-			".git/pi-docker-sandbox/leases",
+			"agent",
+			"agent/docker-sandboxes",
+			"agent/docker-sandboxes/leases",
+			"agent/docker-sandboxes/leases",
 		],
 	);
 
@@ -258,36 +317,55 @@ test("directory sync failures propagate through create and release", async (t) =
 	});
 	await assert.rejects(
 		() =>
-			acquireSandboxLease(root, "sync-create", "run", {
-				syncDirectory: async (
-					path: string,
-					handle: { sync(): Promise<void> },
-				) => {
-					if (path.endsWith("/leases")) throw invalid;
-					await handle.sync();
-				},
-			} as SandboxLeaseRuntime),
+			acquireSandboxLease(
+				root,
+				"sync-create",
+				"run",
+				runtime(root, {
+					syncDirectory: async (
+						path: string,
+						handle: { sync(): Promise<void> },
+					) => {
+						if (path.endsWith("/leases")) throw invalid;
+						await handle.sync();
+					},
+				}),
+			),
 
 		(error: unknown) => error === invalid,
 	);
 	await assert.rejects(
-		() => acquireSandboxLease(root, "sync-create", "destroy"),
+		() =>
+			acquireSandboxLease(root, "sync-create", "destroy", runtime(root)),
 		/busy.*run/i,
 	);
 
 	let leaseDirectorySyncs = 0;
-	const release = await acquireSandboxLease(root, "sync-release", "run", {
-		syncDirectory: async (path: string, handle: { sync(): Promise<void> }) => {
-			if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2)
-				throw invalid;
-			await handle.sync();
-		},
-	} as SandboxLeaseRuntime);
+	const release = await acquireSandboxLease(
+		root,
+		"sync-release",
+		"run",
+		runtime(root, {
+			syncDirectory: async (
+				path: string,
+				handle: { sync(): Promise<void> },
+			) => {
+				if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2)
+					throw invalid;
+				await handle.sync();
+			},
+		}),
+	);
 	await assert.rejects(
 		() => release.release(),
 		(error: unknown) => error === invalid,
 	);
-	const reacquired = await acquireSandboxLease(root, "sync-release", "destroy");
+	const reacquired = await acquireSandboxLease(
+		root,
+		"sync-release",
+		"destroy",
+		runtime(root),
+	);
 	await reacquired.release();
 });
 
@@ -295,19 +373,32 @@ test("withSandboxLease releases after its callback rejects", async (t) => {
 	const root = await fixture(t);
 	await assert.rejects(
 		() =>
-			withSandboxLease(root, "box", "run", async () => {
-				throw new Error("injected callback failure");
-			}),
+			withSandboxLease(
+				root,
+				"box",
+				"run",
+				async () => {
+					throw new Error("injected callback failure");
+				},
+				runtime(root),
+			),
 		/injected callback failure/,
 	);
-	const reacquired = await acquireSandboxLease(root, "box", "destroy");
+	const reacquired = await acquireSandboxLease(
+		root,
+		"box",
+		"destroy",
+		runtime(root),
+	);
 	await reacquired.release();
 });
 
 test("concurrent in-process acquisition has exactly one winner", async (t) => {
 	const root = await fixture(t);
 	const attempts = await Promise.allSettled(
-		Array.from({ length: 16 }, () => acquireSandboxLease(root, "box", "run")),
+		Array.from({ length: 16 }, () =>
+			acquireSandboxLease(root, "box", "run", runtime(root)),
+		),
 	);
 	const acquired = attempts.filter(
 		(
@@ -321,8 +412,7 @@ test("concurrent in-process acquisition has exactly one winner", async (t) => {
 		attempts.filter(
 			(result) =>
 				result.status === "rejected" &&
-				(result.reason as { exitCode?: number }).exitCode ===
-					LEASE_BUSY_EXIT_CODE,
+				(result.reason as { exitCode?: number }).exitCode === LEASE_BUSY_EXIT_CODE,
 		).length,
 		15,
 	);

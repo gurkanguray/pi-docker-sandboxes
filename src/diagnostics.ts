@@ -213,18 +213,25 @@ export async function buildDoctorReceipt(
 	}
 
 	let dockerRoot: string | undefined;
+	let dockerUsage: string | undefined;
 	try {
-		const [version, root] = await Promise.all([
+		const [version, root, usage] = await Promise.all([
 			runCommand("docker", ["version", "--format", "{{.Server.Version}}"]),
 			runCommand("docker", ["info", "--format", "{{.DockerRootDir}}"]),
+			runCommand("docker", ["system", "df", "--format", "{{json .}}"]),
 		]);
 		dockerRoot = root || undefined;
+		dockerUsage = usage || undefined;
 		checks.push(
 			check(
 				"docker",
-				version && dockerRoot ? "pass" : "fail",
-				"Docker daemon and storage root respond",
-				{ version, ...(dockerRoot ? { storageRoot: dockerRoot } : {}) },
+				version && dockerRoot && dockerUsage ? "pass" : "fail",
+				"Docker daemon, storage root, and disk usage respond",
+				{
+					version,
+					...(dockerRoot ? { storageRoot: dockerRoot } : {}),
+					...(dockerUsage ? { usage: dockerUsage } : {}),
+				},
 			),
 		);
 	} catch (cause) {
@@ -436,7 +443,6 @@ export async function buildDoctorReceipt(
 		["repository", repository?.root ?? cwd],
 		["backups", agentDir],
 		["staging", tmpdir()],
-		...(dockerRoot ? ([["docker", dockerRoot]] as const) : []),
 	] as const) {
 		try {
 			const disk = await stat(destination);
@@ -451,6 +457,37 @@ export async function buildDoctorReceipt(
 			);
 		} catch (cause) {
 			diskChecks.push(failure(`disk-${label}`, cause));
+		}
+	}
+	if (dockerRoot) {
+		try {
+			const disk = await stat(dockerRoot);
+			const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+			diskChecks.push(
+				check(
+					"disk-docker",
+					availableBytes >= 1024 * 1024 * 1024 ? "pass" : "warning",
+					"docker disk destination inspected",
+					{ destination: dockerRoot, availableBytes },
+				),
+			);
+		} catch (cause) {
+			if (
+				(host ?? detectedHost)?.os === "darwin" &&
+				(cause as NodeJS.ErrnoException).code === "ENOENT"
+			)
+				diskChecks.push(
+					check(
+						"disk-docker",
+						"warning",
+						"Docker Desktop storage is VM-managed; host statfs is not applicable",
+						{
+							destination: dockerRoot,
+							...(dockerUsage ? { usage: dockerUsage } : {}),
+						},
+					),
+				);
+			else diskChecks.push(failure("disk-docker", cause));
 		}
 	}
 	checks.push(...diskChecks);

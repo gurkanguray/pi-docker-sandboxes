@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
 	access,
+	chmod,
 	mkdir,
 	mkdtemp,
 	readFile,
@@ -235,6 +236,10 @@ async function runCase(
 			"sessions",
 		);
 		await mkdir(backup, { recursive: true });
+		await chmod(
+			join(process.env.HOME!, ".pi", "agent", "docker-sandboxes"),
+			0o700,
+		);
 	}
 	if (options.imageAttestation)
 		fixture.state.imageAttestation = options.imageAttestation;

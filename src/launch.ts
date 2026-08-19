@@ -1125,7 +1125,16 @@ async function launchWithLease(context: {
 		if (!existing && !options.fresh && state && sync.sessions === "managed") {
 			primaryPhase = "create";
 			primaryOperation = "restore managed sessions";
-			await restoreSessions(client, agentDir, state.hostRepoIdentity, name);
+			const restored = await restoreSessions(
+				client,
+				agentDir,
+				state.hostRepoIdentity,
+				name,
+			);
+			for (const warning of restored?.warnings ?? []) {
+				warnings.push(warning);
+				options.onWarning?.(warning);
+			}
 		}
 
 		if (!existing && state) {

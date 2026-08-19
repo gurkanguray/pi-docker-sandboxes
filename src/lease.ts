@@ -7,11 +7,10 @@ import {
 	unlink,
 	type FileHandle,
 } from "node:fs/promises";
-import { hostname } from "node:os";
-import { join } from "node:path";
+import { homedir, hostname } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { LauncherExitCode } from "./exit-codes.ts";
 import { validateSandboxName } from "./sbx/client.ts";
-import { repositoryCommonMetadataDirectory } from "./workspace.ts";
 
 export type SandboxLeaseOperation =
 	| "run"
@@ -37,6 +36,8 @@ export interface SandboxLeaseRuntime {
 	host?: string;
 	now?: () => Date;
 	processState?: (pid: number) => "present" | "absent" | "unknown";
+	/** @internal Test-only global lease base injection. */
+	agentDir?: string;
 	/** @internal Test-only durability failure injection. */
 	syncDirectory?: (path: string, handle: FileHandle) => Promise<void>;
 }
@@ -108,23 +109,77 @@ const syncDirectory: DirectorySync = async (_path, directory) => {
 	await directory.sync();
 };
 
+function leaseAgentDir(agentDir?: string): string {
+	return agentDir ?? join(homedir(), ".pi", "agent");
+}
+
+async function createPrivateDirectoryPath(
+	path: string,
+	sync: DirectorySync,
+): Promise<void> {
+	const missing: string[] = [];
+	let current = resolve(path);
+	for (;;) {
+		try {
+			const ancestor = await lstat(current);
+			if (
+				!ancestor.isDirectory() ||
+				ancestor.isSymbolicLink() ||
+				(typeof process.getuid === "function" &&
+					ancestor.uid !== process.getuid())
+			)
+				throw new Error(
+					"Lifecycle lease ancestors must be same-UID directories without symlinks",
+				);
+			break;
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+			missing.push(current);
+			const parent = dirname(current);
+			if (parent === current)
+				throw new Error("Lifecycle lease base has no secure existing ancestor");
+			current = parent;
+		}
+	}
+	for (const directory of missing.reverse()) {
+		await mkdir(directory, { mode: 0o700 }).catch((cause) => {
+			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+		});
+		const created = await lstat(directory);
+		if (
+			!created.isDirectory() ||
+			created.isSymbolicLink() ||
+			(created.mode & 0o077) !== 0 ||
+			(typeof process.getuid === "function" && created.uid !== process.getuid())
+		)
+			throw new Error("Lifecycle lease base creation was not private and stable");
+		const parentPath = dirname(directory);
+		const parent = await open(parentPath, flags().directory);
+		try {
+			await sync(parentPath, parent);
+		} finally {
+			await parent.close().catch(() => undefined);
+		}
+	}
+}
+
 async function prepareLeaseDirectory(
-	root: string,
+	agentDir: string,
 	sync: DirectorySync,
 ): Promise<{
 	directory: string;
 	handle: FileHandle;
 	validate: () => Promise<void>;
 }> {
-	const canonicalRoot = await realpath(root);
-	const gitDirectory = repositoryCommonMetadataDirectory(canonicalRoot);
+	await createPrivateDirectoryPath(agentDir, sync);
+	const canonicalAgentDir = await realpath(agentDir);
 	const paths = [
-		canonicalRoot,
-		gitDirectory,
-		join(gitDirectory, "pi-docker-sandbox"),
-		join(gitDirectory, "pi-docker-sandbox", "leases"),
+		canonicalAgentDir,
+		join(canonicalAgentDir, "docker-sandboxes"),
+		join(canonicalAgentDir, "docker-sandboxes", "leases"),
 	];
 	const identities: FileIdentity[] = [];
+	const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
 	const validate = async (): Promise<void> => {
 		for (let index = 0; index < identities.length; index++) {
 			const current = await lstat(paths[index]!);
@@ -132,15 +187,19 @@ async function prepareLeaseDirectory(
 				!current.isDirectory() ||
 				current.isSymbolicLink() ||
 				!sameIdentity(identities[index]!, current) ||
-				(await realpath(paths[index]!)) !== paths[index]
+				(await realpath(paths[index]!)) !== paths[index] ||
+				(uid !== undefined && current.uid !== uid) ||
+				(index > 0 && (current.mode & 0o077) !== 0)
 			)
-				throw new Error("Lifecycle lease directory identity changed");
+				throw new Error(
+					"Lifecycle lease directories must be stable, private, same-UID directories without symlinks",
+				);
 		}
 	};
 	for (let index = 0; index < paths.length; index++) {
 		await validate();
 		const path = paths[index]!;
-		if (index >= 2) {
+		if (index > 0) {
 			await mkdir(path, { mode: 0o700 }).catch((cause) => {
 				if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 			});
@@ -160,9 +219,13 @@ async function prepareLeaseDirectory(
 		if (
 			!current.isDirectory() ||
 			current.isSymbolicLink() ||
-			(await realpath(path)) !== path
+			(await realpath(path)) !== path ||
+			(uid !== undefined && current.uid !== uid) ||
+			(index > 0 && (current.mode & 0o077) !== 0)
 		)
-			throw new Error("Lifecycle lease directories must not use symlinks");
+			throw new Error(
+				"Lifecycle lease directories must be private same-UID directories without symlinks",
+			);
 		identities.push(current);
 	}
 	await validate();
@@ -178,14 +241,13 @@ async function prepareLeaseDirectory(
 	}
 }
 
-export function sandboxLeasePath(root: string, name: string): string {
+export function sandboxLeasePath(
+	_root: string,
+	name: string,
+	agentDir = leaseAgentDir(),
+): string {
 	validateSandboxName(name);
-	return join(
-		repositoryCommonMetadataDirectory(root),
-		"pi-docker-sandbox",
-		"leases",
-		`${name}.json`,
-	);
+	return join(agentDir, "docker-sandboxes", "leases", `${name}.json`);
 }
 
 function parseRecord(contents: Buffer): LeaseRecord | undefined {
@@ -259,9 +321,43 @@ interface OpenLeaseSnapshot {
 async function openLeaseSnapshot(
 	root: string,
 	name: string,
+	agentDir?: string,
 ): Promise<OpenLeaseSnapshot | undefined> {
-	const path = sandboxLeasePath(root, name);
-	const directory = join(path, "..");
+	const base = leaseAgentDir(agentDir);
+	let canonicalAgentDir: string;
+	try {
+		canonicalAgentDir = await realpath(base);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw cause;
+	}
+	const directories = [
+		canonicalAgentDir,
+		join(canonicalAgentDir, "docker-sandboxes"),
+		join(canonicalAgentDir, "docker-sandboxes", "leases"),
+	];
+	const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	let expectedParentIdentity: FileIdentity | undefined;
+	for (const [index, directory] of directories.entries()) {
+		let metadata;
+		try {
+			metadata = await lstat(directory);
+		} catch (cause) {
+			if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw cause;
+		}
+		if (
+			!metadata.isDirectory() ||
+			metadata.isSymbolicLink() ||
+			(await realpath(directory)) !== directory ||
+			(index > 0 && (metadata.mode & 0o077) !== 0) ||
+			(uid !== undefined && metadata.uid !== uid)
+		)
+			throw busy();
+		expectedParentIdentity = metadata;
+	}
+	const directory = directories.at(-1)!;
+	const path = sandboxLeasePath(root, name, canonicalAgentDir);
 	let parent: FileHandle;
 	try {
 		parent = await open(directory, flags().directory);
@@ -272,6 +368,11 @@ async function openLeaseSnapshot(
 	let file: FileHandle | undefined;
 	try {
 		const parentIdentity = await parent.stat();
+		if (
+			!expectedParentIdentity ||
+			!sameIdentity(expectedParentIdentity, parentIdentity)
+		)
+			throw busy();
 		const discovered = await lstat(path).catch((cause) => {
 			if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw cause;
@@ -334,9 +435,9 @@ async function openLeaseSnapshot(
 export async function inspectSandboxLease(
 	root: string,
 	name: string,
-	runtime: Pick<SandboxLeaseRuntime, "host" | "processState"> = {},
+	runtime: Pick<SandboxLeaseRuntime, "host" | "processState" | "agentDir"> = {},
 ): Promise<SandboxLeaseInspection> {
-	const snapshot = await openLeaseSnapshot(root, name);
+	const snapshot = await openLeaseSnapshot(root, name, runtime.agentDir);
 	if (!snapshot) return { status: "absent" };
 	try {
 		const host = runtime.host ?? hostname();
@@ -369,7 +470,7 @@ export async function unlockSandboxLease(
 	} = {},
 ): Promise<LeaseRecord> {
 	if (!yes) throw new Error("Unlock requires explicit --yes authority");
-	const snapshot = await openLeaseSnapshot(root, name);
+	const snapshot = await openLeaseSnapshot(root, name, runtime.agentDir);
 	if (!snapshot)
 		throw new Error(`No lifecycle lease exists for sandbox ${name}`);
 	try {
@@ -424,7 +525,7 @@ async function inspectExistingLease(
 }
 
 export async function acquireSandboxLease(
-	root: string,
+	_root: string,
 	name: string,
 	operation: SandboxLeaseOperation,
 	runtime: SandboxLeaseRuntime = {},
@@ -448,7 +549,10 @@ export async function acquireSandboxLease(
 		host: actual.host,
 		startedAt: actual.now().toISOString(),
 	};
-	const parent = await prepareLeaseDirectory(root, actual.syncDirectory);
+	const parent = await prepareLeaseDirectory(
+		leaseAgentDir(runtime.agentDir),
+		actual.syncDirectory,
+	);
 	const path = join(parent.directory, `${name}.json`);
 	for (;;) {
 		try {

@@ -418,13 +418,18 @@ export async function backupSessions(
 	}
 }
 
+export interface SessionRestoreResult {
+	backupDirectory: string;
+	warnings: string[];
+}
+
 export async function restoreSessions(
 	client: SbxClient,
 	agentDir: string,
 	repositoryIdentity: string,
 	sandboxName: string,
 	backupId?: string,
-): Promise<string | undefined> {
+): Promise<SessionRestoreResult | undefined> {
 	const prepared = await prepareSessionBackupRoot(
 		agentDir,
 		repositoryIdentity,
@@ -475,33 +480,91 @@ export async function restoreSessions(
 	const token = randomBytes(12).toString("hex");
 	const staging = `/home/agent/.pi/agent/.sessions-restore-${token}`;
 	const rollback = `/home/agent/.pi/agent/.sessions-rollback-${token}`;
-	try {
-		await client.copyTo(sandboxName, sessions, staging);
-		await validateSelected();
-		await client.exec(
+	const marker = `${rollback}.absent`;
+	const shell = (
+		script: readonly string[],
+		...paths: string[]
+	): Promise<unknown> =>
+		client.exec(
 			sandboxName,
 			[
 				"sh",
 				"-ceu",
-				[
-					'target="$1"; staged="$2"; rollback="$3"',
-					'test -d "$staged"',
-					'had=0; if test -e "$target"; then test -d "$target"; mv -- "$target" "$rollback"; had=1; fi',
-					'if mv -- "$staged" "$target"; then rm -rf -- "$rollback"; else status=$?; if test "$had" = 1 && test -d "$rollback"; then mv -- "$rollback" "$target"; fi; exit "$status"; fi',
-				].join("\n"),
+				script.join("\n"),
 				"pi-dsbx-session-restore",
-				SANDBOX_SESSIONS,
-				staging,
-				rollback,
+				...paths,
 			],
 			{ user: "root" },
 		);
+	await client.copyTo(sandboxName, sessions, staging);
+	try {
 		await validateSelected();
-		return backupDirectory;
 	} catch (cause) {
 		await client
 			.exec(sandboxName, ["rm", "-rf", "--", staging], { user: "root" })
 			.catch(() => undefined);
 		throw cause;
 	}
+	try {
+		await shell(
+			[
+				'target="$1"; staged="$2"; rollback="$3"; marker="$4"',
+				'test -d "$staged" && test ! -L "$staged"',
+				'test ! -e "$rollback" && test ! -L "$rollback" && test ! -e "$marker" && test ! -L "$marker"',
+				'if test -e "$target" || test -L "$target"; then test -d "$target" && test ! -L "$target"; mv -- "$target" "$rollback"; else : > "$marker"; fi',
+				'mv -- "$staged" "$target"',
+			],
+			SANDBOX_SESSIONS,
+			staging,
+			rollback,
+			marker,
+		);
+		await shell(
+			[
+				'target="$1"',
+				'test -d "$target" && test ! -L "$target"',
+			],
+			SANDBOX_SESSIONS,
+		);
+		await validateSelected();
+	} catch (cause) {
+		try {
+			await shell(
+				[
+					'target="$1"; staged="$2"; rollback="$3"; marker="$4"',
+					'if test -e "$rollback"; then test -d "$rollback" && test ! -L "$rollback"; rm -rf -- "$target"; mv -- "$rollback" "$target"; test -d "$target" && test ! -L "$target"; elif test -f "$marker" && test ! -L "$marker"; then rm -rf -- "$target"; rm -- "$marker"; test ! -e "$target" && test ! -L "$target"; else test -d "$staged" && test ! -L "$staged"; if test -e "$target" || test -L "$target"; then test -d "$target" && test ! -L "$target"; fi; fi',
+					'rm -rf -- "$staged"',
+					'test ! -e "$rollback" && test ! -e "$marker"',
+				],
+				SANDBOX_SESSIONS,
+				staging,
+				rollback,
+				marker,
+			);
+		} catch (rollbackCause) {
+			throw new AggregateError(
+				[cause, rollbackCause],
+				"Session restore failed and verified rollback could not complete",
+			);
+		}
+		throw cause;
+	}
+	const warnings: string[] = [];
+	try {
+		await shell(
+			[
+				'rollback="$1"; marker="$2"; staged="$3"',
+				'rm -rf -- "$rollback" "$marker" "$staged"',
+				'test ! -e "$rollback" && test ! -e "$marker" && test ! -e "$staged"',
+			],
+			rollback,
+			marker,
+			staging,
+		);
+	} catch (cause) {
+		warnings.push(
+			`Session restore succeeded but rollback cleanup requires attention: ${cause instanceof Error ? cause.message : String(cause)}`,
+		);
+	}
+	return { backupDirectory, warnings };
 }

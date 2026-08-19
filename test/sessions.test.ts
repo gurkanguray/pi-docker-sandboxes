@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
 	access,
+	chmod,
+	cp,
 	mkdir,
 	mkdtemp,
 	readdir,
+	readFile,
 	rm,
 	stat,
 	symlink,
@@ -12,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import {
 	backupSessions,
 	deleteSessionBackup,
@@ -22,6 +27,8 @@ import {
 	sessionBackupRoot,
 } from "../src/sessions.ts";
 import { SbxCommandError, type SbxClient } from "../src/sbx/client.ts";
+
+const exec = promisify(execFile);
 
 async function exists(path: string): Promise<boolean> {
 	try {
@@ -249,12 +256,14 @@ test("session list/delete and owned stale staging are explicit and bounded", asy
 		}),
 	);
 	await mkdir(join(root, ".partial-unowned"));
-	assert.deepEqual(
-		await reconcileSessionStaging(agentDir, "repo", "sandbox"),
-		[join(root, partialName)],
-	);
+	assert.deepEqual(await reconcileSessionStaging(agentDir, "repo", "sandbox"), [
+		join(root, partialName),
+	]);
 	assert.equal(await exists(join(root, ".partial-unowned")), true);
-	assert.equal((await listSessionBackups(agentDir, "repo", "sandbox")).length, 1);
+	assert.equal(
+		(await listSessionBackups(agentDir, "repo", "sandbox")).length,
+		1,
+	);
 	await deleteSessionBackup(agentDir, "repo", "sandbox", id);
 	assert.deepEqual(await listSessionBackups(agentDir, "repo", "sandbox"), []);
 });
@@ -276,9 +285,12 @@ test("restore selects only the latest backup and atomically swaps exact sessions
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
-	assert.equal(
+	assert.deepEqual(
 		await restoreSessions(client, agentDir, "repo", "sandbox"),
-		join(root, "2026-08-14T12-34-56-789Z"),
+		{
+			backupDirectory: join(root, "2026-08-14T12-34-56-789Z"),
+			warnings: [],
+		},
 	);
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0]?.[0], "sandbox");
@@ -286,32 +298,136 @@ test("restore selects only the latest backup and atomically swaps exact sessions
 		calls[0]?.[1],
 		join(root, "2026-08-14T12-34-56-789Z", "sessions"),
 	);
-	assert.match(calls[0]?.[2] ?? "", /^\/home\/agent\/\.pi\/agent\/\.sessions-restore-/);
+	assert.match(
+		calls[0]?.[2] ?? "",
+		/^\/home\/agent\/\.pi\/agent\/\.sessions-restore-/,
+	);
 });
 
-test("restore failure keeps rollback logic and removes only unique staging", async () => {
-	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-sessions-rollback-"));
-	const root = sessionBackupRoot(agentDir, "repo", "sandbox");
+test("real restore shell rolls back swap, lost-response, and validation failures", async (t) => {
+	for (const mode of [
+		"swap-failure",
+		"lost-response",
+		"validation-failure",
+		"host-validation-failure",
+	] as const) {
+		await t.test(mode, async () => {
+			const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-shell-"));
+			const sandbox = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-target-"));
+			const id = "2026-08-14T12-34-56-789Z";
+			const sessions = join(
+				sessionBackupRoot(agentDir, "repo", "sandbox"),
+				id,
+				"sessions",
+			);
+			await mkdir(sessions, { recursive: true });
+			await writeFile(join(sessions, "value"), "new\n");
+			const target = join(sandbox, "sessions");
+			await mkdir(target);
+			await writeFile(join(target, "value"), "old\n");
+			const fakeBin = join(sandbox, "bin");
+			await mkdir(fakeBin);
+			await writeFile(
+				join(fakeBin, "mv"),
+				'#!/bin/sh\nif [ "$2" = "$FAIL_STAGED" ]; then exit 42; fi\nexec /bin/mv "$@"\n',
+			);
+			await chmod(join(fakeBin, "mv"), 0o755);
+			let shellCalls = 0;
+			let staged = "";
+			const map = (path: string): string =>
+				path === "/home/agent/.pi/agent/sessions"
+					? target
+					: join(sandbox, basename(path));
+			const client = {
+				copyTo: async (_name: string, source: string, destination: string) => {
+					staged = map(destination);
+					await cp(source, staged, { recursive: true });
+				},
+				exec: async (_name: string, argv: string[]) => {
+					if (argv[0] === "rm") {
+						await rm(map(argv[3]!), { recursive: true, force: true });
+						return { stdout: "", stderr: "", code: 0 };
+					}
+					shellCalls++;
+					if (mode === "validation-failure" && shellCalls === 2)
+						throw new Error("injected target validation failure");
+					const args = argv.slice(1).map((value, index) =>
+						index >= 3 ? map(value) : value,
+					);
+					await exec("sh", args, {
+						env: {
+							...process.env,
+							...(mode === "swap-failure" && shellCalls === 1
+								? {
+										PATH: `${fakeBin}:${process.env.PATH}`,
+										FAIL_STAGED: staged,
+									}
+								: {}),
+						},
+					});
+					if (mode === "lost-response" && shellCalls === 1)
+						throw new Error("injected lost response");
+					if (mode === "host-validation-failure" && shellCalls === 2)
+						await rm(join(sessions, ".."), { recursive: true });
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
+
+			await assert.rejects(
+				restoreSessions(client, agentDir, "repo", "sandbox", id),
+				/failure|response|Command failed|ENOENT/,
+			);
+			assert.equal(await readFile(join(target, "value"), "utf8"), "old\n");
+			assert.equal(
+				(await readdir(sandbox)).some((entry) =>
+					/\.sessions-(?:restore|rollback)-/.test(entry),
+				),
+				false,
+			);
+		});
+	}
+});
+
+test("restore cleanup residue is a warning after a valid target", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-cleanup-"));
+	const sandbox = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-target-"));
 	const id = "2026-08-14T12-34-56-789Z";
-	await mkdir(join(root, id, "sessions"), { recursive: true });
-	const calls: readonly string[][] = [];
-	const failure = new Error("injected atomic swap failure");
+	const sessions = join(
+		sessionBackupRoot(agentDir, "repo", "sandbox"),
+		id,
+		"sessions",
+	);
+	await mkdir(sessions, { recursive: true });
+	await writeFile(join(sessions, "value"), "new\n");
+	const target = join(sandbox, "sessions");
+	await mkdir(target);
+	await writeFile(join(target, "value"), "old\n");
+	let shellCalls = 0;
+	const map = (path: string): string =>
+		path === "/home/agent/.pi/agent/sessions"
+			? target
+			: join(sandbox, basename(path));
 	const client = {
-		copyTo: async () => undefined,
+		copyTo: async (_name: string, source: string, destination: string) =>
+			cp(source, map(destination), { recursive: true }),
 		exec: async (_name: string, argv: string[]) => {
-			(calls as string[][]).push(argv);
-			if (argv[0] === "sh") throw failure;
+			shellCalls++;
+			if (shellCalls === 3) throw new Error("injected cleanup residue");
+			await exec(
+				"sh",
+				argv.slice(1).map((value, index) => (index >= 3 ? map(value) : value)),
+			);
 			return { stdout: "", stderr: "", code: 0 };
 		},
 	} as unknown as SbxClient;
-
-	await assert.rejects(
-		restoreSessions(client, agentDir, "repo", "sandbox", id),
-		failure,
+	const result = await restoreSessions(client, agentDir, "repo", "sandbox", id);
+	assert.equal(result?.backupDirectory, join(sessions, ".."));
+	assert.match(result?.warnings[0] ?? "", /cleanup.*residue/i);
+	assert.equal(await readFile(join(target, "value"), "utf8"), "new\n");
+	assert.equal(
+		(await readdir(sandbox)).some((entry) => entry.startsWith(".sessions-rollback-")),
+		true,
 	);
-	assert.match(calls[0]?.[2] ?? "", /mv -- \"\$rollback\" \"\$target\"/);
-	assert.deepEqual(calls[1]?.slice(0, 4), ["rm", "-rf", "--", calls[0]?.[6]]);
-	assert.match(calls[0]?.[6] ?? "", /\.sessions-restore-/);
 });
 
 test("restore rejects a symlink in its controlled path ancestors", async () => {
@@ -364,9 +480,9 @@ test("restore ignores partial and arbitrary entries when selecting newest backup
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
-	assert.equal(
+	assert.deepEqual(
 		await restoreSessions(client, agentDir, "repo", "sandbox"),
-		join(root, valid),
+		{ backupDirectory: join(root, valid), warnings: [] },
 	);
 	assert.equal(source, join(root, valid, "sessions"));
 });

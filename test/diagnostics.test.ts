@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -78,10 +78,22 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 		[...receipt.checks.map((entry) => entry.id)].sort(),
 	);
 	assert.equal(JSON.stringify(receipt).includes(secret), false);
-	assert.equal(receipt.checks.some((entry) => entry.id === "image"), true);
-	assert.equal(receipt.checks.some((entry) => entry.id === "disk"), true);
-	assert.equal(receipt.checks.some((entry) => entry.id === "backup"), true);
-	assert.equal(receipt.checks.some((entry) => entry.id === "auth"), true);
+	assert.equal(
+		receipt.checks.some((entry) => entry.id === "image"),
+		true,
+	);
+	assert.equal(
+		receipt.checks.some((entry) => entry.id === "disk"),
+		true,
+	);
+	assert.equal(
+		receipt.checks.some((entry) => entry.id === "backup"),
+		true,
+	);
+	assert.equal(
+		receipt.checks.some((entry) => entry.id === "auth"),
+		true,
+	);
 	assert.equal(diagnosticsExitCode(receipt), 0);
 });
 
@@ -151,8 +163,14 @@ test("doctor uses real host certification and a usable KVM character device", as
 					? cwd
 					: "27.0.0",
 	});
-	assert.equal(receipt.checks.find((entry) => entry.id === "host")?.level, "pass");
-	assert.equal(receipt.checks.find((entry) => entry.id === "kvm")?.level, "pass");
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "host")?.level,
+		"pass",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "kvm")?.level,
+		"pass",
+	);
 	assert.equal(opened, true);
 });
 
@@ -162,7 +180,10 @@ test("doctor fails unsupported versions, non-device KVM, and missing explicit au
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(
 		join(home, ".pi", "agent", "docker-sandboxes.json"),
-		JSON.stringify({ version: 2, auth: { mode: "proxy", providers: ["openai"] } }),
+		JSON.stringify({
+			version: 2,
+			auth: { mode: "proxy", providers: ["openai"] },
+		}),
 	);
 	const receipt = await buildDoctorReceipt({
 		cwd,
@@ -191,9 +212,100 @@ test("doctor fails unsupported versions, non-device KVM, and missing explicit au
 					? cwd
 					: "27.0.0",
 	});
-	assert.equal(receipt.checks.find((entry) => entry.id === "host")?.level, "fail");
-	assert.equal(receipt.checks.find((entry) => entry.id === "kvm")?.level, "fail");
-	assert.equal(receipt.checks.find((entry) => entry.id === "auth")?.level, "warning");
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "host")?.level,
+		"fail",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "kvm")?.level,
+		"fail",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "auth")?.level,
+		"warning",
+	);
+});
+
+test("Docker Desktop VM storage reports usage without host statfs ENOENT", async () => {
+	const cwd = await repository();
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-agent-"));
+	const statted: string[] = [];
+	const usage =
+		'{"Type":"Images","TotalCount":"3","Active":"1","Size":"1.2GB","Reclaimable":"400MB (33%)"}';
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		agentDir,
+		client: client(),
+		platform: "darwin",
+		arch: "arm64",
+		nodeVersion: "v24.12.0",
+		certifyPlatform: async () => ({
+			os: "darwin",
+			arch: "arm64",
+			runtimePlatform: "linux/arm64",
+		}),
+		runCommand: async (command, args) => {
+			if (command === "pi") return IMAGE_LOCK.piVersion;
+			if (args[0] === "info") return "/var/lib/docker";
+			if (args[0] === "system") return usage;
+			return "27.0.0";
+		},
+		statFilesystem: (async (path: string) => {
+			statted.push(path);
+			if (path === "/var/lib/docker") {
+				const error = new Error("not host-addressable") as NodeJS.ErrnoException;
+				error.code = "ENOENT";
+				throw error;
+			}
+			return { bavail: 2_000_000, bsize: 1024 };
+		}) as typeof statfs,
+	});
+	const dockerDisk = receipt.checks.find((entry) => entry.id === "disk-docker");
+	assert.equal(dockerDisk?.level, "warning");
+	assert.match(dockerDisk?.summary ?? "", /VM-managed/);
+	assert.equal(dockerDisk?.data?.usage, usage);
+	assert.equal(statted.includes("/var/lib/docker"), true);
+	assert.equal(receipt.checks.find((entry) => entry.id === "disk")?.level, "warning");
+});
+
+test("Linux host-addressable Docker storage contributes low disk warning", async () => {
+	const cwd = await repository();
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-agent-"));
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		agentDir,
+		client: client(),
+		platform: "linux",
+		arch: "x64",
+		nodeVersion: "v24.12.0",
+		certifyPlatform: async () => ({
+			os: "linux",
+			arch: "x64",
+			runtimePlatform: "linux/amd64",
+		}),
+		statKvm: async () => ({ isCharacterDevice: () => true }),
+		openKvm: async () => ({ close: async () => undefined }),
+		runCommand: async (command, args) => {
+			if (command === "pi") return IMAGE_LOCK.piVersion;
+			if (args[0] === "info") return "/var/lib/docker";
+			if (args[0] === "system") return '{"Type":"Images","Size":"1GB"}';
+			return "27.0.0";
+		},
+		statFilesystem: (async (path: string) => ({
+			bavail: path === "/var/lib/docker" ? 512 : 2_000_000,
+			bsize: 1024,
+		})) as typeof statfs,
+	});
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "disk-docker")?.level,
+		"warning",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "disk-docker")?.data
+			?.availableBytes,
+		512 * 1024,
+	);
+	assert.equal(receipt.checks.find((entry) => entry.id === "disk")?.level, "warning");
 });
 
 test("status receipt is observational and skips doctor probes", async () => {
