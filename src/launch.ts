@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -683,8 +683,9 @@ async function launchWithLease(context: {
 		preserved: existing,
 		cleanupWarnings: [],
 	};
-	await reconcileOwnedHostStaging(tmpdir());
-	const temp = await createOwnedHostStaging(tmpdir());
+	const hostStagingParent = await realpath(tmpdir());
+	await reconcileOwnedHostStaging(hostStagingParent);
+	const temp = await createOwnedHostStaging(hostStagingParent);
 	let agentExitCode: number | undefined;
 	let launcherExitCode: LauncherExitCode = LauncherExitCode.Success;
 	let custodyOverride: CustodyOutcome | undefined;

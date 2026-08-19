@@ -37,6 +37,11 @@ function formatDiagnostics(results) {
 		.join("\n");
 }
 
+function report(message, level, context) {
+	if (context.mode === "print") process.stdout.write(`${message}\n`);
+	else context.ui.notify(message, level);
+}
+
 export async function registerSandboxRuntime(pi, context) {
 	const { env, mountInfo } = context;
 	if (!isSandboxAttested(env, mountInfo)) return;
@@ -50,18 +55,19 @@ export async function registerSandboxRuntime(pi, context) {
 		handler: async (args, ctx) => {
 			const [command = "status"] = args.trim().split(/\s+/).filter(Boolean);
 			if (command === "status") {
-				ctx.ui.notify(status, "info");
+				report(status, "info", ctx);
 				return;
 			}
 			if (command === "doctor") {
 				const results = sandboxDiagnostics(env, mountInfo);
-				ctx.ui.notify(
+				report(
 					formatDiagnostics(results),
 					results.some((result) => result.level === "fail") ? "error" : "info",
+					ctx,
 				);
 				return;
 			}
-			ctx.ui.notify(`Unknown subcommand: ${command}`, "error");
+			report(`Unknown subcommand: ${command}`, "error", ctx);
 		},
 	});
 	pi.on("session_start", (_event, ctx) => {

@@ -30,7 +30,10 @@ function fakeApi() {
 				getArgumentCompletions?: (prefix: string) => Array<{ value: string }>;
 				handler: (
 					args: string,
-					context: { ui: { notify(message: string, level: string): void } },
+					context: {
+						mode?: "print";
+						ui: { notify(message: string, level: string): void };
+					},
 				) => Promise<void>;
 		  }
 		| undefined;
@@ -138,6 +141,23 @@ test("attested runtime exposes status and diagnostics only", async () => {
 	assert.match(notifications[1]![0], /✓ sandbox attestation verified/);
 	assert.match(notifications[1]![0], /✓ host source mount is read-only/);
 	assert.deepEqual(notifications[2], ["Unknown subcommand: config", "error"]);
+
+	let printed = "";
+	const originalWrite = process.stdout.write;
+	process.stdout.write = ((chunk: string | Uint8Array) => {
+		printed += chunk.toString();
+		return true;
+	}) as typeof process.stdout.write;
+	try {
+		await fake.command()?.handler("doctor", {
+			mode: "print",
+			ui: { notify: () => assert.fail("print mode must use stdout") },
+		});
+	} finally {
+		process.stdout.write = originalWrite;
+	}
+	assert.match(printed, /✓ sandbox attestation verified/);
+	assert.match(printed, /✓ host source mount is read-only/);
 
 	const statuses: Array<[string, string]> = [];
 	fake.sessionStart()?.(

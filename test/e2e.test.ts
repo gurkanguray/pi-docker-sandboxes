@@ -28,10 +28,10 @@ if (enabled && !runtimeReceiptPath)
 
 const [launchLoaded, clientLoaded, inheritedLoaded, workspaceLoaded] =
 	await Promise.all([
-		importControllerModule(installedPackageRoot, "src/launch.ts"),
-		importControllerModule(installedPackageRoot, "src/sbx/client.ts"),
-		importControllerModule(installedPackageRoot, "src/sbx/inherited-runner.mjs"),
-		importControllerModule(installedPackageRoot, "src/workspace.ts"),
+		importControllerModule(installedPackageRoot, "dist/launch.js"),
+		importControllerModule(installedPackageRoot, "dist/sbx/client.js"),
+		importControllerModule(installedPackageRoot, "dist/sbx/inherited-runner.mjs"),
+		importControllerModule(installedPackageRoot, "dist/workspace.js"),
 	]);
 const { launch } = launchLoaded.module as typeof import("../src/launch.ts");
 const { SbxClient } =
@@ -265,25 +265,12 @@ sandboxTest(
 			);
 			await assert.rejects(() => readFile(join(root, "escape.txt")));
 
-			const hostDockerId = await host("docker", ["info", "--format", "{{.ID}}"]);
-			const sandboxDockerId = (
-				await client.exec(name, ["docker", "info", "--format", "{{.ID}}"])
-			).stdout.trim();
-			assert.notEqual(sandboxDockerId, hostDockerId);
+			await assert.rejects(() => client.exec(name, ["docker", "info"]));
 			await client.exec(name, [
 				"sh",
 				"-c",
-				"mkdir -p /tmp/rootfs; echo x >/tmp/rootfs/x; tar -C /tmp/rootfs -cf /tmp/rootfs.tar .; docker import /tmp/rootfs.tar pi-dsbx-empty:test >/dev/null; docker create --name pi-dsbx-private-test pi-dsbx-empty:test true >/dev/null",
+				"test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
 			]);
-			assert.match(
-				(await client.exec(name, ["docker", "ps", "-a", "--format", "{{.Names}}"]))
-					.stdout,
-				/pi-dsbx-private-test/,
-			);
-			assert.doesNotMatch(
-				await host("docker", ["ps", "-a", "--format", "{{.Names}}"]),
-				/pi-dsbx-private-test/,
-			);
 
 			assert.equal(
 				(await client.policyCheckNetwork("example.com", name)).allowed,
