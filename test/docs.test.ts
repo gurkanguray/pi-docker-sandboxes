@@ -76,13 +76,14 @@ test("compatibility names only release-gated hosts and the Windows milestone", a
 		read("package.json").then(JSON.parse),
 		read("docker/image-lock.json").then(JSON.parse),
 	]);
+	const normalizedCompatibility = compatibility.replaceAll("\\|", "|");
 	for (const value of [
 		packageJson.engines.node,
 		packageJson.peerDependencies["@earendil-works/pi-coding-agent"],
 		packageJson.devDependencies["@earendil-works/pi-coding-agent"],
 		imageLock.piVersion,
 	])
-		assert.ok(compatibility.includes(value), value);
+		assert.ok(normalizedCompatibility.includes(value), value);
 	assert.match(compatibility, /^\| macOS 14\+ \| Apple Silicon \| Supported/m);
 	assert.match(
 		compatibility,
