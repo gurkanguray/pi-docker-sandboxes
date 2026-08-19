@@ -34,6 +34,8 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 	for (const name of Object.keys(args))
 		assert.match(dockerfile, new RegExp(`ARG ${name}`));
 	assert.doesNotMatch(dockerfile, /0\.84\.1|10\.3\.0/);
+	assert.match(dockerfile, /FROM \$\{STANDARD_BASE\} AS standard\nARG STANDARD_BASE/);
+	assert.match(dockerfile, /FROM \$\{DOCKER_BASE\} AS docker\nARG DOCKER_BASE/);
 	const packageLock = JSON.parse(
 		await readFile("docker/runtime-package-lock.json", "utf8"),
 	);

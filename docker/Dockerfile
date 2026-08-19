@@ -45,6 +45,7 @@ RUN set -eux; \
     rm -rf /tmp/fd /tmp/fd.tar.gz /root/.npm
 
 FROM ${STANDARD_BASE} AS standard
+ARG STANDARD_BASE
 ARG SOURCE_SHA
 ARG PI_VERSION
 ARG RUNTIME_VERSION
@@ -66,6 +67,7 @@ LABEL org.opencontainers.image.source="https://github.com/gurkanguray/pi-docker-
 USER agent
 
 FROM ${DOCKER_BASE} AS docker
+ARG DOCKER_BASE
 ARG SOURCE_SHA
 ARG PI_VERSION
 ARG RUNTIME_VERSION
