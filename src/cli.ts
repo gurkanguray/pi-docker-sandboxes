@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { stderr, stdin, stdout } from "node:process";
 import {
@@ -11,14 +12,28 @@ import {
 } from "./config.ts";
 import { decideDisposition } from "./disposition.ts";
 import { formatError, OperationError } from "./errors.ts";
+import {
+	buildDoctorReceipt,
+	buildStatusReceipt,
+	diagnosticsExitCode,
+} from "./diagnostics.ts";
 import { LauncherExitCode } from "./exit-codes.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import { buildLocalImage } from "./image.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { launch, type LaunchResult } from "./launch.ts";
-import { SandboxLeaseBusyError, withSandboxLease } from "./lease.ts";
+import {
+	SandboxLeaseBusyError,
+	unlockSandboxLease,
+	withSandboxLease,
+} from "./lease.ts";
 import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
+import {
+	deleteSessionBackup,
+	listSessionBackups,
+	restoreSessions,
+} from "./sessions.ts";
 import {
 	attestSandbox,
 	formatDoctor,
@@ -261,7 +276,7 @@ export function createPausedConfirm(
 }
 
 function usage(): string {
-	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status\n  pi-dsbx doctor\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
+	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status [--json]\n  pi-dsbx doctor [--json]\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx unlock --name NAME --yes\n  pi-dsbx sessions list [--name NAME]\n  pi-dsbx sessions restore [BACKUP] [--name NAME]\n  pi-dsbx sessions delete BACKUP [--name NAME] --yes\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -340,12 +355,26 @@ export async function main(
 	const client = new SbxClient();
 	const sandboxAttested = await attestSandbox();
 	if (command === "status") {
+		const json = booleanOption(args, "--json");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (json) {
+			const receipt = await buildStatusReceipt({ cwd, client });
+			console.log(JSON.stringify(receipt, null, 2));
+			return diagnosticsExitCode(receipt);
+		}
 		console.log(sandboxStatus(sandboxAttested));
 		if (!sandboxAttested)
 			console.log(JSON.stringify(await client.list(), null, 2));
 		return 0;
 	}
 	if (command === "doctor") {
+		const json = booleanOption(args, "--json");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (json) {
+			const receipt = await buildDoctorReceipt({ cwd, client });
+			console.log(JSON.stringify(receipt, null, 2));
+			return diagnosticsExitCode(receipt);
+		}
 		const results = await runDoctor(sandboxAttested, client, cwd);
 		console.log(formatDoctor(results));
 		return results.some((result) => result.level === "fail") ? 1 : 0;
@@ -357,6 +386,91 @@ export async function main(
 	if (command === "image" && args[0] === "build") {
 		await buildLocalImage();
 		return 0;
+	}
+	if (command === "unlock") {
+		const root = resolve(cwd);
+		const repository = await inspectRepository(root);
+		const name = option(args, "--name");
+		const yes = booleanOption(args, "--yes");
+		if (!name) throw new TypeError("unlock requires --name NAME");
+		if (!yes) throw new TypeError("unlock requires explicit --yes authority");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		const record = await unlockSandboxLease(repository.root, name, true);
+		console.log(
+			`Unlocked abandoned ${record.operation} lease for sandbox ${record.sandbox}`,
+		);
+		return 0;
+	}
+	if (command === "sessions") {
+		const action = args.shift();
+		if (action !== "list" && action !== "restore" && action !== "delete")
+			throw new TypeError("sessions requires list, restore, or delete");
+		const repository = await inspectRepository(resolve(cwd));
+		const config = await loadConfig(cwd);
+		const name =
+			option(args, "--name") ??
+			config.sandbox.name ??
+			sandboxName(repository.root);
+		const yes = booleanOption(args, "--yes");
+		const backupId = args.shift();
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		const agentDir = join(homedir(), ".pi", "agent");
+		if (action === "list") {
+			if (backupId || yes)
+				throw new TypeError("sessions list accepts only --name NAME");
+			console.log(
+				JSON.stringify(
+					await listSessionBackups(
+						agentDir,
+						repository.identity,
+						name,
+					),
+					null,
+					2,
+				),
+			);
+			return 0;
+		}
+		if (action === "restore") {
+			if (yes) throw new TypeError("--yes is not valid for sessions restore");
+			return withSandboxLease(
+				repository.root,
+				name,
+				"sessions-restore",
+				async () => {
+					if (!(await client.exists(name)))
+						throw new Error(`Sandbox ${name} does not exist`);
+					const restored = await restoreSessions(
+						client,
+						agentDir,
+						repository.identity,
+						name,
+						backupId,
+					);
+					if (!restored) throw new Error("No managed session backup exists");
+					console.log(`Restored ${restored}`);
+					return 0;
+				},
+			);
+		}
+		if (!backupId) throw new TypeError("sessions delete requires BACKUP");
+		if (!yes)
+			throw new TypeError("sessions delete requires explicit --yes authority");
+		return withSandboxLease(
+			repository.root,
+			name,
+			"sessions-delete",
+			async () => {
+				await deleteSessionBackup(
+					agentDir,
+					repository.identity,
+					name,
+					backupId,
+				);
+				console.log(`Deleted session backup ${backupId}`);
+				return 0;
+			},
+		);
 	}
 	if (command === "export" || command === "apply" || command === "destroy") {
 		const root = resolve(cwd);
@@ -394,7 +508,7 @@ export async function main(
 							},
 							{
 								expectedRepositoryIdentity: repository.identity,
-								expectedWorktreeIdentity: repository.root,
+								expectedWorktreeIdentity: repository.worktreeIdentity,
 							},
 						)
 					).value

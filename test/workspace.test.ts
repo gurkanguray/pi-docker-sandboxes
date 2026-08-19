@@ -11,6 +11,7 @@ import {
 	readdir,
 	realpath,
 	rename,
+	rm,
 	stat,
 	symlink,
 	unlink,
@@ -20,15 +21,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { formatError, OperationError } from "../src/errors.ts";
+import { acquireSandboxLease } from "../src/lease.ts";
 import type { SbxClient } from "../src/sbx/client.ts";
 import {
 	applyPatch,
 	assertPatchSize,
 	createEmptyInitialCommit,
+	createOwnedHostStaging,
 	exportPatch,
 	inspectRepository,
 	MAX_PATCH_BYTES,
 	preparePatchDestination,
+	reconcileOwnedHostStaging,
 	readBoundedExact,
 	readStablePatch,
 	loadSandboxState,
@@ -215,6 +219,55 @@ test("repository inspection and names are deterministic", async () => {
 	assert.equal(state.mainWorktree, true);
 	assert.equal(sandboxName(root), sandboxName(root));
 	assert.notEqual(sandboxName(root, true), sandboxName(root, true));
+});
+
+test("linked worktrees share repository identity and keep distinct state", async () => {
+	const root = await repository();
+	const linked = await mkdtemp(join(tmpdir(), "pi-dsbx-linked-state-"));
+	await rm(linked, { recursive: true });
+	await git(root, "worktree", "add", "-b", "linked", linked);
+	const [mainRepository, linkedRepository] = await Promise.all([
+		inspectRepository(root),
+		inspectRepository(linked),
+	]);
+	assert.equal(mainRepository.identity, linkedRepository.identity);
+	assert.equal(mainRepository.commonDir, linkedRepository.commonDir);
+	assert.notEqual(
+		mainRepository.worktreeIdentity,
+		linkedRepository.worktreeIdentity,
+	);
+	const mainState = await sandboxState(root);
+	const linkedState = await sandboxState(linked);
+	await Promise.all([saveSandboxState(mainState), saveSandboxState(linkedState)]);
+	assert.notEqual(
+		statePath(root, mainState.name),
+		statePath(linked, linkedState.name),
+	);
+	assert.equal((await loadSandboxState(root, mainState.name)).hostRoot, root);
+	assert.equal((await loadSandboxState(linked, linkedState.name)).hostRoot, linked);
+	const [mainLease, linkedLease] = await Promise.all([
+		acquireSandboxLease(root, "shared-name", "run"),
+		acquireSandboxLease(linked, "shared-name", "run"),
+	]);
+	assert.notEqual(mainLease.path, linkedLease.path);
+	await Promise.all([mainLease.release(), linkedLease.release()]);
+});
+
+test("host staging reconciliation removes only recorded abandoned ownership", async () => {
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-staging-parent-"));
+	const stale = await createOwnedHostStaging(parent, { pid: 1001 });
+	const live = await createOwnedHostStaging(parent, { pid: 1002 });
+	const unowned = join(parent, "pi-docker-sandboxes-unowned");
+	await mkdir(unowned);
+	assert.deepEqual(
+		await reconcileOwnedHostStaging(parent, {
+			processState: (pid) => (pid === 1001 ? "absent" : "present"),
+		}),
+		[stale],
+	);
+	await assert.rejects(lstat(stale), { code: "ENOENT" });
+	assert.equal((await lstat(live)).isDirectory(), true);
+	assert.equal((await lstat(unowned)).isDirectory(), true);
 });
 
 test("repository inspection never executes configured fsmonitor executables", async () => {

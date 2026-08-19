@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { mkdir, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -48,13 +48,19 @@ import {
 	SbxClient,
 	SbxCommandError,
 } from "./sbx/client.ts";
-import { backupSessions, restoreSessions } from "./sessions.ts";
+import {
+	backupSessions,
+	reconcileSessionStaging,
+	restoreSessions,
+} from "./sessions.ts";
 import {
 	createEmptyInitialCommit,
+	createOwnedHostStaging,
 	exportPatch,
 	inspectRepository,
 	loadSandboxStateResult,
 	removeSandboxState,
+	reconcileOwnedHostStaging,
 	sandboxName,
 	saveSandboxState,
 	statePath,
@@ -550,14 +556,14 @@ async function launchWithLease(context: {
 				: undefined,
 			{
 				expectedRepositoryIdentity: repository.identity,
-				expectedWorktreeIdentity: repository.root,
+				expectedWorktreeIdentity: repository.worktreeIdentity,
 			},
 		);
 		state = loadedState.value;
 		warnings.push(...loadedState.warnings);
 		if (state.hostRepoIdentity !== repository.identity)
 			throw new Error("Existing sandbox belongs to another repository");
-		if (state.hostWorktreeIdentity !== repository.root)
+		if (state.hostWorktreeIdentity !== repository.worktreeIdentity)
 			throw new Error("Existing sandbox belongs to another worktree");
 		if (state.hostBaseCommit !== repository.head)
 			throw new Error(
@@ -681,7 +687,8 @@ async function launchWithLease(context: {
 		preserved: existing,
 		cleanupWarnings: [],
 	};
-	const temp = await mkdtemp(join(tmpdir(), "pi-docker-sandboxes-"));
+	await reconcileOwnedHostStaging(tmpdir());
+	const temp = await createOwnedHostStaging(tmpdir());
 	let agentExitCode: number | undefined;
 	let launcherExitCode: LauncherExitCode = LauncherExitCode.Success;
 	let custodyOverride: CustodyOutcome | undefined;
@@ -803,6 +810,12 @@ async function launchWithLease(context: {
 	try {
 		const profileDirectory = join(temp, "profile");
 		const agentDir = join(homedir(), ".pi", "agent");
+		if (state)
+			await reconcileSessionStaging(
+				agentDir,
+				state.hostRepoIdentity,
+				name,
+			);
 		const nativePackages = existing
 			? []
 			: await listNativePackageSpecs(agentDir, config.syncProfile, config.sync);
@@ -939,7 +952,7 @@ async function launchWithLease(context: {
 				hostBaseCommit: repository.head,
 				hostBranch: repository.branch,
 				hostRepoIdentity: repository.identity,
-				hostWorktreeIdentity: repository.root,
+				hostWorktreeIdentity: repository.worktreeIdentity,
 				hostRoot: repository.root,
 				workspaceMode: "clone",
 				createdAt: now,
@@ -1182,6 +1195,7 @@ async function launchWithLease(context: {
 					join(homedir(), ".pi", "agent"),
 					state.hostRepoIdentity,
 					name,
+					config.retention,
 				);
 			} catch (cause) {
 				const stateMarkFailure = await markInterruptedState(

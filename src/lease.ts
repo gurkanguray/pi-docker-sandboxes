@@ -11,10 +11,17 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { LauncherExitCode } from "./exit-codes.ts";
 import { validateSandboxName } from "./sbx/client.ts";
+import { worktreeMetadataDirectory } from "./workspace.ts";
 
-export type SandboxLeaseOperation = "run" | "export" | "apply" | "destroy";
+export type SandboxLeaseOperation =
+	| "run"
+	| "export"
+	| "apply"
+	| "destroy"
+	| "sessions-restore"
+	| "sessions-delete";
 
-interface LeaseRecord {
+export interface LeaseRecord {
 	schema: 1;
 	sandbox: string;
 	operation: SandboxLeaseOperation;
@@ -29,6 +36,7 @@ export interface SandboxLeaseRuntime {
 	pid?: number;
 	host?: string;
 	now?: () => Date;
+	processState?: (pid: number) => "present" | "absent" | "unknown";
 	/** @internal Test-only durability failure injection. */
 	syncDirectory?: (path: string, handle: FileHandle) => Promise<void>;
 }
@@ -46,6 +54,8 @@ const OPERATIONS = new Set<SandboxLeaseOperation>([
 	"export",
 	"apply",
 	"destroy",
+	"sessions-restore",
+	"sessions-delete",
 ]);
 
 export class SandboxLeaseBusyError extends Error {
@@ -108,11 +118,12 @@ async function prepareLeaseDirectory(
 	validate: () => Promise<void>;
 }> {
 	const canonicalRoot = await realpath(root);
+	const gitDirectory = worktreeMetadataDirectory(canonicalRoot);
 	const paths = [
 		canonicalRoot,
-		join(canonicalRoot, ".git"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox", "leases"),
+		gitDirectory,
+		join(gitDirectory, "pi-docker-sandbox"),
+		join(gitDirectory, "pi-docker-sandbox", "leases"),
 	];
 	const identities: FileIdentity[] = [];
 	const validate = async (): Promise<void> => {
@@ -171,6 +182,16 @@ async function prepareLeaseDirectory(
 	}
 }
 
+export function sandboxLeasePath(root: string, name: string): string {
+	validateSandboxName(name);
+	return join(
+		worktreeMetadataDirectory(root),
+		"pi-docker-sandbox",
+		"leases",
+		`${name}.json`,
+	);
+}
+
 function parseRecord(contents: Buffer): LeaseRecord | undefined {
 	let value: unknown;
 	try {
@@ -210,6 +231,159 @@ async function readBounded(handle: FileHandle): Promise<Buffer> {
 	}
 	if (offset > MAX_LEASE_BYTES) throw busy();
 	return Buffer.from(output.subarray(0, offset));
+}
+
+function localProcessState(pid: number): "present" | "absent" | "unknown" {
+	try {
+		process.kill(pid, 0);
+		return "present";
+	} catch (cause) {
+		const code = (cause as NodeJS.ErrnoException).code;
+		if (code === "ESRCH") return "absent";
+		if (code === "EPERM") return "present";
+		return "unknown";
+	}
+}
+
+export interface SandboxLeaseInspection {
+	status: "absent" | "live" | "abandoned" | "uncertain";
+	record?: Readonly<LeaseRecord>;
+}
+
+interface OpenLeaseSnapshot {
+	path: string;
+	parent: FileHandle;
+	file: FileHandle;
+	identity: FileIdentity;
+	bytes: Buffer;
+	record: LeaseRecord;
+	validate(): Promise<void>;
+}
+
+async function openLeaseSnapshot(
+	root: string,
+	name: string,
+): Promise<OpenLeaseSnapshot | undefined> {
+	const path = sandboxLeasePath(root, name);
+	const directory = join(path, "..");
+	let parent: FileHandle;
+	try {
+		parent = await open(directory, flags().directory);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw cause;
+	}
+	let file: FileHandle | undefined;
+	try {
+		const parentIdentity = await parent.stat();
+		const discovered = await lstat(path).catch((cause) => {
+			if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw cause;
+		});
+		if (!discovered) {
+			await parent.close();
+			return undefined;
+		}
+		if (!discovered.isFile() || discovered.isSymbolicLink() || discovered.nlink !== 1)
+			throw busy();
+		file = await open(path, flags().read);
+		const identity = await file.stat();
+		if (!identity.isFile() || identity.nlink !== 1 || !sameIdentity(identity, discovered))
+			throw busy();
+		const bytes = await readBounded(file);
+		const record = parseRecord(bytes);
+		if (!record || record.sandbox !== name) throw busy();
+		const validate = async (): Promise<void> => {
+			const [openedParent, currentParent, opened, current, reread] = await Promise.all([
+				parent.stat(),
+				lstat(directory),
+				file!.stat(),
+				lstat(path),
+				readBounded(file!),
+			]);
+			if (
+				!openedParent.isDirectory() ||
+				currentParent.isSymbolicLink() ||
+				!sameIdentity(parentIdentity, openedParent) ||
+				!sameIdentity(parentIdentity, currentParent) ||
+				!opened.isFile() ||
+				opened.nlink !== 1 ||
+				!current.isFile() ||
+				current.isSymbolicLink() ||
+				current.nlink !== 1 ||
+				!sameIdentity(identity, opened) ||
+				!sameIdentity(identity, current) ||
+				!bytes.equals(reread)
+			)
+				throw busy();
+		};
+		await validate();
+		return { path, parent, file, identity, bytes, record, validate };
+	} catch (cause) {
+		await file?.close().catch(() => undefined);
+		await parent.close().catch(() => undefined);
+		throw cause;
+	}
+}
+
+export async function inspectSandboxLease(
+	root: string,
+	name: string,
+	runtime: Pick<SandboxLeaseRuntime, "host" | "processState"> = {},
+): Promise<SandboxLeaseInspection> {
+	const snapshot = await openLeaseSnapshot(root, name);
+	if (!snapshot) return { status: "absent" };
+	try {
+		const host = runtime.host ?? hostname();
+		if (snapshot.record.host !== host)
+			return { status: "uncertain", record: snapshot.record };
+		const state = (runtime.processState ?? localProcessState)(snapshot.record.pid);
+		return {
+			status:
+				state === "present"
+					? "live"
+					: state === "absent"
+						? "abandoned"
+						: "uncertain",
+			record: snapshot.record,
+		};
+	} finally {
+		await snapshot.file.close().catch(() => undefined);
+		await snapshot.parent.close().catch(() => undefined);
+	}
+}
+
+export async function unlockSandboxLease(
+	root: string,
+	name: string,
+	yes: boolean,
+	runtime: SandboxLeaseRuntime & { beforeUnlink?: (path: string) => Promise<void> } = {},
+): Promise<LeaseRecord> {
+	if (!yes) throw new Error("Unlock requires explicit --yes authority");
+	const snapshot = await openLeaseSnapshot(root, name);
+	if (!snapshot) throw new Error(`No lifecycle lease exists for sandbox ${name}`);
+	try {
+		if (snapshot.record.host !== (runtime.host ?? hostname()))
+			throw new Error("Lease host identity is not local; refusing unlock");
+		const state = (runtime.processState ?? localProcessState)(snapshot.record.pid);
+		if (state !== "absent")
+			throw new Error(
+				state === "present"
+					? `Recorded lease process ${snapshot.record.pid} is still present`
+					: `Recorded lease process ${snapshot.record.pid} absence is uncertain`,
+			);
+		await runtime.beforeUnlink?.(snapshot.path);
+		await snapshot.validate();
+		await unlink(snapshot.path);
+		await (runtime.syncDirectory ?? syncDirectory)(
+			join(snapshot.path, ".."),
+			snapshot.parent,
+		);
+		return snapshot.record;
+	} finally {
+		await snapshot.file.close().catch(() => undefined);
+		await snapshot.parent.close().catch(() => undefined);
+	}
 }
 
 async function inspectExistingLease(

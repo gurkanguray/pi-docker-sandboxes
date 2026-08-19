@@ -30,6 +30,11 @@ test("fresh defaults use the approved production security policy", () => {
 			sessions: "managed",
 		},
 		auth: { mode: "none", providers: [] },
+		retention: {
+			maxCount: 10,
+			maxAgeDays: 30,
+			maxBytes: 1024 * 1024 * 1024,
+		},
 		sandbox: { keep: false, dockerEngine: false },
 		network: { allow: [], deny: [] },
 		export: {
@@ -46,6 +51,7 @@ test("config is strict and merges nested fields", () => {
 		syncProfile: "custom",
 		sync: { extensions: true, sessions: "sandbox" },
 		auth: { mode: "proxy", providers: ["openai"] },
+		retention: { maxCount: 3, maxAgeDays: 7, maxBytes: 4096 },
 		sandbox: { keep: false },
 		network: { allow: ["api.example.com:443"] },
 	});
@@ -54,6 +60,11 @@ test("config is strict and merges nested fields", () => {
 	assert.equal(config.sandbox.keep, false);
 	assert.equal(config.sandbox.dockerEngine, false);
 	assert.deepEqual(config.auth, { mode: "proxy", providers: ["openai"] });
+	assert.deepEqual(config.retention, {
+		maxCount: 3,
+		maxAgeDays: 7,
+		maxBytes: 4096,
+	});
 	assert.deepEqual(config.network.allow, ["api.example.com:443"]);
 	assert.equal(config.sync.extensions, true);
 	assert.equal(config.sync.settings, false);
@@ -73,6 +84,10 @@ test("config is strict and merges nested fields", () => {
 	assert.throws(() => parseConfig({ profile: "research" }), /unsupported/);
 	assert.throws(() => parseConfig({ profile: "browser" }), /unsupported/);
 	assert.throws(() => parseConfig({ syncProfile: "balanced" }), /unsupported/);
+	assert.throws(
+		() => parseConfig({ retention: { maxCount: -1 } }),
+		/non-negative safe integer/,
+	);
 	assert.throws(
 		() => parseConfig({ sync: { sessions: "ephemeral" } }),
 		/unsupported/,

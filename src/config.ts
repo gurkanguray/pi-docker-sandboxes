@@ -23,6 +23,12 @@ export interface CredentialService {
 	valueFormat: string;
 }
 
+export interface SessionRetention {
+	maxCount: number;
+	maxAgeDays: number;
+	maxBytes: number;
+}
+
 export interface DockerSandboxConfig {
 	version: 2;
 	enabled: boolean;
@@ -30,6 +36,7 @@ export interface DockerSandboxConfig {
 	syncProfile: SyncProfile;
 	sync: SyncOptions;
 	auth: { mode: AuthMode; providers: string[] };
+	retention: SessionRetention;
 	sandbox: {
 		name?: string;
 		keep: boolean;
@@ -55,6 +62,7 @@ export const DEFAULT_CONFIG: DockerSandboxConfig = {
 		sessions: "managed",
 	},
 	auth: { mode: "none", providers: [] },
+	retention: { maxCount: 10, maxAgeDays: 30, maxBytes: 1024 * 1024 * 1024 },
 	sandbox: { keep: false, dockerEngine: false },
 	network: { allow: [], deny: [] },
 	export: { onExit: "prompt", directory: ".git/pi-docker-sandbox/patches" },
@@ -67,6 +75,7 @@ const ROOT_KEYS = new Set([
 	"syncProfile",
 	"sync",
 	"auth",
+	"retention",
 	"sandbox",
 	"network",
 	"export",
@@ -85,6 +94,7 @@ const SYNC_KEYS = new Set([
 ]);
 const EXPORT_KEYS = new Set(["onExit", "directory"]);
 const AUTH_KEYS = new Set(["mode", "providers"]);
+const RETENTION_KEYS = new Set(["maxCount", "maxAgeDays", "maxBytes"]);
 const AUTH_MODES = new Set<AuthMode>(["none", "proxy", "oauth-copy"]);
 const AUTH_PROVIDER = /^[a-z0-9][a-z0-9-]*$/;
 const PROFILES = new Set<SecurityProfile>(["hardened", "development"]);
@@ -117,6 +127,12 @@ function string(value: unknown, path: string): string {
 	if (value.includes("\0") || value.includes("\n") || value.includes("\r"))
 		throw new TypeError(`${path} contains forbidden control characters`);
 	return value;
+}
+
+function nonNegativeInteger(value: unknown, path: string): number {
+	if (!Number.isSafeInteger(value) || (value as number) < 0)
+		throw new TypeError(`${path} must be a non-negative safe integer`);
+	return value as number;
 }
 
 function strings(value: unknown, path: string): string[] {
@@ -163,9 +179,13 @@ export function validateDomain(domain: string, allowWildcard = true): string {
 }
 
 export type ConfigOverride = Partial<
-	Omit<DockerSandboxConfig, "auth" | "sandbox" | "sync" | "network" | "export">
+	Omit<
+		DockerSandboxConfig,
+		"auth" | "retention" | "sandbox" | "sync" | "network" | "export"
+	>
 > & {
 	auth?: Partial<DockerSandboxConfig["auth"]>;
+	retention?: Partial<DockerSandboxConfig["retention"]>;
 	sandbox?: Partial<DockerSandboxConfig["sandbox"]>;
 	sync?: Partial<DockerSandboxConfig["sync"]>;
 	network?: Partial<DockerSandboxConfig["network"]>;
@@ -242,6 +262,18 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 				return provider;
 			});
 	}
+	if (input.retention !== undefined) {
+		const retention = object(input.retention, `${source}.retention`);
+		rejectUnknown(retention, RETENTION_KEYS, `${source}.retention.`);
+		output.retention = {};
+		for (const key of RETENTION_KEYS) {
+			if (retention[key] !== undefined)
+				output.retention[key as keyof SessionRetention] = nonNegativeInteger(
+					retention[key],
+					`${source}.retention.${key}`,
+				);
+		}
+	}
 	if (input.sandbox !== undefined) {
 		const sandbox = object(input.sandbox, `${source}.sandbox`);
 		rejectUnknown(sandbox, SANDBOX_KEYS, `${source}.sandbox.`);
@@ -303,6 +335,7 @@ export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
 			...result,
 			...value,
 			auth: { ...result.auth, ...value.auth },
+			retention: { ...result.retention, ...value.retention },
 			sandbox: { ...result.sandbox, ...value.sandbox },
 			sync: { ...result.sync, ...value.sync },
 			network: { ...result.network, ...value.network },

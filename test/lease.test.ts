@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import {
 	cp,
 	link,
@@ -17,8 +18,10 @@ import test from "node:test";
 import { promisify } from "node:util";
 import {
 	acquireSandboxLease,
+	inspectSandboxLease,
 	LEASE_BUSY_EXIT_CODE,
 	type SandboxLeaseRuntime,
+	unlockSandboxLease,
 	withSandboxLease,
 } from "../src/lease.ts";
 
@@ -108,6 +111,30 @@ test("abandoned leases stay busy without local-owner inference or reclamation", 
 		}
 		assert.equal(await readFile(path, "utf8"), contents);
 	}
+});
+
+test("explicit unlock requires a demonstrably absent recorded Python process", async (t) => {
+	const root = await fixture(t);
+	const path = await preparedLeasePath(root);
+	const child = spawn("python3", ["-c", "import time; time.sleep(30)"]);
+	assert.ok(child.pid);
+	t.after(async () => {
+		if (child.exitCode === null) child.kill("SIGKILL");
+	});
+	await writeFile(
+		path,
+		record({ pid: child.pid, host: hostname(), sandbox: "box" }),
+	);
+	assert.equal((await inspectSandboxLease(root, "box")).status, "live");
+	await assert.rejects(
+		unlockSandboxLease(root, "box", true),
+		/still present/,
+	);
+	child.kill("SIGKILL");
+	await once(child, "exit");
+	assert.equal((await inspectSandboxLease(root, "box")).status, "abandoned");
+	assert.equal((await unlockSandboxLease(root, "box", true)).pid, child.pid);
+	assert.equal((await inspectSandboxLease(root, "box")).status, "absent");
 });
 
 test("canonical repository roots share one sandbox lease", async (t) => {

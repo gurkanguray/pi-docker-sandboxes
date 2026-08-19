@@ -246,6 +246,10 @@ test("CLI help documents passing Pi session arguments after the separator", asyn
 	}
 	assert.match(output.join("\n"), /pi-dsbx run[^\n]*-- PI_ARGS/);
 	assert.match(output.join("\n"), /-- --session ID/);
+	assert.match(output.join("\n"), /doctor \[--json\]/);
+	assert.match(output.join("\n"), /status \[--json\]/);
+	assert.match(output.join("\n"), /unlock --name NAME --yes/);
+	assert.match(output.join("\n"), /sessions list/);
 });
 
 test("symlinked CLI entry executes its main function", async () => {

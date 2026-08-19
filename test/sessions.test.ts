@@ -14,6 +14,10 @@ import { basename, join } from "node:path";
 import test from "node:test";
 import {
 	backupSessions,
+	deleteSessionBackup,
+	listSessionBackups,
+	pruneSessionBackups,
+	reconcileSessionStaging,
 	restoreSessions,
 	sessionBackupRoot,
 } from "../src/sessions.ts";
@@ -161,6 +165,68 @@ test("session source type and inspection failures propagate without a backup", a
 			false,
 		);
 	}
+});
+
+test("session retention prunes oldest by count, age, and bytes but keeps latest", async () => {
+	for (const [policy, expected] of [
+		[{ maxCount: 2, maxAgeDays: 3650, maxBytes: 1_000_000 }, 2],
+		[{ maxCount: 10, maxAgeDays: 1, maxBytes: 1_000_000 }, 1],
+		[{ maxCount: 10, maxAgeDays: 3650, maxBytes: 5 }, 1],
+	] as const) {
+		const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-retention-"));
+		const root = sessionBackupRoot(agentDir, "repo", "sandbox");
+		for (const [id, contents] of [
+			["2026-08-10T00-00-00-000Z", "aaaa"],
+			["2026-08-11T00-00-00-000Z", "bbbb"],
+			["2026-08-12T00-00-00-000Z", "cccc"],
+		] as const) {
+			await mkdir(join(root, id, "sessions"), { recursive: true });
+			await writeFile(join(root, id, "sessions", "data"), contents);
+		}
+		await pruneSessionBackups(
+			agentDir,
+			"repo",
+			"sandbox",
+			policy,
+			new Date("2026-08-13T12:00:00.000Z"),
+		);
+		const backups = await listSessionBackups(agentDir, "repo", "sandbox");
+		assert.equal(backups.length, expected);
+		assert.equal(backups.at(-1)?.id, "2026-08-12T00-00-00-000Z");
+		assert.equal(
+			(await readdir(root)).some((entry) => entry.startsWith(".deleting-")),
+			false,
+		);
+	}
+});
+
+test("session list/delete and owned stale staging are explicit and bounded", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-session-admin-"));
+	const root = sessionBackupRoot(agentDir, "repo", "sandbox");
+	const id = "2026-08-12T00-00-00-000Z";
+	await mkdir(join(root, id, "sessions"), { recursive: true });
+	await writeFile(join(root, id, "sessions", "data"), "session");
+	const partialName = ".partial-2026-08-11T00-00-00-000Z-dead";
+	await mkdir(join(root, partialName));
+	await writeFile(
+		join(root, `${partialName}.owner.json`),
+		JSON.stringify({
+			schema: 1,
+			kind: "pi-dsbx-session-staging",
+			path: partialName,
+			pid: 999_999_999,
+			...(typeof process.getuid === "function" ? { uid: process.getuid() } : {}),
+		}),
+	);
+	await mkdir(join(root, ".partial-unowned"));
+	assert.deepEqual(
+		await reconcileSessionStaging(agentDir, "repo", "sandbox"),
+		[join(root, partialName)],
+	);
+	assert.equal(await exists(join(root, ".partial-unowned")), true);
+	assert.equal((await listSessionBackups(agentDir, "repo", "sandbox")).length, 1);
+	await deleteSessionBackup(agentDir, "repo", "sandbox", id);
+	assert.deepEqual(await listSessionBackups(agentDir, "repo", "sandbox"), []);
 });
 
 test("restore selects only the latest backup and copies its sessions directory", async () => {

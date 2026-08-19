@@ -13,13 +13,13 @@ Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, no
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "enabled": true,
-  "profile": "development",
+  "profile": "hardened",
   "syncProfile": "custom",
   "sync": {
-    "settings": true,
-    "models": true,
+    "settings": false,
+    "models": false,
     "packages": false,
     "skills": false,
     "prompts": false,
@@ -27,11 +27,19 @@ Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, no
     "extensions": false,
     "sessions": "managed"
   },
+  "auth": {
+    "mode": "none",
+    "providers": []
+  },
+  "retention": {
+    "maxCount": 10,
+    "maxAgeDays": 30,
+    "maxBytes": 1073741824
+  },
   "sandbox": {
     "keep": false,
-    "dockerEngine": true
+    "dockerEngine": false
   },
-  "providers": [],
   "network": {
     "allow": [],
     "deny": []
@@ -47,18 +55,21 @@ Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, no
 
 | Field | Values | Purpose |
 | --- | --- | --- |
-| `version` | `1` | Configuration schema. |
+| `version` | `2` | Configuration schema. |
 | `enabled` | boolean | Enable sandbox re-execution. |
 | `profile` | `development`, `hardened` | Network and security policy. |
 | `syncProfile` | `custom`, `clean`, `mirror` | Select a built-in or custom sync policy. |
 | `sync.settings`, `sync.models` | boolean | Copy sanitized settings or model metadata. |
 | `sync.packages`, `sync.skills`, `sync.prompts`, `sync.themes`, `sync.extensions` | boolean | Copy each opted-in Pi resource. |
 | `sync.sessions` | `managed`, `sandbox` | Select session storage behavior. |
+| `auth.mode` | `none`, `proxy`, `oauth-copy` | Select the explicit credential policy. |
+| `auth.providers` | provider IDs | Request explicit providers when auth is enabled. |
+| `retention.maxCount` | non-negative integer | Maximum retained managed-session backups; the latest valid backup is always preserved. |
+| `retention.maxAgeDays` | non-negative integer | Maximum age for non-latest managed-session backups. |
+| `retention.maxBytes` | non-negative integer | Maximum aggregate bytes for non-latest managed-session backups. |
 | `sandbox.name` | name | Reuse a named sandbox. |
 | `sandbox.keep` | boolean | Keep the sandbox after exit. |
-| `sandbox.dockerEngine` | boolean | Enable the sandbox's private Docker Engine. |
-| `sandbox.image` | digest reference | Use an immutable custom image. |
-| `providers` | provider IDs | Request audited credential proxy services. |
+| `sandbox.dockerEngine` | boolean | Request the private Docker Engine variant. Production 1.0 rejects it until a verified image is published. |
 | `network.allow`, `network.deny` | domains | Extend the profile's network rules. |
 | `export.onExit` | `prompt`, `always`, `never` | Handle changed work on exit. |
 | `export.directory` | path | Store exported patches. Parent traversal is rejected. |

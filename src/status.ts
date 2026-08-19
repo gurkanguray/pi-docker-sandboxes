@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+export { buildStatusReceipt } from "./diagnostics.ts";
+export type { StatusReceipt } from "./diagnostics.ts";
 import { access, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.ts";
@@ -280,10 +282,10 @@ export async function runDoctor(
 			message: `Git repository: ${repository.branch}@${repository.head.slice(0, 12)}`,
 		});
 		results.push({
-			level: repository.mainWorktree ? "pass" : "fail",
+			level: "pass",
 			message: repository.mainWorktree
 				? "clone mode eligible: main worktree"
-				: "clone mode ineligible: secondary worktree",
+				: "clone mode eligible: linked worktree",
 		});
 		if (repository.dirty)
 			results.push({
@@ -297,7 +299,15 @@ export async function runDoctor(
 			const stateExists = await sandboxStateExists(repository.root, name);
 			const daemonExists = await client.exists(name);
 			if (stateExists) {
-				const state = await loadSandboxState(repository.root, name);
+				const state = await loadSandboxState(
+					repository.root,
+					name,
+					undefined,
+					{
+						expectedRepositoryIdentity: repository.identity,
+						expectedWorktreeIdentity: repository.worktreeIdentity,
+					},
+				);
 				const inspection = daemonExists
 					? await client.inspect(name)
 					: undefined;

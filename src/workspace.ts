@@ -1,13 +1,22 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import {
+	constants,
+	lstatSync,
+	readFileSync,
+	realpathSync,
+} from "node:fs";
 import {
 	access,
 	lstat,
 	mkdir,
+	mkdtemp,
 	open,
+	readdir,
 	realpath,
+	rm,
 	unlink,
+	writeFile,
 	type FileHandle,
 } from "node:fs/promises";
 import {
@@ -20,6 +29,7 @@ import {
 	sep,
 } from "node:path";
 import { promisify } from "node:util";
+import { hostname } from "node:os";
 import {
 	OperationError,
 	sanitizeDetail,
@@ -179,6 +189,8 @@ export class UnbornHeadError extends OperationError {
 
 export interface RepositoryState {
 	root: string;
+	commonDir: string;
+	worktreeIdentity: string;
 	head: string;
 	branch: string;
 	identity: string;
@@ -254,6 +266,8 @@ export async function inspectRepository(
 	);
 	const absolute = (value: string) =>
 		resolve(root, isAbsolute(value) ? value : join(root, value));
+	const gitDirectory = await realpath(absolute(gitDirValue));
+	const commonDir = await realpath(absolute(commonDirValue));
 	const remote = await git(
 		runner,
 		root,
@@ -272,13 +286,15 @@ export async function inspectRepository(
 	);
 	return {
 		root,
+		commonDir,
+		worktreeIdentity: root,
 		head,
 		branch,
 		identity: remote
 			? scrubRemote(remote)
-			: `local:${createHash("sha256").update(root).digest("hex")}`,
+			: `local:${createHash("sha256").update(commonDir).digest("hex")}`,
 		dirty: status.length > 0,
-		mainWorktree: absolute(gitDirValue) === absolute(commonDirValue),
+		mainWorktree: gitDirectory === commonDir,
 	};
 }
 
@@ -304,6 +320,150 @@ export async function createEmptyInitialCommit(
 	);
 }
 
+const HOST_STAGING_PREFIX = "pi-docker-sandboxes-";
+const HOST_STAGING_OWNER = ".pi-dsbx-owner.json";
+
+export interface HostStagingRuntime {
+	pid?: number;
+	host?: string;
+	uid?: number;
+	processState?: (pid: number) => "present" | "absent" | "unknown";
+}
+
+function stagingProcessState(pid: number): "present" | "absent" | "unknown" {
+	try {
+		process.kill(pid, 0);
+		return "present";
+	} catch (cause) {
+		const code = (cause as NodeJS.ErrnoException).code;
+		return code === "ESRCH" ? "absent" : code === "EPERM" ? "present" : "unknown";
+	}
+}
+
+export async function createOwnedHostStaging(
+	parent: string,
+	runtime: HostStagingRuntime = {},
+): Promise<string> {
+	const directory = await mkdtemp(join(parent, HOST_STAGING_PREFIX));
+	const record = {
+		schema: 1,
+		kind: "pi-dsbx-host-staging",
+		path: basename(directory),
+		pid: runtime.pid ?? process.pid,
+		host: runtime.host ?? hostname(),
+		...(typeof process.getuid === "function"
+			? { uid: runtime.uid ?? process.getuid() }
+			: {}),
+	};
+	await writeFile(join(directory, HOST_STAGING_OWNER), `${JSON.stringify(record)}\n`, {
+		flag: "wx",
+		mode: 0o600,
+	});
+	const handle = await open(
+		parent,
+		constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+	);
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return directory;
+}
+
+async function readOwnedStagingRecord(
+	path: string,
+	discovered: Awaited<ReturnType<typeof lstat>>,
+): Promise<unknown> {
+	const file = await open(
+		path,
+		constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+	);
+	try {
+		const identity = await file.stat();
+		if (
+			!identity.isFile() ||
+			identity.nlink !== 1 ||
+			identity.size > 4096 ||
+			!sameIdentity(identity, discovered)
+		)
+			throw new Error("Host staging ownership record changed while opening");
+		const bytes = Buffer.alloc(identity.size);
+		const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+		const [opened, current] = await Promise.all([file.stat(), lstat(path)]);
+		if (
+			bytesRead !== bytes.length ||
+			!sameIdentity(identity, opened) ||
+			!sameIdentity(identity, current) ||
+			current.isSymbolicLink() ||
+			!current.isFile() ||
+			current.nlink !== 1
+		)
+			throw new Error("Host staging ownership record changed while reading");
+		return JSON.parse(bytes.toString("utf8"));
+	} finally {
+		await file.close();
+	}
+}
+
+export async function reconcileOwnedHostStaging(
+	parent: string,
+	runtime: HostStagingRuntime = {},
+): Promise<string[]> {
+	const removed: string[] = [];
+	const host = runtime.host ?? hostname();
+	const uid = typeof process.getuid === "function" ? runtime.uid ?? process.getuid() : undefined;
+	for (const entry of (await readdir(parent))
+		.filter((name) => name.startsWith(HOST_STAGING_PREFIX))
+		.sort()) {
+		const directory = join(parent, entry);
+		const ownerPath = join(directory, HOST_STAGING_OWNER);
+		let owner: unknown;
+		try {
+			const [directoryMetadata, ownerMetadata] = await Promise.all([
+				lstat(directory),
+				lstat(ownerPath),
+			]);
+			if (
+				!directoryMetadata.isDirectory() ||
+				directoryMetadata.isSymbolicLink() ||
+				!ownerMetadata.isFile() ||
+				ownerMetadata.isSymbolicLink() ||
+				ownerMetadata.nlink !== 1 ||
+				ownerMetadata.size > 4096 ||
+				(uid !== undefined && ownerMetadata.uid !== uid)
+			)
+				continue;
+			owner = await readOwnedStagingRecord(ownerPath, ownerMetadata);
+		} catch {
+			continue;
+		}
+		const record = owner as Record<string, unknown>;
+		if (
+			record.schema !== 1 ||
+			record.kind !== "pi-dsbx-host-staging" ||
+			record.path !== entry ||
+			record.host !== host ||
+			!Number.isSafeInteger(record.pid) ||
+			(uid !== undefined && record.uid !== uid) ||
+			(runtime.processState ?? stagingProcessState)(record.pid as number) !== "absent"
+		)
+			continue;
+		await rm(directory, { recursive: true });
+		const parentHandle = await open(
+			parent,
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		);
+		try {
+			await parentHandle.sync();
+		} finally {
+			await parentHandle.close();
+		}
+		removed.push(directory);
+	}
+	return removed;
+}
+
 export function sandboxName(root: string, fresh = false): string {
 	const slug =
 		basename(root)
@@ -317,9 +477,42 @@ export function sandboxName(root: string, fresh = false): string {
 	return `pi-${slug}-${suffix}`;
 }
 
+export function worktreeMetadataDirectory(root: string): string {
+	const canonicalRoot = realpathSync(root);
+	const entry = join(canonicalRoot, ".git");
+	let metadata;
+	try {
+		metadata = lstatSync(entry);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return entry;
+		throw cause;
+	}
+	if (metadata.isDirectory() && !metadata.isSymbolicLink())
+		return realpathSync(entry);
+	if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096)
+		throw new Error("Git worktree association is invalid");
+	const match = readFileSync(entry, "utf8").match(/^gitdir: ([^\0\r\n]+)\n?$/);
+	if (!match?.[1]) throw new Error("Git worktree association is invalid");
+	const gitDirectory = realpathSync(resolve(canonicalRoot, match[1]));
+	const backReference = join(gitDirectory, "gitdir");
+	const referencedEntry = readFileSync(backReference, "utf8").replace(/\n$/, "");
+	if (
+		!referencedEntry ||
+		/[\0\r\n]/.test(referencedEntry) ||
+		realpathSync(resolve(gitDirectory, referencedEntry)) !== realpathSync(entry)
+	)
+		throw new Error("Git worktree back-reference is invalid");
+	return gitDirectory;
+}
+
 export function statePath(root: string, name: string): string {
 	validateSandboxName(name);
-	return join(root, ".git", "pi-docker-sandbox", "state", `${name}.json`);
+	return join(
+		worktreeMetadataDirectory(root),
+		"pi-docker-sandbox",
+		"state",
+		`${name}.json`,
+	);
 }
 
 export async function removeSandboxState(
@@ -330,7 +523,7 @@ export async function removeSandboxState(
 		| ((path: string) => Promise<void>) = {},
 ): Promise<void> {
 	const canonicalRoot = await realpath(root);
-	const git = join(canonicalRoot, ".git");
+	const git = worktreeMetadataDirectory(canonicalRoot);
 	const directory = join(git, "pi-docker-sandbox", "state");
 	const path = statePath(canonicalRoot, name);
 	const directoryFlags =
@@ -339,7 +532,7 @@ export async function removeSandboxState(
 	try {
 		const gitStat = await lstat(git);
 		if (!gitStat.isDirectory() || gitStat.isSymbolicLink())
-			throw new Error("Sandbox state requires a main-worktree .git directory");
+			throw new Error("Sandbox state requires a real worktree Git directory");
 		parent = await open(directory, directoryFlags);
 		const [openedParent, currentParent] = await Promise.all([
 			parent.stat(),
@@ -389,10 +582,11 @@ async function prepareStateDirectory(root: string): Promise<{
 	validate: () => Promise<void>;
 }> {
 	const canonicalRoot = await realpath(root);
+	const gitDirectory = worktreeMetadataDirectory(canonicalRoot);
 	const paths = [
-		join(canonicalRoot, ".git"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox", "state"),
+		gitDirectory,
+		join(gitDirectory, "pi-docker-sandbox"),
+		join(gitDirectory, "pi-docker-sandbox", "state"),
 	];
 	const identities: Array<{ dev: number | bigint; ino: number | bigint }> = [];
 	const validate = async (): Promise<void> => {
@@ -526,24 +720,17 @@ async function openStateSnapshot(
 ): Promise<OpenedStateSnapshot> {
 	const flags = stateReadFlags();
 	const canonicalRoot = await realpath(root);
-	const git = join(root, ".git");
+	const git = worktreeMetadataDirectory(canonicalRoot);
 	const gitStat = await lstat(git);
 	if (
 		!gitStat.isDirectory() ||
 		gitStat.isSymbolicLink() ||
-		(await realpath(git)) !== join(canonicalRoot, ".git")
+		(await realpath(git)) !== git
 	)
-		throw new Error(
-			"Sandbox state requires a real main-worktree Git directory",
-		);
+		throw new Error("Sandbox state requires a real worktree Git directory");
 	const path = statePath(root, name);
 	const directory = dirname(path);
-	const canonicalDirectory = join(
-		canonicalRoot,
-		".git",
-		"pi-docker-sandbox",
-		"state",
-	);
+	const canonicalDirectory = join(git, "pi-docker-sandbox", "state");
 	const parent = await open(directory, flags.directory);
 	let file: FileHandle | undefined;
 	try {

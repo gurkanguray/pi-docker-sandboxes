@@ -32,24 +32,30 @@ Launch with `pi --docker-sandbox`. Other Pi flags pass through unchanged, except
 
 ```text
 pi-dsbx run [options] [-- PI_ARGS...]
-pi-dsbx status
-pi-dsbx doctor
+pi-dsbx status [--json]
+pi-dsbx doctor [--json]
 pi-dsbx config
 pi-dsbx export [--name NAME]
 pi-dsbx apply PATCH [--name NAME] --yes
 pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]
+pi-dsbx unlock --name NAME --yes
+pi-dsbx sessions list [--name NAME]
+pi-dsbx sessions restore [BACKUP] [--name NAME]
+pi-dsbx sessions delete BACKUP [--name NAME] --yes
 pi-dsbx image build
 ```
 
 | Command | Effect |
 | --- | --- |
 | `pi-dsbx run` | Launch Pi in a sandbox. |
-| `pi-dsbx status` | Show process status; on the host, also list sandboxes. |
-| `pi-dsbx doctor` | Check `sbx`, required capabilities, configuration, credential services, and Git eligibility. |
+| `pi-dsbx status` | Show process status; on the host, also list sandboxes. `--json` emits a schema-versioned redacted receipt. |
+| `pi-dsbx doctor` | Check host, runtime, lifecycle, storage, credentials, and Git eligibility; `--json` emits a schema-versioned redacted receipt. |
 | `pi-dsbx config` | Print the effective host configuration as JSON. |
 | `pi-dsbx export` | Export changed sandbox work as a patch. |
 | `pi-dsbx apply` | Apply a patch to the host checkout. |
 | `pi-dsbx destroy` | Remove a sandbox under the safety rules below. |
+| `pi-dsbx unlock` | Remove an abandoned local lifecycle lease only after `--yes` and recorded-process absence checks. |
+| `pi-dsbx sessions list\|restore\|delete` | Inspect or explicitly manage retained session backups. Delete requires `--yes`. |
 | `pi-dsbx image build` | Build, verify, and load the locked local image. |
 
 Top-level help: `pi-dsbx --help`, `pi-dsbx -h`, or `pi-dsbx help`.
@@ -73,6 +79,7 @@ Options follow `run`. Value flags use a separate argument.
 | `--no-host-auth` | none | Skip host API-key and OAuth synchronization. |
 | `--trust-project-config` | none | Allow `.pi/docker-sandboxes.json`. |
 | `--yes` | none | Accept safe prompts. Does not approve native compilation or changed-work destruction. |
+| `--json` | none | Emit the stable redacted JSON receipt supported by `status` and `doctor`. |
 | `-- PI_ARGS...` | Pi arguments | Stop launcher parsing and pass the rest to Pi. |
 
 ## Export, apply, and destroy
