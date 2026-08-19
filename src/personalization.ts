@@ -292,7 +292,10 @@ export async function fetchVerifiedNpmPackage(
 		after.size !== before.size
 	)
 		throw new Error("npm package artifact changed during verification");
-	const declared = Buffer.from(lock.integrity.slice("sha512-".length), "base64");
+	const declared = Buffer.from(
+		lock.integrity.slice("sha512-".length),
+		"base64",
+	);
 	const actual = createHash("sha512").update(bytes).digest();
 	if (declared.length !== actual.length || !timingSafeEqual(declared, actual))
 		throw new Error("npm package integrity verification failed");
@@ -602,10 +605,7 @@ const DANGEROUS_METADATA_KEYS = new Set([
 const DYNAMIC_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
 
 function validateDynamicMetadataKey(key: string): string {
-	if (
-		DANGEROUS_METADATA_KEYS.has(key) ||
-		!DYNAMIC_METADATA_KEY.test(key)
-	)
+	if (DANGEROUS_METADATA_KEYS.has(key) || !DYNAMIC_METADATA_KEY.test(key))
 		throw new TypeError("unsafe dynamic model metadata key");
 	return key;
 }
@@ -711,7 +711,11 @@ function modelEntryHasUnsupportedMetadata(value: unknown): boolean {
 	if (!plainObject(value)) return true;
 	if (Object.keys(value).some((key) => !MODEL_ENTRY_KEYS.has(key))) return true;
 	if (!plainObject(value.cost)) return value.cost !== undefined;
-	if (Object.keys(value.cost).some((key) => key !== "tiers" && !COST_KEYS.has(key)))
+	if (
+		Object.keys(value.cost).some(
+			(key) => key !== "tiers" && !COST_KEYS.has(key),
+		)
+	)
 		return true;
 	return (
 		Array.isArray(value.cost.tiers) &&

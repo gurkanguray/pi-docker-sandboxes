@@ -1059,9 +1059,13 @@ async function launchWithLease(context: {
 						else installed = false;
 					}
 					try {
-						const removed = await client.exec(name, ["rm", "-f", "--", staged], {
-							user: "root",
-						});
+						const removed = await client.exec(
+							name,
+							["rm", "-f", "--", staged],
+							{
+								user: "root",
+							},
+						);
 						if (removed.code !== 0)
 							throw new Error("Could not remove staged npm package");
 					} catch (cause) {

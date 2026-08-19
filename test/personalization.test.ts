@@ -154,7 +154,10 @@ test("npm fetch binds declared SRI to downloaded tarball bytes", async () => {
 			code: 0,
 		};
 	};
-	assert.equal(await fetchVerifiedNpmPackage(lock, root, run), join(root, "example.tgz"));
+	assert.equal(
+		await fetchVerifiedNpmPackage(lock, root, run),
+		join(root, "example.tgz"),
+	);
 	assert.deepEqual(invocation, {
 		command: "npm",
 		args: [
@@ -172,12 +175,21 @@ test("npm fetch binds declared SRI to downloaded tarball bytes", async () => {
 });
 
 test("npm fetch rejects wrong digest, registry failure, malformed response, and timeout", async () => {
-	for (const failure of ["digest", "registry", "response", "timeout"] as const) {
+	for (const failure of [
+		"digest",
+		"registry",
+		"response",
+		"timeout",
+	] as const) {
 		const root = await mkdtemp(join(tmpdir(), `pi-dsbx-npm-${failure}-`));
 		const run = async () => {
 			if (failure === "timeout") throw new CommandTimeoutError("npm", 10);
 			if (failure === "registry")
-				return { stdout: Buffer.alloc(0), stderr: Buffer.from("registry refused"), code: 1 };
+				return {
+					stdout: Buffer.alloc(0),
+					stderr: Buffer.from("registry refused"),
+					code: 1,
+				};
 			await writeFile(join(root, "example.tgz"), packageTarball);
 			return {
 				stdout: Buffer.from(
@@ -277,7 +289,8 @@ test("dynamic provider and override keys reject unsafe object names and Unicode"
 			key,
 		);
 		assert.throws(
-			() => sanitizeModels(Object.fromEntries([[key, { models: [] }]]), "store"),
+			() =>
+				sanitizeModels(Object.fromEntries([[key, { models: [] }]]), "store"),
 			/unsafe dynamic model metadata key/,
 			key,
 		);
@@ -308,7 +321,11 @@ test("model URLs accept only canonical public HTTPS destinations", () => {
 		"ftp://api.example.com/v1",
 	]) {
 		const result = sanitizeModels({ providers: { unsafe: { baseUrl } } });
-		assert.equal((result.value.providers as any).unsafe.baseUrl, undefined, baseUrl);
+		assert.equal(
+			(result.value.providers as any).unsafe.baseUrl,
+			undefined,
+			baseUrl,
+		);
 	}
 });
 

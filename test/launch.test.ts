@@ -383,11 +383,19 @@ test("verified npm tarballs are copied, installed locally, and always cleaned", 
 					if (argv[0] === "pi") {
 						events.push("install");
 						installedArgument = argv[2]!;
-						return { stdout: "", stderr: "", code: failure === "install" ? 1 : 0 };
+						return {
+							stdout: "",
+							stderr: "",
+							code: failure === "install" ? 1 : 0,
+						};
 					}
 					if (argv[0] === "rm") {
 						events.push("cleanup");
-						return { stdout: "", stderr: "", code: failure === "cleanup" ? 1 : 0 };
+						return {
+							stdout: "",
+							stderr: "",
+							code: failure === "cleanup" ? 1 : 0,
+						};
 					}
 					return { stdout: "", stderr: "", code: 0 };
 				},
@@ -399,12 +407,19 @@ test("verified npm tarballs are copied, installed locally, and always cleaned", 
 				onStatus: (status) => events.push(status),
 			});
 			if (failure === "copy" || failure === "cleanup")
-				await assert.rejects(operation, new RegExp(`${failure} failed|staged npm package`));
+				await assert.rejects(
+					operation,
+					new RegExp(`${failure} failed|staged npm package`),
+				);
 			else {
 				const result = await operation;
 				assert.equal(result.agentExitCode, 0);
 				if (failure === "install")
-					assert.ok(result.warnings.some((warning) => /package was skipped/.test(warning)));
+					assert.ok(
+						result.warnings.some((warning) =>
+							/package was skipped/.test(warning),
+						),
+					);
 			}
 			assert.ok(events.indexOf("copy") > events.indexOf("create"));
 			assert.ok(events.includes("cleanup"));
@@ -814,7 +829,9 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 			},
 		});
 		assert.equal(installs.length, 2);
-		assert.ok(installs.every((value) => value.startsWith("/tmp/pi-dsbx-package-")));
+		assert.ok(
+			installs.every((value) => value.startsWith("/tmp/pi-dsbx-package-")),
+		);
 		assert.deepEqual(
 			statuses.filter((status) => status.startsWith("installing npm:")),
 			[
@@ -972,7 +989,10 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 			});
 			assert.equal(result.agentExitCode, 0);
 			assert.equal(skillsPresent, true);
-			assert.equal(attachedSettings?.packages?.length, failure === "compiler" ? 1 : 2);
+			assert.equal(
+				attachedSettings?.packages?.length,
+				failure === "compiler" ? 1 : 2,
+			);
 			assert.ok(
 				attachedSettings?.packages?.every((value) =>
 					value.startsWith("/tmp/pi-dsbx-package-"),
@@ -1632,7 +1652,9 @@ test("oauth-copy asks for consent again for every sandbox", async () => {
 		}
 		assert.equal(questions.length, 2);
 		assert.notEqual(questions[0], questions[1]);
-		assert.ok(questions.every((question) => /VM-readable.*persist/i.test(question)));
+		assert.ok(
+			questions.every((question) => /VM-readable.*persist/i.test(question)),
+		);
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
