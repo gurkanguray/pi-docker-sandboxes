@@ -57,9 +57,7 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 test("runtime lock rejects omitted and mutable QEMU pins", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "runtime-qemu-lock-"));
 	try {
-		const source = JSON.parse(
-			await readFile("docker/runtime-lock.json", "utf8"),
-		);
+		const source = JSON.parse(await readFile("docker/runtime-lock.json", "utf8"));
 		for (const qemu of [
 			undefined,
 			`tonistiigi/binfmt:latest@sha256:${"a".repeat(64)}`,
@@ -88,10 +86,7 @@ test("release-runtime protection fails closed", () => {
 	assert.equal(verifyRuntimeEnvironment(environment, policies), true);
 	assert.throws(
 		() =>
-			verifyRuntimeEnvironment(
-				{ ...environment, protection_rules: [] },
-				policies,
-			),
+			verifyRuntimeEnvironment({ ...environment, protection_rules: [] }, policies),
 		/reviewer/,
 	);
 	assert.throws(
@@ -229,10 +224,7 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 				[
 					{
 						...statement,
-						subject: [
-							...statement.subject,
-							{ digest: { sha256: digestB.slice(7) } },
-						],
+						subject: [...statement.subject, { digest: { sha256: digestB.slice(7) } }],
 					},
 				],
 				new Map([[digestA, platform]]),
@@ -267,10 +259,7 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			const scan = `scan-${arch}`;
 			const sbom = `sbom-${arch}`;
 			await writeFile(join(directory, `runtime-standard-${arch}.sarif`), scan);
-			await writeFile(
-				join(directory, `runtime-standard-${arch}.cdx.json`),
-				sbom,
-			);
+			await writeFile(join(directory, `runtime-standard-${arch}.cdx.json`), sbom);
 			await writeFile(
 				join(directory, `runtime-standard-${arch}.evidence.json`),
 				JSON.stringify({
@@ -306,10 +295,7 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			/receipt identity/,
 		);
 		await writeFile(archivePath, archiveBytes);
-		await writeFile(
-			join(directory, "runtime-standard-amd64.sarif"),
-			"tampered",
-		);
+		await writeFile(join(directory, "runtime-standard-amd64.sarif"), "tampered");
 		await writeFile(
 			join(directory, "runtime-standard-amd64.cdx.json"),
 			"sbom-amd64",

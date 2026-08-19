@@ -27,8 +27,7 @@ const workflowPath = new URL(
 	"../.github/workflows/runtime-image.yml",
 	import.meta.url,
 );
-const checkout =
-	"actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
+const checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
 const sourceRef = "${{ needs.source.outputs.sha }}";
 const needs = (job: Job) =>
 	Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
@@ -173,48 +172,61 @@ test("runtime workflow policy rejects security and publication weakening", async
 		[
 			"Trivy ignore file",
 			(value) => {
-				stepNamed(
-					value.jobs.security,
-					"Scan exact platform manifest",
-				).with!.trivyignores = ".trivyignore.yaml";
+				stepNamed(value.jobs.security, "Scan exact platform manifest")
+					.with!.trivyignores = ".trivyignore.yaml";
 			},
 		],
 		[
 			"ignored unfixed vulnerabilities",
 			(value) => {
-				stepNamed(
-					value.jobs.security,
-					"Scan exact platform manifest",
-				).with!["ignore-unfixed"] = true;
+				stepNamed(value.jobs.security, "Scan exact platform manifest").with![
+					"ignore-unfixed"
+				] = true;
 			},
 		],
-		["nonmanual trigger", (value) => {
-			value.on.push = {};
-		}],
-		["shallow source checkout", (value) => {
-			value.jobs.source.steps![0]!.with!["fetch-depth"] = 1;
-		}],
+		[
+			"nonmanual trigger",
+			(value) => {
+				value.on.push = {};
+			},
+		],
+		[
+			"shallow source checkout",
+			(value) => {
+				value.jobs.source.steps![0]!.with!["fetch-depth"] = 1;
+			},
+		],
 		[
 			"missing environment protection check",
 			(value) => {
-				stepNamed(
-					value.jobs.publish,
-					"Verify release-runtime protection",
-				).run = "echo skipped";
+				stepNamed(value.jobs.publish, "Verify release-runtime protection").run =
+					"echo skipped";
 			},
 		],
-		["mutable action reference", (value) => {
-			value.jobs.source.steps![0]!.uses = "actions/checkout@v4";
-		}],
-		["permission escalation", (value) => {
-			value.jobs.build.permissions!.packages = "write";
-		}],
-		["standard publication bypass", (value) => {
-			value.jobs.publish.needs = ["source"];
-		}],
-		["nonstandard publication", (value) => {
-			delete value.jobs.publish.if;
-		}],
+		[
+			"mutable action reference",
+			(value) => {
+				value.jobs.source.steps![0]!.uses = "actions/checkout@v4";
+			},
+		],
+		[
+			"permission escalation",
+			(value) => {
+				value.jobs.build.permissions!.packages = "write";
+			},
+		],
+		[
+			"standard publication bypass",
+			(value) => {
+				value.jobs.publish.needs = ["source"];
+			},
+		],
+		[
+			"nonstandard publication",
+			(value) => {
+				delete value.jobs.publish.if;
+			},
+		],
 	];
 
 	for (const [name, mutate] of cases)
