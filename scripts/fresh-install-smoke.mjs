@@ -203,18 +203,12 @@ async function main() {
 			}
 			const launched = await runCommand(
 				piCommand,
-				[
-					"--docker-sandbox",
-					"--docker-sandbox-no-host-auth",
-					"--yes",
-					"--help",
-				],
+				["--docker-sandbox", "--docker-sandbox-no-host-auth", "--yes", "--help"],
 				{ cwd: root, env },
 			);
 			launched.label = "installed Pi extension dispatch";
 			commands.push(launched);
-			if (launched.exitCode !== 0)
-				fail("installed Pi extension dispatch failed");
+			if (launched.exitCode !== 0) fail("installed Pi extension dispatch failed");
 			if (!launched.stderr.includes("pi-dsbx: checking Docker Sandboxes"))
 				fail("installed Pi extension did not enter the launch path");
 			runtimeLaunches = 1;

@@ -265,12 +265,22 @@ test("release workflows are valid npm-only gates", async () => {
 		step.run?.startsWith('npm publish "$tarball"'),
 	);
 	const provenanceIndex = publishSteps.findIndex(
-		(step) => step.name === "Retrieve and cryptographically verify npm provenance",
+		(step) =>
+			step.name === "Retrieve and cryptographically verify npm provenance",
 	);
 	assert.ok(verifyIndex >= 0, "publish workflow must have a verification step");
-	assert.ok(registryIndex > verifyIndex, "registry check must follow verification");
-	assert.ok(npmPublishIndex > registryIndex, "registry check must precede publish");
-	assert.ok(provenanceIndex > npmPublishIndex, "publish must precede provenance");
+	assert.ok(
+		registryIndex > verifyIndex,
+		"registry check must follow verification",
+	);
+	assert.ok(
+		npmPublishIndex > registryIndex,
+		"registry check must precede publish",
+	);
+	assert.ok(
+		provenanceIndex > npmPublishIndex,
+		"publish must precede provenance",
+	);
 	assert.equal(
 		publishSteps[npmPublishIndex]!.run,
 		'npm publish "$tarball" --provenance --access public --tag latest',
@@ -313,11 +323,11 @@ test("release workflows are valid npm-only gates", async () => {
 		'runtimeReceipt.variant !== "standard"',
 		"e2e.piVersion !== imageLock.piVersion",
 		"e2e.imageLockPiVersion !== imageLock.piVersion",
-		'e2e.platform !== facts.platform',
-		'e2e.architecture !== facts.architecture',
-		'e2e.kvm?.required !== facts.kvm',
-		'!e2e.kvm?.characterDevice',
-		'!e2e.kvm?.opened',
+		"e2e.platform !== facts.platform",
+		"e2e.architecture !== facts.architecture",
+		"e2e.kvm?.required !== facts.kvm",
+		"!e2e.kvm?.characterDevice",
+		"!e2e.kvm?.opened",
 	])
 		assert.ok(
 			receiptRun.includes(check),

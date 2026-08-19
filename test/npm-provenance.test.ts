@@ -27,9 +27,7 @@ async function evidence() {
 					predicateType: "https://slsa.dev/provenance/v1",
 					bundle: {
 						dsseEnvelope: {
-							payload: Buffer.from(JSON.stringify(statement)).toString(
-								"base64",
-							),
+							payload: Buffer.from(JSON.stringify(statement)).toString("base64"),
 							signatures: [{ sig: "fixture-signature" }],
 						},
 					},

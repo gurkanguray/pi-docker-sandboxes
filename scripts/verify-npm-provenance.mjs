@@ -115,7 +115,10 @@ export function verifyNpmProvenance({
 	const source = (definition?.resolvedDependencies ?? []).find(
 		(item) => item?.digest?.gitCommit === candidate?.sourceSha,
 	);
-	if (!source || !repositoryUrl(source.uri)?.startsWith(repositoryUrl(expectedRepository)))
+	if (
+		!source ||
+		!repositoryUrl(source.uri)?.startsWith(repositoryUrl(expectedRepository))
+	)
 		fail("signed npm provenance does not bind the candidate source SHA");
 
 	return {
@@ -136,8 +139,13 @@ export function verifyNpmProvenance({
 }
 
 async function main() {
-	const [metadataPath, attestationsPath, candidatePath, packagePath, outputPath] =
-		process.argv.slice(2);
+	const [
+		metadataPath,
+		attestationsPath,
+		candidatePath,
+		packagePath,
+		outputPath,
+	] = process.argv.slice(2);
 	if (!outputPath)
 		fail(
 			"Usage: verify-npm-provenance <metadata> <attestations> <candidate> <package receipt> <output>",
