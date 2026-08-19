@@ -20,6 +20,9 @@ on:
       public_install_artifact:
         required: true
         type: string
+      npm_provenance_artifact:
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -51,6 +54,10 @@ jobs:
         with:
           name: ${{ inputs.public_install_artifact }}
           path: release-assets/public-install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.npm_provenance_artifact }}
+          path: release-assets/npm-provenance
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: "*-e2e-${{ inputs.source_sha }}"
@@ -90,14 +97,24 @@ jobs:
           const install = JSON.parse(await readFile(
             "release-assets/public-install/pi-install-receipt.json",
           ));
+          const npmProvenance = JSON.parse(await readFile(
+            "release-assets/npm-provenance/verified-provenance.json",
+          ));
           if (candidate.sourceSha !== process.env.SOURCE_SHA ||
               candidate.tag !== process.env.TAG ||
               candidate.e2eReceipts?.length !== 3 ||
               install.actualPiInstall !== true ||
               install.packageRecordVerified !== true ||
+              install.extensionDispatchVerified !== true ||
+              install.launchPathVerified !== true ||
               install.version !== candidate.version ||
               install.integrity !== candidate.tarballIntegrity ||
               install.runtimeLaunches !== 1 ||
+              npmProvenance.verified !== true ||
+              npmProvenance.tool !== "npm audit signatures" ||
+              npmProvenance.version !== candidate.version ||
+              npmProvenance.integrity !== candidate.tarballIntegrity ||
+              npmProvenance.sourceSha !== candidate.sourceSha ||
               !install.cleanup?.packageRemoved ||
               !install.cleanup?.packageRecordRemoved ||
               !install.cleanup?.prefixRemoved ||
@@ -109,20 +126,22 @@ jobs:
               tag: candidate.tag,
               packageIntegrity: candidate.tarballIntegrity,
               runtimeReference: candidate.runtimeReference,
-              packageProvenance: "npm-publish-oidc",
+              packageProvenance:
+                "npm-provenance/verified-provenance.json",
               runtimeProvenance:
                 "runtime/runtime-provenance.json",
             }, null, 2)}\n`);
           NODE
           find release-assets -type f ! -name SHA256SUMS -print0 \
             | sort -z | xargs -0 sha256sum > release-assets/SHA256SUMS
-      - name: Create GitHub Release from the verified signed tag
+      - name: Create or resume the exact GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<EOF
           Stable production release $TAG.
 
           Attached evidence includes package and runtime provenance, raw scans,
@@ -132,6 +151,92 @@ jobs:
           mapfile -d '' assets < <(
             find release-assets -type f -print0 | sort -z
           )
-          gh release create "$TAG" --verify-tag --latest \
-            --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
-            "${assets[@]}"
+          ASSETS="$(printf '%s\0' "${assets[@]}" | base64)" \
+            NOTES="$notes" node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { basename } from "node:path";
+          const paths = Buffer.from(process.env.ASSETS, "base64")
+            .toString().split("\0").filter(Boolean);
+          const names = paths.map(basename);
+          if (new Set(names).size !== names.length)
+            throw new Error("release asset basenames must be unique");
+          if (!(await readFile(process.env.NOTES, "utf8")).trim())
+            throw new Error("release notes are empty");
+          NODE
+          release="$RUNNER_TEMP/github-release.json"
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            > "$release" 2> "$RUNNER_TEMP/github-release.err"; then
+            if grep -q 'HTTP 404' "$RUNNER_TEMP/github-release.err"; then
+              gh release create "$TAG" --verify-tag --draft \
+                --title "$TAG" --notes-file "$notes"
+              gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                > "$release"
+            else
+              cat "$RUNNER_TEMP/github-release.err" >&2
+              exit 1
+            fi
+          fi
+          NOTES="$notes" RELEASE="$release" node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const release = JSON.parse(await readFile(process.env.RELEASE));
+          const notes = await readFile(process.env.NOTES, "utf8");
+          if (release.tag_name !== process.env.TAG ||
+              release.name !== process.env.TAG ||
+              release.prerelease !== false || release.body !== notes)
+            throw new Error("existing GitHub Release metadata differs");
+          NODE
+          EXPECTED="$(printf '%s\n' "${assets[@]##*/}" | sort)" \
+            RELEASE="$release" node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const expected = new Set(
+            process.env.EXPECTED.split("\n").filter(Boolean),
+          );
+          const release = JSON.parse(await readFile(process.env.RELEASE));
+          const actual = release.assets.map(({ name }) => name);
+          if (new Set(actual).size !== actual.length ||
+              actual.some((name) => !expected.has(name)))
+            throw new Error("existing GitHub Release asset set differs");
+          NODE
+          missing="$RUNNER_TEMP/missing-release-assets"
+          : > "$missing"
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            asset_id="$(node --input-type=module - "$release" "$name" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const release = JSON.parse(await readFile(process.argv[2]));
+          const asset = release.assets.find(
+            (candidate) => candidate.name === process.argv[3],
+          );
+          if (asset) console.log(asset.id);
+          NODE
+            )"
+            if test -z "$asset_id"; then
+              printf '%s\0' "$asset" >> "$missing"
+              continue
+            fi
+            downloaded="$RUNNER_TEMP/existing-$asset_id"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "$downloaded"
+            cmp "$asset" "$downloaded" || {
+              echo "existing release asset differs: $name" >&2
+              exit 1
+            }
+          done
+          while IFS= read -r -d '' asset; do
+            gh release upload "$TAG" "$asset"
+          done < "$missing"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$release"
+          EXPECTED="$(printf '%s\n' "${assets[@]##*/}" | sort)" \
+            RELEASE="$release" node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const expected = process.env.EXPECTED.split("\n").filter(Boolean);
+          const release = JSON.parse(await readFile(process.env.RELEASE));
+          const actual = release.assets.map(({ name }) => name).sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected))
+            throw new Error("existing GitHub Release asset set differs");
+          NODE
+          gh release edit "$TAG" --draft=false --latest \
+            --title "$TAG" --notes-file "$notes"
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+          test "$(gh release view "$TAG" --json isLatest --jq .isLatest)" = true

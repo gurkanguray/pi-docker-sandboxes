@@ -65,6 +65,9 @@ jobs:
               - docker-sandboxes
               - ephemeral
             platform: linux/arm64
+            host-platform: darwin
+            host-arch: arm64
+            requires-kvm: false
           - name: ubuntu-amd64-kvm
             runner:
               - self-hosted
@@ -74,6 +77,9 @@ jobs:
               - kvm
               - ephemeral
             platform: linux/amd64
+            host-platform: linux
+            host-arch: x64
+            requires-kvm: true
           - name: ubuntu-arm64-kvm
             runner:
               - self-hosted
@@ -83,6 +89,9 @@ jobs:
               - kvm
               - ephemeral
             platform: linux/arm64
+            host-platform: linux
+            host-arch: arm64
+            requires-kvm: true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
@@ -279,6 +288,7 @@ jobs:
           RUNTIME_RECEIPT: >-
             ${{ runner.temp }}/sandbox-runtime-receipt.json
           E2E_OUTCOME: ${{ steps.e2e.outcome }}
+          KVM_REQUIRED: ${{ matrix.requires-kvm }}
         run: |
           count="$(grep -c 'E2E_TEST_PASSED=1' \
             "$RUNNER_TEMP/pi-dsbx-e2e.log" || true)"
@@ -322,9 +332,10 @@ jobs:
             --selected-image-id "$SELECTED_IMAGE_ID" \
             --status "$status" \
             --tests-count "$count" \
-            --platform "$(uname -s | tr '[:upper:]' '[:lower:]')" \
-            --macos-version "$host_version" \
-            --architecture "$(uname -m)" \
+            --expected-platform "${{ matrix.host-platform }}" \
+            --host-version "$host_version" \
+            --expected-architecture "${{ matrix.host-arch }}" \
+            --require-kvm "${{ matrix.requires-kvm }}" \
             --sbx-version "$sbx_version" \
             --pi-version "$pi_version" \
             --image-lock-pi-version "$image_lock_pi_version" \
@@ -356,8 +367,15 @@ jobs:
             imageDigest: process.env.IMAGE_DIGEST,
             selectedImage: process.env.SELECTED_IMAGE || null,
             platform: process.platform,
-            macosVersion: null,
+            hostVersion: null,
             architecture: process.arch,
+            kvm: {
+              required: process.env.KVM_REQUIRED === "true",
+              path: process.env.KVM_REQUIRED === "true" ? "/dev/kvm" : null,
+              characterDevice: false,
+              opened: false,
+              openMode: process.env.KVM_REQUIRED === "true" ? "r+" : null,
+            },
             sbxVersion: null,
             piVersion: null,
             imageLockPiVersion: null,

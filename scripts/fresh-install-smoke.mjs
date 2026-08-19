@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+	access,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,27 +189,34 @@ async function main() {
 			: ["uninstall", "--ignore-scripts", "--prefix", prefix, packed.name];
 		let runtimeLaunches = 0;
 		if (published) {
-			const image = process.env.PI_RELEASE_RUNTIME_IMAGE;
-			const templateStoreId = process.env.PI_RELEASE_TEMPLATE_STORE_ID;
-			if (!image || !templateStoreId)
-				fail("published verification requires the exact loaded runtime");
-			const helper = fileURLToPath(
-				new URL("./public-runtime-launch.mjs", import.meta.url),
-			);
+			await writeFile(join(root, "release-smoke.txt"), "public install\n");
+			for (const gitArgs of [
+				["init", "-b", "main"],
+				["config", "user.email", "release@example.invalid"],
+				["config", "user.name", "Release verification"],
+				["add", "release-smoke.txt"],
+				["commit", "-m", "release smoke"],
+			]) {
+				const prepared = await runCommand("git", gitArgs, { cwd: root, env });
+				if (prepared.exitCode !== 0)
+					fail("could not prepare the public dispatch workspace");
+			}
 			const launched = await runCommand(
-				process.execPath,
-				[helper, packageRoot, image, templateStoreId],
+				piCommand,
+				[
+					"--docker-sandbox",
+					"--docker-sandbox-no-host-auth",
+					"--yes",
+					"--help",
+				],
 				{ cwd: root, env },
 			);
-			launched.label = "one exact runtime launch";
+			launched.label = "installed Pi extension dispatch";
 			commands.push(launched);
-			if (launched.exitCode !== 0) fail("exact runtime launch failed");
-			const launchReceipt = JSON.parse(launched.stdout.split("\n").at(-1));
-			if (
-				launchReceipt.runtimeLaunches !== 1 ||
-				launchReceipt.custody !== "released"
-			)
-				fail("exact runtime launch cleanup was not verified");
+			if (launched.exitCode !== 0)
+				fail("installed Pi extension dispatch failed");
+			if (!launched.stderr.includes("pi-dsbx: checking Docker Sandboxes"))
+				fail("installed Pi extension did not enter the launch path");
 			runtimeLaunches = 1;
 		}
 
@@ -252,6 +266,8 @@ async function main() {
 			exactInstallSource: published ? installSource : null,
 			packageRecordVerified: published,
 			extensionFlagsVerified: published,
+			extensionDispatchVerified: published,
+			launchPathVerified: published,
 			runtimeLaunches,
 			commands,
 		};

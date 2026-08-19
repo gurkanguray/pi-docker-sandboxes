@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -62,6 +62,38 @@ try {
 	const sourceSha = (await exec("git", ["rev-parse", "HEAD"])).stdout.trim();
 	if (sourceSha !== expectedSourceSha)
 		fail(`Source SHA mismatch: expected ${expectedSourceSha}, got ${sourceSha}`);
+
+	const expectedPlatform = required(values, "expected-platform");
+	const expectedArchitecture = required(values, "expected-architecture");
+	if (
+		process.platform !== expectedPlatform ||
+		process.arch !== expectedArchitecture
+	)
+		fail(
+			`Measured host mismatch: expected ${expectedPlatform}/${expectedArchitecture}, got ${process.platform}/${process.arch}`,
+		);
+	const requireKvm = required(values, "require-kvm");
+	if (requireKvm !== "true" && requireKvm !== "false")
+		fail("--require-kvm must be true or false");
+	const kvm = {
+		required: requireKvm === "true",
+		path: requireKvm === "true" ? "/dev/kvm" : null,
+		characterDevice: false,
+		opened: false,
+		openMode: requireKvm === "true" ? "r+" : null,
+	};
+	if (kvm.required) {
+		try {
+			kvm.characterDevice = (await lstat("/dev/kvm")).isCharacterDevice();
+			const handle = await open("/dev/kvm", "r+");
+			await handle.close();
+			kvm.opened = true;
+		} catch {
+			// The failed receipt still records measured negative KVM evidence.
+		}
+		if (status === "passed" && (!kvm.characterDevice || !kvm.opened))
+			fail("Passing Linux KVM receipt requires a character device opened r+");
+	}
 
 	const expectedImageDigest = required(values, "image-digest");
 	const selectedImage = optional(values, "selected-image");
@@ -156,9 +188,10 @@ try {
 		packageIntegrity,
 		imageDigest: expectedImageDigest,
 		selectedImage,
-		platform: required(values, "platform"),
-		macosVersion: required(values, "macos-version"),
-		architecture: required(values, "architecture"),
+		platform: process.platform,
+		hostVersion: required(values, "host-version"),
+		architecture: process.arch,
+		kvm,
 		sbxVersion: optional(values, "sbx-version"),
 		piVersion,
 		imageLockPiVersion,

@@ -100,5 +100,87 @@ jobs:
           NODE
           test "$(npm config get registry)" = "https://registry.npmjs.org/"
           echo "tarball=$tarball" >> "$GITHUB_ENV"
-      - name: Publish the verified release tarball
+      - name: Detect an immutable existing npm version
+        id: registry
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          exact="pi-docker-sandboxes@${TAG#v}"
+          if npm view "$exact" version --json \
+            > "$RUNNER_TEMP/npm-version.json" \
+            2> "$RUNNER_TEMP/npm-version.err"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif grep -q 'E404' "$RUNNER_TEMP/npm-version.err"; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/npm-version.err" >&2
+            exit 1
+          fi
+      - name: Publish the verified release tarball when absent
+        if: steps.registry.outputs.present == 'false'
         run: npm publish "$tarball" --provenance --access public --tag latest
+      - name: Retrieve and cryptographically verify npm provenance
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          exact="pi-docker-sandboxes@$version"
+          evidence="$RUNNER_TEMP/npm-provenance"
+          mkdir "$evidence"
+          for attempt in $(seq 1 20); do
+            if npm view "$exact" --json > "$evidence/package.json" &&
+              npm view pi-docker-sandboxes dist-tags --json \
+                > "$evidence/dist-tags.json" &&
+              node --input-type=module - "$evidence" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const root = process.argv[2];
+          const metadata = JSON.parse(await readFile(`${root}/package.json`));
+          metadata.distTags = JSON.parse(
+            await readFile(`${root}/dist-tags.json`),
+          );
+          const url = new URL(metadata.dist?.attestations?.url);
+          if (url.protocol !== "https:" ||
+              url.hostname !== "registry.npmjs.org" ||
+              !url.pathname.startsWith("/-/npm/v1/attestations/"))
+            throw new Error("invalid npm attestation URL");
+          const response = await fetch(url);
+          if (!response.ok)
+            throw new Error(`attestations HTTP ${response.status}`);
+          await writeFile(
+            `${root}/registry-metadata.json`,
+            `${JSON.stringify(metadata, null, 2)}\n`,
+          );
+          await writeFile(`${root}/attestations.json`, await response.text());
+          NODE
+            then
+              break
+            fi
+            test "$attempt" -lt 20 || exit 1
+            sleep 15
+          done
+          audit="$RUNNER_TEMP/npm-audit"
+          mkdir "$audit"
+          printf '%s\n' \
+            '{"name":"npm-provenance-audit","version":"0.0.0"}' \
+            > "$audit/package.json"
+          (
+            cd "$audit"
+            npm install --save-exact --ignore-scripts --omit=peer "$exact"
+            npm audit signatures --json \
+              > "$evidence/npm-audit-signatures.json"
+          )
+          cp "$audit/package-lock.json" "$evidence/audited-package-lock.json"
+          node scripts/verify-npm-provenance.mjs \
+            "$evidence/registry-metadata.json" \
+            "$evidence/attestations.json" \
+            candidate/release-candidate-receipt.json \
+            package/package-verification.json \
+            "$evidence/verified-provenance.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-provenance-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/npm-provenance
+          if-no-files-found: error
+          retention-days: 90

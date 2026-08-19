@@ -250,6 +250,23 @@ jobs:
             "ubuntu-amd64-kvm",
             "ubuntu-arm64-kvm",
           ];
+          const expectedHosts = {
+            "macos-arm64": {
+              platform: "darwin",
+              architecture: "arm64",
+              kvm: false,
+            },
+            "ubuntu-amd64-kvm": {
+              platform: "linux",
+              architecture: "x64",
+              kvm: true,
+            },
+            "ubuntu-arm64-kvm": {
+              platform: "linux",
+              architecture: "arm64",
+              kvm: true,
+            },
+          };
           const e2eReceipts = [];
           for (const host of hardware) {
             const root = `evidence/${host}`;
@@ -276,16 +293,25 @@ jobs:
               !freshInstallReceipt.cleanup?.prefixRemoved ||
               !freshInstallReceipt.cleanup?.piHomeRemoved ||
               e2eReceipt.packageVersion !== expected.VERSION ||
-              e2eReceipts.some((e2e) =>
-                e2e.sourceSha !== expected.SOURCE_SHA ||
-                e2e.candidateDigest !== expected.IMAGE_DIGEST ||
-                e2e.packageVersion !== expected.VERSION ||
-                e2e.packageIntegrity !== packageReceipt.integrity ||
-                e2e.piVersion !== imageLock.piVersion ||
-                e2e.imageLockPiVersion !== imageLock.piVersion ||
-                e2e.status !== "passed" || !e2e.passedAt ||
-                e2e.cleanup?.status !== "passed" ||
-                e2e.cleanup?.homeRemoved !== true))
+              e2eReceipts.some((e2e) => {
+                const facts = expectedHosts[e2e.host];
+                return !facts ||
+                  e2e.platform !== facts.platform ||
+                  e2e.architecture !== facts.architecture ||
+                  e2e.kvm?.required !== facts.kvm ||
+                  (facts.kvm &&
+                    (!e2e.kvm?.characterDevice || !e2e.kvm?.opened ||
+                      e2e.kvm?.openMode !== "r+")) ||
+                  e2e.sourceSha !== expected.SOURCE_SHA ||
+                  e2e.candidateDigest !== expected.IMAGE_DIGEST ||
+                  e2e.packageVersion !== expected.VERSION ||
+                  e2e.packageIntegrity !== packageReceipt.integrity ||
+                  e2e.piVersion !== imageLock.piVersion ||
+                  e2e.imageLockPiVersion !== imageLock.piVersion ||
+                  e2e.status !== "passed" || !e2e.passedAt ||
+                  e2e.cleanup?.status !== "passed" ||
+                  e2e.cleanup?.homeRemoved !== true;
+              }))
             throw new Error(
               "candidate evidence does not bind to one candidate",
             );
@@ -401,6 +427,8 @@ jobs:
                 `npm:pi-docker-sandboxes@${process.env.VERSION}` ||
               !receipt.packageRecordVerified ||
               !receipt.extensionFlagsVerified ||
+              !receipt.extensionDispatchVerified ||
+              !receipt.launchPathVerified ||
               receipt.runtimeLaunches !== 1 ||
               !receipt.cleanup?.packageRemoved ||
               !receipt.cleanup?.packageRecordRemoved ||
@@ -435,14 +463,32 @@ jobs:
         with:
           node-version: 24.12.0
           registry-url: https://registry.npmjs.org
-      - name: Deprecate the one-time inert bootstrap package
+      - name: Deprecate the one-time inert bootstrap package idempotently
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_DEPRECATE_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          test -n "$NODE_AUTH_TOKEN"
-          npm deprecate pi-docker-sandboxes@0.0.0 \
-            "Bootstrap only; use ${{ needs.metadata.outputs.version }}"
+          test -n "$NODE_AUTH_TOKEN" || {
+            echo "NPM_DEPRECATE_TOKEN is required to finish release" >&2
+            exit 1
+          }
+          expected="Bootstrap only; use $VERSION"
+          npm view pi-docker-sandboxes@0.0.0 --json \
+            > "$RUNNER_TEMP/bootstrap.json"
+          current="$(node -p \
+            'require(process.argv[1]).deprecated ?? ""' \
+            "$RUNNER_TEMP/bootstrap.json")"
+          if test -n "$current"; then
+            test "$current" = "$expected" || {
+              echo "bootstrap deprecation differs from release state" >&2
+              exit 1
+            }
+          else
+            npm deprecate pi-docker-sandboxes@0.0.0 "$expected"
+          fi
+          test "$(npm view pi-docker-sandboxes@0.0.0 deprecated)" = \
+            "$expected"
 
   publish-release:
     needs:
@@ -462,3 +508,5 @@ jobs:
       candidate_artifact: release-candidate-${{ needs.metadata.outputs.sha }}
       runtime_artifact: production-runtime-${{ needs.metadata.outputs.sha }}
       public_install_artifact: public-install-${{ needs.metadata.outputs.sha }}
+      npm_provenance_artifact: >-
+        npm-provenance-${{ needs.metadata.outputs.sha }}

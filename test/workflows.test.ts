@@ -7,6 +7,7 @@ const workflows = new URL("../.github/workflows/", import.meta.url);
 
 type Step = {
 	id?: string;
+	if?: string;
 	name?: string;
 	env?: Record<string, unknown>;
 	uses?: string;
@@ -257,14 +258,32 @@ test("release workflows are valid npm-only gates", async () => {
 		(step) =>
 			step.name === "Verify protected candidate receipt and npm configuration",
 	);
+	const registryIndex = publishSteps.findIndex(
+		(step) => step.name === "Detect an immutable existing npm version",
+	);
 	const npmPublishIndex = publishSteps.findIndex((step) =>
 		step.run?.startsWith('npm publish "$tarball"'),
 	);
+	const provenanceIndex = publishSteps.findIndex(
+		(step) => step.name === "Retrieve and cryptographically verify npm provenance",
+	);
 	assert.ok(verifyIndex >= 0, "publish workflow must have a verification step");
-	assert.ok(npmPublishIndex > verifyIndex, "verification must precede publish");
+	assert.ok(registryIndex > verifyIndex, "registry check must follow verification");
+	assert.ok(npmPublishIndex > registryIndex, "registry check must precede publish");
+	assert.ok(provenanceIndex > npmPublishIndex, "publish must precede provenance");
 	assert.equal(
 		publishSteps[npmPublishIndex]!.run,
 		'npm publish "$tarball" --provenance --access public --tag latest',
+	);
+	assert.equal(
+		publishSteps[npmPublishIndex]!.if,
+		"steps.registry.outputs.present == 'false'",
+	);
+	assert.match(publishSteps[registryIndex]!.run ?? "", /grep -q 'E404'/);
+	assert.match(publishSteps[provenanceIndex]!.run ?? "", /npm audit signatures/);
+	assert.match(
+		publishSteps[provenanceIndex]!.run ?? "",
+		/scripts\/verify-npm-provenance\.mjs/,
 	);
 	const verifyRun = publishSteps[verifyIndex]!.run;
 	assert.ok(verifyRun, "publish verification step must be executable");
@@ -294,6 +313,11 @@ test("release workflows are valid npm-only gates", async () => {
 		'runtimeReceipt.variant !== "standard"',
 		"e2e.piVersion !== imageLock.piVersion",
 		"e2e.imageLockPiVersion !== imageLock.piVersion",
+		'e2e.platform !== facts.platform',
+		'e2e.architecture !== facts.architecture',
+		'e2e.kvm?.required !== facts.kvm',
+		'!e2e.kvm?.characterDevice',
+		'!e2e.kvm?.opened',
 	])
 		assert.ok(
 			receiptRun.includes(check),
@@ -324,16 +348,27 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.deepEqual(release.jobs["deprecate-bootstrap"].permissions, {
 		contents: "read",
 	});
+	const deprecation = release.jobs["deprecate-bootstrap"].steps?.at(-1)!;
 	assert.equal(
-		release.jobs["deprecate-bootstrap"].steps?.at(-1)?.env?.NODE_AUTH_TOKEN,
+		deprecation.env?.NODE_AUTH_TOKEN,
 		"${{ secrets.NPM_DEPRECATE_TOKEN }}",
 	);
+	assert.match(deprecation.run ?? "", /npm view pi-docker-sandboxes@0\.0\.0/);
+	assert.match(deprecation.run ?? "", /bootstrap deprecation differs/);
+	assert.match(deprecation.run ?? "", /NPM_DEPRECATE_TOKEN is required/);
 	const durable = parsed.get("publish-release.yml")!;
 	assert.deepEqual(durable.permissions, { contents: "read" });
 	assert.deepEqual(durable.jobs.release.permissions, {
 		actions: "read",
 		contents: "write",
 	});
+	const releaseResume = durable.jobs.release.steps?.find(
+		(step) => step.name === "Create or resume the exact GitHub Release",
+	)?.run;
+	assert.match(releaseResume ?? "", /gh release upload/);
+	assert.match(releaseResume ?? "", /existing release asset differs/);
+	assert.match(releaseResume ?? "", /existing GitHub Release metadata differs/);
+	assert.match(releaseResume ?? "", /existing GitHub Release asset set differs/);
 
 	for (const [name, workflow] of parsed)
 		for (const job of Object.values(workflow.jobs))
@@ -505,6 +540,9 @@ test("release workflows are valid npm-only gates", async () => {
 				name: "macos-arm64",
 				runner: ["self-hosted", "macOS", "ARM64", "docker-sandboxes", "ephemeral"],
 				platform: "linux/arm64",
+				"host-platform": "darwin",
+				"host-arch": "arm64",
+				"requires-kvm": false,
 			},
 			{
 				name: "ubuntu-amd64-kvm",
@@ -517,6 +555,9 @@ test("release workflows are valid npm-only gates", async () => {
 					"ephemeral",
 				],
 				platform: "linux/amd64",
+				"host-platform": "linux",
+				"host-arch": "x64",
+				"requires-kvm": true,
 			},
 			{
 				name: "ubuntu-arm64-kvm",
@@ -529,6 +570,9 @@ test("release workflows are valid npm-only gates", async () => {
 					"ephemeral",
 				],
 				platform: "linux/arm64",
+				"host-platform": "linux",
+				"host-arch": "arm64",
+				"requires-kvm": true,
 			},
 		],
 	});

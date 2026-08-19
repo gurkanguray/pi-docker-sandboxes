@@ -475,7 +475,11 @@ if (process.argv[2] === "install") {
 } else if (process.argv[2] === "remove") {
   rmSync(root, { recursive: true, force: true });
   writeFileSync(settings, JSON.stringify({ packages: [] }));
-} else console.log("--docker-sandbox --docker-sandbox-no-host-auth");
+} else {
+  if (process.argv.includes("--docker-sandbox"))
+    console.error("pi-dsbx: checking Docker Sandboxes");
+  console.log("--docker-sandbox --docker-sandbox-no-host-auth");
+}
 `,
 		);
 		await chmod(npm, 0o755);
@@ -498,18 +502,26 @@ if (process.argv[2] === "install") {
 		assert.equal(receipt.exactInstallSource, "npm:pi-docker-sandboxes@9.8.7");
 		assert.equal(receipt.packageRecordVerified, true);
 		assert.equal(receipt.extensionFlagsVerified, true);
+		assert.equal(receipt.extensionDispatchVerified, true);
+		assert.equal(receipt.launchPathVerified, true);
 		assert.equal(receipt.runtimeLaunches, 1);
 		assert.deepEqual(
 			receipt.commands.map(({ label }: { label: string }) => label),
 			[
 				"pi install exact npm version",
 				"pi extension launch",
-				"one exact runtime launch",
+				"installed Pi extension dispatch",
 				"pi remove exact npm version",
 				"pi reinstall exact npm version",
 				"pi final cleanup",
 			],
 		);
+		assert.deepEqual(receipt.commands[2].args, [
+			"--docker-sandbox",
+			"--docker-sandbox-no-host-auth",
+			"--yes",
+			"--help",
+		]);
 		assert.deepEqual(receipt.cleanup, {
 			packageRemoved: true,
 			packageRecordRemoved: true,
