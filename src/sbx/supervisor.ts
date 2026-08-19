@@ -63,7 +63,8 @@ export function superviseCommand(
 ): Promise<SupervisedCommandResult> {
 	positive(options.policy.timeoutMs, "timeoutMs");
 	positive(options.policy.killGraceMs, "killGraceMs");
-	if (options.maxBuffer !== undefined) nonnegative(options.maxBuffer, "maxBuffer");
+	if (options.maxBuffer !== undefined)
+		nonnegative(options.maxBuffer, "maxBuffer");
 	if (options.policy.signal?.aborted)
 		return Promise.reject(new CommandCancelledError(command));
 

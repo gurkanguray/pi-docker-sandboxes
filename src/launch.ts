@@ -684,7 +684,8 @@ async function launchWithLease(context: {
 				: [`sbx exec ${shellArg(name)} git status --porcelain=v1`];
 	const stateMarkFailures: unknown[] = [];
 	const interrupted = (cause: unknown): boolean =>
-		cause instanceof CommandTimeoutError || cause instanceof CommandCancelledError;
+		cause instanceof CommandTimeoutError ||
+		cause instanceof CommandCancelledError;
 	const persistFailedState = async (
 		category: "create" | "image" | "export" | "remove" | "reconcile",
 	): Promise<unknown | undefined> => {

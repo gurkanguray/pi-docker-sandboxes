@@ -1005,7 +1005,8 @@ test("timeout state-mark save failure preserves the timeout and runs staging cle
 	const timeout = new CommandTimeoutError("sbx", 100);
 	const subject = await runCase({
 		launchError: timeout,
-		saveStateErrorWhen: (state) => state.version === 2 && state.phase === "failed",
+		saveStateErrorWhen: (state) =>
+			state.version === 2 && state.phase === "failed",
 	});
 	await assert.rejects(subject.operation, (error: unknown) => {
 		assert.ok(error instanceof OperationError);
@@ -1044,7 +1045,10 @@ test("image inspection timeout retains its specific failed category", async () =
 		assert.ok(error.cause instanceof CommandTimeoutError);
 		return true;
 	});
-	const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+	const state = await loadSandboxState(
+		subject.fixture.root,
+		subject.fixture.name,
+	);
 	assert.equal(state.phase, "failed");
 	assert.equal(state.lastOperationError?.category, "image");
 });
@@ -1348,7 +1352,10 @@ test("managed backup timeout persists failed export custody state", async () => 
 		const result = await subject.operation;
 		assert.equal(result.agentExitCode, 0);
 		assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
-		const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+		const state = await loadSandboxState(
+			subject.fixture.root,
+			subject.fixture.name,
+		);
 		assert.equal(state.phase, "failed");
 		assert.equal(state.lastOperationError?.category, "export");
 	} finally {
