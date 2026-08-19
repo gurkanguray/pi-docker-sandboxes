@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "runtimeSchema": 1,
+  "runtimeRevision": 1,
+  "runtimeVersion": "runtime-1",
+  "piVersion": "0.84.1",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "build": {
+    "dockerfileFrontend": "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e",
+    "buildxVersion": "v0.33.0",
+    "buildkitDriver": "moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8",
+    "qemu": "tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
+    "skopeo": "quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+  },
+  "bases": {
+    "standard": "docker/sandbox-templates@sha256:c183a8ba03cdb30011c73f555c773c5712b84c6ea066f18409253dcab2cfe799",
+    "docker": "docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299"
+  },
+  "tools": {
+    "fd": {
+      "version": "10.3.0",
+      "artifacts": {
+        "amd64": {
+          "name": "fd-v10.3.0-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "c3c2bc79f838e780173fc8f18b337ec273e7ba17c7ff8f551be29fc3c19b7916"
+        },
+        "arm64": {
+          "name": "fd-v10.3.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "66f297e404400a3358e9a0c0b2f3f4725956e7e4435427a9ae56e22adbe73a68"
+        }
+      }
+    }
+  }
+}
