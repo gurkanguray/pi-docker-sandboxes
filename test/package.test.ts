@@ -221,6 +221,10 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 		const files = new Set(listing.trim().split("\n"));
 		assert.equal(files.has("package/docker/image-lock.json"), true);
 		assert.equal(files.has("package/docker/runtime-lock.json"), true);
+		assert.equal(
+			files.has("package/docker/runtime-release-lock.json"),
+			true,
+		);
 		assert.equal(files.has("package/docker/runtime-package.json"), true);
 		assert.equal(files.has("package/docker/runtime-package-lock.json"), true);
 		assert.equal(files.has("package/src/image-lock.ts"), true);

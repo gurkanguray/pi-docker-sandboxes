@@ -1,0 +1,137 @@
+name: Publish durable GitHub Release
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+      package_artifact:
+        required: true
+        type: string
+      candidate_artifact:
+        required: true
+        type: string
+      runtime_artifact:
+        required: true
+        type: string
+      public_install_artifact:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.package_artifact }}
+          path: release-assets/package
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: release-assets/candidate
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.runtime_artifact }}
+          path: release-assets/runtime
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.public_install_artifact }}
+          path: release-assets/public-install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: '*-e2e-${{ inputs.source_sha }}'
+          path: release-assets/e2e
+      - name: Verify signed tag and assemble durable release evidence
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --import docs/release-signing.asc
+          git verify-tag "$TAG"
+          test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA"
+          test -s release-assets/public-install/pi-install-receipt.json
+          find release-assets/e2e -mindepth 2 -type f -print0 |
+            while IFS= read -r -d '' file; do
+              artifact="$(basename "$(dirname "$file")")"
+              name="$(basename "$file")"
+              mv "$file" "$(dirname "$file")/$artifact-$name"
+            done
+          cp COMPATIBILITY.md release-assets/compatibility.md
+          cat > release-assets/rollback.md <<'EOF'
+          # Rollback
+
+          Published npm versions are immutable. Deprecate the affected version,
+          move `latest` to the reviewed replacement, and preserve all receipts.
+          Never overwrite a published package or replace the locked runtime
+          digest.
+          EOF
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const candidate = JSON.parse(await readFile(
+            "release-assets/candidate/release-candidate-receipt.json",
+          ));
+          const install = JSON.parse(await readFile(
+            "release-assets/public-install/pi-install-receipt.json",
+          ));
+          if (candidate.sourceSha !== process.env.SOURCE_SHA ||
+              candidate.tag !== process.env.TAG ||
+              candidate.e2eReceipts?.length !== 3 ||
+              install.actualPiInstall !== true ||
+              install.packageRecordVerified !== true ||
+              install.version !== candidate.version ||
+              install.integrity !== candidate.tarballIntegrity ||
+              install.runtimeLaunches !== 1 ||
+              !install.cleanup?.packageRemoved ||
+              !install.cleanup?.packageRecordRemoved ||
+              !install.cleanup?.prefixRemoved ||
+              !install.cleanup?.piHomeRemoved)
+            throw new Error("release evidence is incomplete");
+          await writeFile("release-assets/release-provenance.json",
+            `${JSON.stringify({
+              sourceSha: candidate.sourceSha,
+              tag: candidate.tag,
+              packageIntegrity: candidate.tarballIntegrity,
+              runtimeReference: candidate.runtimeReference,
+              packageProvenance: "npm-publish-oidc",
+              runtimeProvenance:
+                "runtime/runtime-provenance.json",
+            }, null, 2)}\n`);
+          NODE
+          find release-assets -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 sha256sum > release-assets/SHA256SUMS
+      - name: Create GitHub Release from the verified signed tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Stable production release $TAG.
+
+          Attached evidence includes package and runtime provenance, raw scans,
+          CycloneDX SBOMs, all three hardware E2E receipts, public Pi install
+          verification, compatibility, checksums, and rollback instructions.
+          EOF
+          mapfile -d '' assets < <(
+            find release-assets -type f -print0 | sort -z
+          )
+          gh release create "$TAG" --verify-tag --latest \
+            --title "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "${assets[@]}"

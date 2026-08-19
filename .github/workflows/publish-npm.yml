@@ -51,6 +51,7 @@ jobs:
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           tarball="$(node scripts/assert-one-tarball.mjs package)"
           node --input-type=module - "$tarball" <<'NODE'
+          import { createHash } from "node:crypto";
           import { execFileSync } from "node:child_process";
           import { readFileSync } from "node:fs";
           const tarball = process.argv[2];
@@ -61,15 +62,29 @@ jobs:
             readFileSync("package/package-verification.json"),
           );
           const pkg = JSON.parse(
-            execFileSync("npm", ["pack", "--dry-run", "--json", tarball]),
-          )[0];
+            execFileSync("tar", ["-xOf", tarball, "package/package.json"]),
+          );
+          const integrity = `sha512-${createHash("sha512")
+            .update(readFileSync(tarball)).digest("base64")}`;
+          const hardware = new Set(
+            (receipt.e2eReceipts ?? []).map(({ host }) => host),
+          );
           if (receipt.sourceSha !== process.env.SOURCE_SHA ||
               receipt.tag !== process.env.TAG ||
               verification.binVersion !== pkg.version ||
               receipt.version !== pkg.version ||
               receipt.tag !== `v${pkg.version}` ||
-              receipt.e2eReceipt?.status !== "passed" ||
-              receipt.e2eReceipt?.packageVersion !== pkg.version ||
+              integrity !== verification.integrity ||
+              receipt.e2eReceipts?.length !== 3 ||
+              !["macos-arm64", "ubuntu-amd64-kvm", "ubuntu-arm64-kvm"]
+                .every((host) => hardware.has(host)) ||
+              receipt.e2eReceipts.some((item) =>
+                item.status !== "passed" || !item.passedAt ||
+                item.packageVersion !== pkg.version ||
+                item.cleanup?.status !== "passed" ||
+                item.cleanup?.homeRemoved !== true) ||
+              receipt.runtimeReceipt?.variant !== "standard" ||
+              receipt.runtimeReceipt?.indexDigest !== receipt.imageDigest ||
               receipt.freshInstallReceipt?.sourceSha !==
                 process.env.SOURCE_SHA ||
               receipt.freshInstallReceipt?.version !== pkg.version ||
@@ -79,7 +94,7 @@ jobs:
               !receipt.freshInstallReceipt?.cleanup?.prefixRemoved ||
               !receipt.freshInstallReceipt?.cleanup?.piHomeRemoved ||
               receipt.tarballIntegrity !== verification.integrity ||
-              receipt.tarballIntegrity !== pkg.integrity ||
+              receipt.tarballIntegrity !== integrity ||
               pkg.version.includes("-"))
             throw new Error("npm candidate receipt is invalid");
           NODE

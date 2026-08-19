@@ -8,6 +8,7 @@ const workflows = new URL("../.github/workflows/", import.meta.url);
 type Step = {
 	id?: string;
 	name?: string;
+	env?: Record<string, unknown>;
 	uses?: string;
 	run?: string;
 	with?: Record<string, unknown>;
@@ -92,7 +93,13 @@ test("release workflows are valid npm-only gates", async () => {
 		"utf8",
 	);
 	const release = parsed.get("release-candidate.yml")!;
-	assert.equal(release.jobs.security.permissions?.["security-events"], "write");
+	assert.equal(release.jobs.security, undefined);
+	assert.deepEqual(release.jobs["runtime-evidence"].permissions, {
+		actions: "read",
+		attestations: "read",
+		contents: "read",
+		packages: "read",
+	});
 	assert.deepEqual(release.jobs["publish-npm"].needs, ["metadata", "receipt"]);
 	assert.equal(release.jobs["publish-npm"].permissions?.["id-token"], "write");
 	assert.equal(
@@ -127,15 +134,17 @@ test("release workflows are valid npm-only gates", async () => {
 	await assert.rejects(access(new URL("publish-image.yml", workflows)));
 
 	const e2e = await readFile(new URL("e2e.yml", workflows), "utf8");
-	assert.match(e2e, /expected_artifact="oci-candidate-\$SOURCE_SHA"/);
-	assert.match(e2e, /image-verification\.json/);
+	assert.match(e2e, /production-runtime-\$SOURCE_SHA/);
+	assert.match(e2e, /runtime-image-receipt\.json/);
+	assert.match(e2e, /docker pull --platform "\$PLATFORM" "\$RUNTIME_REFERENCE"/);
+	assert.doesNotMatch(e2e, /candidate-image\.oci\.tar/);
 	assert.match(e2e, /PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID/);
 	const imageRun = parsed
 		.get("e2e.yml")!
 		.jobs["hardware-e2e"]!.steps?.find(
-			(step) => step.name === "Load and bind the exact OCI candidate",
+			(step) => step.name === "Pull and bind the exact published standard runtime",
 		)?.run;
-	assert.ok(imageRun, "E2E image binding step must be executable");
+	assert.ok(imageRun, "E2E runtime binding step must be executable");
 	assert.match(
 		imageRun,
 		/const matches = \(templates\.images \?\? \[\]\)\.filter\(/,
@@ -205,10 +214,14 @@ test("release workflows are valid npm-only gates", async () => {
 		),
 		64,
 	);
-	for (const exception of policy.vulnerabilities) {
-		assert.match(exception.statement, /upstream Docker-owned/);
-		assert.match(exception.statement, /@sha256:[0-9a-f]{64}/);
-		assert.match(exception.statement, /reviewed 2026-08-17/);
+	for (const exception of policy.vulnerabilities as Array<any>) {
+		assert.equal(exception.variant, "docker");
+		assert.ok(exception.reachability);
+		assert.ok(exception.controls.length);
+		assert.ok(exception.owner);
+		assert.match(exception.upstream, /^https:\/\//);
+		assert.match(exception.expiry, /^\d{4}-\d{2}-\d{2}$/);
+		assert.match(exception.nextReview, /^\d{4}-\d{2}-\d{2}$/);
 	}
 	for (const jobName of ["image", "candidate-image"]) {
 		const validation = parsed
@@ -237,7 +250,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"${{ inputs.source_sha }}",
 	);
 	const publish = await readFile(new URL("publish-npm.yml", workflows), "utf8");
-	assert.match(publish, /freshInstallReceipt\?\.sourceSha/);
+	assert.match(publish, /receipt\.e2eReceipts\?\.length !== 3/);
+	assert.doesNotMatch(publish, /npm\W+pack/);
 	const publishSteps = parsed.get("publish-npm.yml")!.jobs.publish.steps ?? [];
 	const verifyIndex = publishSteps.findIndex(
 		(step) =>
@@ -261,7 +275,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"receipt.version !== pkg.version",
 		"receipt.tag !== `v${pkg.version}`",
 		"receipt.freshInstallReceipt?.version !== pkg.version",
-		"receipt.e2eReceipt?.packageVersion !== pkg.version",
+		"receipt.e2eReceipts?.length !== 3",
+		"receipt.runtimeReceipt?.variant !== \"standard\"",
 	])
 		assert.ok(
 			verifyRun.includes(check),
@@ -276,7 +291,7 @@ test("release workflows are valid npm-only gates", async () => {
 		"packageReceipt.binVersion !== expected.VERSION",
 		"freshInstallReceipt.version !== expected.VERSION",
 		"e2eReceipt.packageVersion !== expected.VERSION",
-		'imageLock.piVersion !== "0.84.1"',
+		"runtimeReceipt.variant !== \"standard\"",
 		"e2e.piVersion !== imageLock.piVersion",
 		"e2e.imageLockPiVersion !== imageLock.piVersion",
 	])
@@ -286,18 +301,38 @@ test("release workflows are valid npm-only gates", async () => {
 		);
 
 	const publication = release.jobs["verify-publication"];
-	assert.deepEqual(publication.needs, ["metadata", "publish-npm"]);
+	assert.deepEqual(publication.needs, [
+		"metadata",
+		"publish-npm",
+		"runtime-evidence",
+	]);
 	const publicationRun = publication.steps?.find(
-		(step) => step.name === "Verify npm and Pi package gallery availability",
+		(step) => step.name === "Verify actual isolated Pi install and gallery availability",
 	)?.run;
 	assert.ok(publicationRun, "publication verification must be executable");
 	assert.match(publicationRun, /npm view "pi-docker-sandboxes" version/);
-	assert.match(publicationRun, /npm install[^\n]*"pi-docker-sandboxes"/);
+	assert.match(publicationRun, /--published "\$VERSION"/);
+	assert.match(publicationRun, /actualPiInstall/);
+	assert.match(publicationRun, /packageRecordVerified/);
+	assert.match(publicationRun, /runtimeLaunches !== 1/);
 	assert.match(
 		publicationRun,
 		/https:\/\/pi\.dev\/packages\/pi-docker-sandboxes/,
 	);
-	assert.match(publicationRun, /grep -F "\$VERSION"/);
+	assert.equal(release.jobs["publish-release"].permissions?.contents, "write");
+	assert.deepEqual(release.jobs["deprecate-bootstrap"].permissions, {
+		contents: "read",
+	});
+	assert.equal(
+		release.jobs["deprecate-bootstrap"].steps?.at(-1)?.env?.NODE_AUTH_TOKEN,
+		"${{ secrets.NPM_DEPRECATE_TOKEN }}",
+	);
+	const durable = parsed.get("publish-release.yml")!;
+	assert.deepEqual(durable.permissions, { contents: "read" });
+	assert.deepEqual(durable.jobs.release.permissions, {
+		actions: "read",
+		contents: "write",
+	});
 
 	for (const [name, workflow] of parsed)
 		for (const job of Object.values(workflow.jobs))
@@ -504,7 +539,7 @@ test("release workflows are valid npm-only gates", async () => {
 		/sandbox-runtime-receipt\.json/,
 		/cleanup-receipt\.json/,
 		/npm-package-\$SOURCE_SHA/,
-		/oci-candidate-\$SOURCE_SHA/,
+		/production-runtime-\$SOURCE_SHA/,
 	])
 		assert.match(e2e, evidence);
 	assert.doesNotMatch(e2e, /continue-on-error:\s*true/);
@@ -536,12 +571,10 @@ test("release workflows are valid npm-only gates", async () => {
 		/test "\$sha" = "\$\(git rev-parse refs\/remotes\/origin\/main\)"/,
 	);
 	assert.match(releaseText, /docker\/image-lock\.json/);
-	assert.match(releaseText, /--all "docker:\/\/\$RUNTIME_REFERENCE"/);
-	assert.doesNotMatch(
-		release.jobs["image-candidate"].steps?.map((step) => step.uses).join("\n") ??
-			"",
-		/docker\/build-push-action/,
-	);
+	assert.match(releaseText, /verify-production-runtime\.mjs/);
+	assert.match(releaseText, /gh attestation verify/);
+	assert.doesNotMatch(releaseText, /candidate-image\.oci\.tar/);
+	assert.doesNotMatch(releaseText, /docker\/build-push-action/);
 	for (const artifact of ["macos-arm64", "ubuntu-amd64-kvm", "ubuntu-arm64-kvm"])
 		assert.match(releaseText, new RegExp(`${artifact}-e2e-`));
 

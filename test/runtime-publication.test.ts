@@ -13,6 +13,8 @@ import { verifyRuntimeEnvironment } from "../scripts/verify-runtime-environment.
 // @ts-expect-error executable script module has no declaration file
 import { validatePlatformEvidenceDocuments } from "../scripts/runtime-platform-evidence.mjs";
 // @ts-expect-error executable script module has no declaration file
+import { verifyProductionRuntime } from "../scripts/verify-production-runtime.mjs";
+// @ts-expect-error executable script module has no declaration file
 const verifierModule = await import("../scripts/verify-runtime-image.mjs");
 const {
 	readDescriptor,
@@ -25,6 +27,57 @@ const sha = (value: string) =>
 	`sha256:${createHash("sha256").update(value).digest("hex")}`;
 const digestA = `sha256:${"a".repeat(64)}`;
 const digestB = `sha256:${"b".repeat(64)}`;
+
+test("production release runtime requires immutable receipt-bound raw zero scans", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "production-runtime-"));
+	try {
+		const evidence = join(directory, "evidence");
+		await import("node:fs/promises").then(({ mkdir }) => mkdir(evidence));
+		const scans: Record<string, { name: string; sha256: string }> = {};
+		const sbom: Record<string, { name: string; sha256: string }> = {};
+		for (const arch of ["amd64", "arm64"]) {
+			const scanName = `runtime-standard-${arch}.sarif`;
+			const sbomName = `runtime-standard-${arch}.cdx.json`;
+			const scan = JSON.stringify({ version: "2.1.0", runs: [{ results: [] }] });
+			const bom = JSON.stringify({ bomFormat: "CycloneDX" });
+			await writeFile(join(evidence, scanName), scan);
+			await writeFile(join(evidence, sbomName), bom);
+			scans[`linux/${arch}`] = { name: scanName, sha256: sha(scan) };
+			sbom[`linux/${arch}`] = { name: sbomName, sha256: sha(bom) };
+		}
+		const lockPath = join(directory, "image-lock.json");
+		const releaseLockPath = join(directory, "runtime-release-lock.json");
+		const receiptPath = join(directory, "runtime-image-receipt.json");
+		const reference = `ghcr.io/example/runtime@${digestA}`;
+		await writeFile(lockPath, JSON.stringify({ images: { standard: {
+			status: "published", reference,
+			platforms: ["linux/amd64", "linux/arm64"], privileged: false,
+		} } }));
+		await writeFile(releaseLockPath, JSON.stringify({
+			version: 1, runId: 123, runAttempt: 1, sourceSha: "c".repeat(40),
+			receiptArtifact: "receipt-123-1",
+			securityArtifacts: [
+				"security-amd64-standard-123-1",
+				"security-arm64-standard-123-1",
+			],
+		}));
+		const receipt = { schemaVersion: 1, variant: "standard",
+			indexDigest: digestA, candidateReference: reference,
+			sourceSha: "c".repeat(40), platforms: ["linux/amd64", "linux/arm64"],
+			scans, sbom };
+		await writeFile(receiptPath, JSON.stringify(receipt));
+		await assert.doesNotReject(verifyProductionRuntime({ imageLockPath: lockPath,
+			releaseLockPath, receiptPath, evidenceDirectory: evidence }));
+		const failed = structuredClone(receipt);
+		await writeFile(join(evidence, failed.scans["linux/amd64"].name),
+			JSON.stringify({ version: "2.1.0", runs: [{ results: [{ ruleId: "CVE" }] }] }));
+		await assert.rejects(verifyProductionRuntime({ imageLockPath: lockPath,
+			releaseLockPath, receiptPath, evidenceDirectory: evidence }),
+			/digest mismatch|raw scan/);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
 
 test("runtime lock is authoritative and every registry tarball has integrity", async () => {
 	const lock = await loadRuntimeLock("docker/runtime-lock.json");

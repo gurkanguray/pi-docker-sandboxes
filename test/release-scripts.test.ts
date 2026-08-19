@@ -132,9 +132,34 @@ async function fixture(fixtureVersion = version): Promise<string> {
 	await writeFile(
 		join(directory, "docker", "image-lock.json"),
 		JSON.stringify({
-			packageVersion: fixtureVersion,
 			piVersion,
-			baseImage,
+			images: {
+				standard: {
+					status: "published",
+					reference: `ghcr.io/example/runtime@sha256:${"a".repeat(64)}`,
+					platforms: ["linux/amd64", "linux/arm64"],
+					privileged: false,
+				},
+				docker: { status: "unpublished" },
+			},
+		}),
+	);
+	await writeFile(
+		join(directory, "docker", "runtime-lock.json"),
+		JSON.stringify({ bases: { docker: baseImage } }),
+	);
+	await writeFile(
+		join(directory, "docker", "runtime-release-lock.json"),
+		JSON.stringify({
+			version: 1,
+			runId: 123,
+			runAttempt: 1,
+			sourceSha: "b".repeat(40),
+			receiptArtifact: "receipt-123-1",
+			securityArtifacts: [
+				"security-amd64-standard-123-1",
+				"security-arm64-standard-123-1",
+			],
 		}),
 	);
 	await writeFile(
@@ -229,6 +254,15 @@ async function signedTag(
 			?.split(":")[9];
 		assert.ok(fingerprint, "throwaway GPG key must have a fingerprint");
 		await git(directory, ["config", "user.signingkey", fingerprint], env);
+		const { stdout: publicKey } = await exec(
+			"gpg",
+			["--batch", "--armor", "--export", fingerprint],
+			{ env },
+		);
+		await mkdir(join(directory, "docs"), { recursive: true });
+		await writeFile(join(directory, "docs", "release-signing.asc"), publicKey);
+		await git(directory, ["add", "docs/release-signing.asc"], env);
+		await git(directory, ["commit", "--quiet", "-m", "release key"], env);
 		await git(directory, ["tag", "-s", tag, "-m", tag], env);
 		await exec("git", ["tag", "-v", tag], { cwd: directory, env });
 		return {
@@ -411,6 +445,67 @@ test("package verifier installs, runs the CLI, and writes a JSON receipt", () =>
 		assert.match(receipt.installRoot, /pi-dsbx-package-verify-/);
 	}));
 
+test("published smoke uses exact Pi install, remove, reinstall, and cleanup", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-published-smoke-"));
+	const npm = join(directory, "npm");
+	const pi = join(directory, "pi");
+	try {
+		await writeFile(npm, `#!/bin/sh
+printf '%s\\n' '[{"name":"pi-docker-sandboxes","version":"9.8.7","integrity":"sha512-test"}]'
+`);
+		await writeFile(pi, `#!/usr/bin/env node
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+const root = join(agentDir, "npm", "node_modules", "pi-docker-sandboxes");
+const settings = join(agentDir, "settings.json");
+if (process.argv[2] === "install") {
+  mkdirSync(join(root, "extensions", "fixture"), { recursive: true });
+  mkdirSync(join(root, "dist", "sbx"), { recursive: true });
+  writeFileSync(join(root, "extensions", "fixture", "index.js"), "export default {};");
+  writeFileSync(join(root, "dist", "launch.js"), "export async function launch() { return { agentExitCode: 0, custody: 'released' }; }");
+  writeFileSync(join(root, "dist", "sbx", "client.js"), "export class SbxClient {}");
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pi-docker-sandboxes", version: "9.8.7", type: "module", pi: { extensions: ["extensions/fixture/index.js"] } }));
+  writeFileSync(settings, JSON.stringify({ packages: [process.argv[3]] }));
+} else if (process.argv[2] === "remove") {
+  rmSync(root, { recursive: true, force: true });
+  writeFileSync(settings, JSON.stringify({ packages: [] }));
+} else console.log("--docker-sandbox --docker-sandbox-no-host-auth");
+`);
+		await chmod(npm, 0o755);
+		await chmod(pi, 0o755);
+		const { stdout } = await exec(
+			process.execPath,
+			[freshInstallSmoke.pathname, "--published", "9.8.7"],
+			{ env: {
+				...process.env,
+				PATH: `${directory}:${process.env.PATH}`,
+				PI_COMMAND: pi,
+				PI_RELEASE_RUNTIME_IMAGE: `docker.io/example/runtime@sha256:${"a".repeat(64)}`,
+				PI_RELEASE_TEMPLATE_STORE_ID: "abcdef123456",
+			} },
+		);
+		const receipt = JSON.parse(stdout.trim().split("\n").at(-1)!);
+		assert.equal(receipt.actualPiInstall, true);
+		assert.equal(receipt.exactInstallSource, "npm:pi-docker-sandboxes@9.8.7");
+		assert.equal(receipt.packageRecordVerified, true);
+		assert.equal(receipt.extensionFlagsVerified, true);
+		assert.equal(receipt.runtimeLaunches, 1);
+		assert.deepEqual(receipt.commands.map(({ label }: { label: string }) => label), [
+			"pi install exact npm version", "pi extension launch",
+			"one exact runtime launch", "pi remove exact npm version",
+			"pi reinstall exact npm version",
+			"pi final cleanup",
+		]);
+		assert.deepEqual(receipt.cleanup, {
+			packageRemoved: true, packageRecordRemoved: true,
+			prefixRemoved: true, piHomeRemoved: true,
+		});
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
+});
+
 test("fresh install smoke records signal failures as nonzero", async () => {
 	// @ts-expect-error The release script is plain JavaScript without declarations.
 	const { runCommand } = await import("../scripts/fresh-install-smoke.mjs");
@@ -514,6 +609,7 @@ if (command === "doctor") process.exitCode = 1;
 		assert.equal(stdout.includes("must-not-reach-smoke"), false);
 		assert.deepEqual(receipt.cleanup, {
 			packageRemoved: true,
+			packageRecordRemoved: true,
 			prefixRemoved: true,
 			piHomeRemoved: true,
 		});
@@ -634,41 +730,42 @@ test("rejects a changelog without the package version and date", () =>
 		assert.match(result.stderr, /CHANGELOG.*date/i);
 	}));
 
-test("rejects image-lock package and Pi version mismatches", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, "docker", "image-lock.json");
-		for (const [field, value, message] of [
-			["packageVersion", "1.2.4", /image lock package.*1\.2\.3/i],
-			["piVersion", "0.83.0", /image lock Pi.*0\.84\.1/i],
-		] as const) {
+test("rejects image-lock Pi version and mutable standard runtime", async () => {
+	for (const mutate of [
+		(lock: any) => { lock.piVersion = "0.83.0"; },
+		(lock: any) => { lock.images.standard.reference = "ghcr.io/example/runtime:latest"; },
+	])
+		await withFixture(async (directory) => {
+			const path = join(directory, "docker", "image-lock.json");
 			const lock = JSON.parse(await readFile(path, "utf8"));
-			lock.packageVersion = version;
-			lock.piVersion = piVersion;
-			lock[field] = value;
+			mutate(lock);
 			await writeFile(path, JSON.stringify(lock));
 			await git(directory, ["add", path]);
-			await git(directory, ["commit", "--quiet", "-m", `bad ${field}`]);
+			await git(directory, ["commit", "--quiet", "-m", "bad runtime lock"]);
 			const result = await run(directory);
 			assert.equal(result.code, 1);
-			assert.match(result.stderr, message);
-		}
-	}));
+			assert.match(result.stderr, /image lock Pi|immutable GHCR digest/i);
+		});
+});
 
-test("rejects Trivy exceptions not bound to the locked base image", () =>
-	withFixture(async (directory) => {
-		const path = join(directory, ".trivyignore.yaml");
-		const policy = JSON.parse(await readFile(path, "utf8"));
-		policy.vulnerabilities[0].statement = policy.vulnerabilities[0].statement.replace(
-			baseImage,
-			`docker/sandbox-templates@sha256:${"b".repeat(64)}`,
-		);
-		await writeFile(path, JSON.stringify(policy));
-		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "wrong policy digest"]);
-		const result = await run(directory);
-		assert.equal(result.code, 1);
-		assert.match(result.stderr, /Trivy exception.*base image/i);
-	}));
+test("rejects incomplete or standard-authorizing CVE risk records", async () => {
+	for (const mutate of [
+		(record: any) => { delete record.owner; },
+		(record: any) => { record.variant = "standard"; },
+		(record: any) => { record.expiry = "2026-08-18"; },
+	])
+		await withFixture(async (directory) => {
+			const path = join(directory, ".trivyignore.yaml");
+			const policy = JSON.parse(await readFile(path, "utf8"));
+			mutate(policy.vulnerabilities[0]);
+			await writeFile(path, JSON.stringify(policy));
+			await git(directory, ["add", path]);
+			await git(directory, ["commit", "--quiet", "-m", "bad risk record"]);
+			const result = await run(directory);
+			assert.equal(result.code, 1);
+			assert.match(result.stderr, /risk record|standard runtime|expired/i);
+		});
+});
 
 test("rejects broad Trivy exception paths", () =>
 	withFixture(async (directory) => {
@@ -685,58 +782,17 @@ test("rejects broad Trivy exception paths", () =>
 		}
 	}));
 
-test("rejects Trivy exceptions without a review date", () =>
+test("rejects overdue CVE next review", () =>
 	withFixture(async (directory) => {
 		const path = join(directory, ".trivyignore.yaml");
 		const policy = JSON.parse(await readFile(path, "utf8"));
-		policy.vulnerabilities[0].statement = `Inherited upstream Docker-owned binary from ${baseImage}.`;
+		policy.vulnerabilities[0].nextReview = "2026-08-18";
 		await writeFile(path, JSON.stringify(policy));
 		await git(directory, ["add", path]);
-		await git(directory, ["commit", "--quiet", "-m", "missing review date"]);
+		await git(directory, ["commit", "--quiet", "-m", "overdue review"]);
 		const result = await run(directory);
 		assert.equal(result.code, 1);
-		assert.match(result.stderr, /Trivy exception.*review date/i);
-	}));
-
-test("rejects substituted or added Trivy exception pairs", async () => {
-	for (const mutate of [
-		(policy: { vulnerabilities: Array<{ paths: string[] }> }) => {
-			policy.vulnerabilities[0]!.paths[0] = "usr/bin/not-approved";
-		},
-		(policy: { vulnerabilities: Array<{ paths: string[] }> }) => {
-			policy.vulnerabilities[0]!.paths.push("usr/bin/not-approved");
-		},
-	])
-		await withFixture(async (directory) => {
-			const path = join(directory, ".trivyignore.yaml");
-			const policy = JSON.parse(await readFile(path, "utf8"));
-			mutate(policy);
-			await writeFile(path, JSON.stringify(policy));
-			await git(directory, ["add", path]);
-			await git(directory, ["commit", "--quiet", "-m", "changed policy pair"]);
-			const result = await run(directory);
-			assert.equal(result.code, 1);
-			assert.match(result.stderr, /approved Trivy policy/i);
-		});
-});
-
-test("rejects coordinated base-image and policy changes", () =>
-	withFixture(async (directory) => {
-		const nextBase = `docker/sandbox-templates@sha256:${"b".repeat(64)}`;
-		const lockPath = join(directory, "docker", "image-lock.json");
-		const policyPath = join(directory, ".trivyignore.yaml");
-		const lock = JSON.parse(await readFile(lockPath, "utf8"));
-		lock.baseImage = nextBase;
-		const policy = JSON.parse(await readFile(policyPath, "utf8"));
-		for (const exception of policy.vulnerabilities)
-			exception.statement = exception.statement.replace(baseImage, nextBase);
-		await writeFile(lockPath, JSON.stringify(lock));
-		await writeFile(policyPath, JSON.stringify(policy));
-		await git(directory, ["add", lockPath, policyPath]);
-		await git(directory, ["commit", "--quiet", "-m", "changed base policy"]);
-		const result = await run(directory);
-		assert.equal(result.code, 1);
-		assert.match(result.stderr, /approved base image/i);
+		assert.match(result.stderr, /overdue next review/i);
 	}));
 
 test("rejects a dirty tracked worktree", () =>
@@ -755,7 +811,7 @@ test("release mode rejects an unsigned tag", () =>
 		await git(directory, ["tag", `v${version}`]);
 		const result = await run(directory, ["--tag", `v${version}`]);
 		assert.equal(result.code, 1);
-		assert.match(result.stderr, /git tag -v/);
+		assert.match(result.stderr, /release signing key|git tag -v/i);
 	}));
 
 test("release check never executes a repository fsmonitor", () =>
@@ -831,7 +887,7 @@ test("succeeds without mutating tracked fixture files", () =>
 		const result = await run(directory);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /✓ tag\/version:/);
-		assert.match(result.stdout, /✓ Trivy exceptions: 12 CVEs \/ 64 scoped paths/);
+		assert.match(result.stdout, /✓ legacy-only CVE risk records: 12 CVEs \/ 64 scoped paths/);
 		const receipt = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
 		assert.deepEqual(Object.keys(receipt), [
 			"tag",

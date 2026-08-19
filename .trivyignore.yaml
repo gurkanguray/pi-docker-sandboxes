@@ -2,6 +2,16 @@
   "vulnerabilities": [
     {
       "id": "CVE-2026-33818",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-33818",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -11,18 +21,38 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-34040",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-34040",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/libexec/docker/cli-plugins/docker-buildx",
         "usr/libexec/docker/cli-plugins/docker-compose"
       ],
-      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-39821",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-39821",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -32,34 +62,74 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-39822",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-39822",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-41567",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-41567",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/libexec/docker/cli-plugins/docker-buildx",
         "usr/libexec/docker/cli-plugins/docker-compose"
       ],
-      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-42306",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-42306",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/libexec/docker/cli-plugins/docker-buildx",
         "usr/libexec/docker/cli-plugins/docker-compose"
       ],
-      "statement": "Inherited upstream Docker-owned github.com/docker/docker binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-46600",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-46600",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -69,10 +139,20 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-56853",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-56853",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -82,10 +162,20 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-56858",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-56858",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -95,10 +185,20 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-56859",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-56859",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -108,10 +208,20 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-56860",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-56860",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -121,10 +231,20 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     },
     {
       "id": "CVE-2026-56862",
+      "variant": "docker",
+      "reachability": "Legacy Docker variant only; absent from standard.",
+      "controls": [
+        "Standard is the only published production runtime.",
+        "Docker variant is release-blocked."
+      ],
+      "owner": "Pi Docker Sandboxes maintainers",
+      "upstream": "https://nvd.nist.gov/vuln/detail/CVE-2026-56862",
+      "expiry": "2026-11-19",
+      "nextReview": "2026-09-19",
       "paths": [
         "usr/bin/docker",
         "usr/bin/docker-proxy",
@@ -134,7 +254,7 @@
         "usr/libexec/docker/cli-plugins/docker-compose",
         "usr/local/bin/clipboard-bridge"
       ],
-      "statement": "Inherited upstream Docker-owned Go stdlib binaries from docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299; reviewed 2026-08-17."
+      "statement": "Inherited upstream Docker-owned component."
     }
   ]
 }

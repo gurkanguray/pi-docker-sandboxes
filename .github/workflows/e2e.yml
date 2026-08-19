@@ -10,8 +10,12 @@ on:
         description: Artifact containing the verified npm tarball and receipt
         required: true
         type: string
-      image_artifact:
-        description: Artifact containing the exact OCI candidate archive
+      runtime_artifact:
+        description: Artifact containing verified production runtime receipts
+        required: true
+        type: string
+      runtime_reference:
+        description: Exact public standard runtime digest reference
         required: true
         type: string
       image_digest:
@@ -28,8 +32,12 @@ on:
         description: Artifact name, normally npm-package-<source_sha>
         required: true
         type: string
-      image_artifact:
-        description: Artifact containing the exact OCI candidate archive
+      runtime_artifact:
+        description: Artifact containing verified production runtime receipts
+        required: true
+        type: string
+      runtime_reference:
+        description: Exact public standard runtime digest reference
         required: true
         type: string
       image_digest:
@@ -116,66 +124,54 @@ jobs:
           path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
           github-token: ${{ github.token }}
           run-id: ${{ inputs.run_id }}
-      - name: Download called-workflow OCI candidate
+      - name: Download called-workflow production runtime evidence
         if: github.event_name != 'workflow_dispatch'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.image_artifact }}
-          path: ${{ runner.temp }}/pi-dsbx-e2e-image
-      - name: Download dispatched OCI candidate
+          name: ${{ inputs.runtime_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-runtime
+      - name: Download dispatched production runtime evidence
         if: github.event_name == 'workflow_dispatch'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.image_artifact }}
-          path: ${{ runner.temp }}/pi-dsbx-e2e-image
+          name: ${{ inputs.runtime_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-runtime
           github-token: ${{ github.token }}
           run-id: ${{ inputs.run_id }}
-      - name: Load and bind the exact OCI candidate
+      - name: Pull and bind the exact published standard runtime
         id: image
         env:
           EXPECTED_DIGEST: ${{ inputs.image_digest }}
-          IMAGE_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-image
-          IMAGE_ARTIFACT_NAME: ${{ inputs.image_artifact }}
+          RUNTIME_ARTIFACT_NAME: ${{ inputs.runtime_artifact }}
+          RUNTIME_EVIDENCE: ${{ runner.temp }}/pi-dsbx-e2e-runtime
+          RUNTIME_REFERENCE: ${{ inputs.runtime_reference }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          expected_artifact="oci-candidate-$SOURCE_SHA"
-          test "$IMAGE_ARTIFACT_NAME" = "$expected_artifact"
-          archive="$IMAGE_ARTIFACT/candidate-image.oci.tar"
-          receipt="$IMAGE_ARTIFACT/image-verification.json"
-          test -s "$archive"
+          test "$RUNTIME_ARTIFACT_NAME" = "production-runtime-$SOURCE_SHA"
+          test "$RUNTIME_REFERENCE" = "${RUNTIME_REFERENCE%@*}@$EXPECTED_DIGEST"
+          receipt="$RUNTIME_EVIDENCE/runtime-image-receipt.json"
           test -s "$receipt"
-          mkdir "$IMAGE_ARTIFACT/oci"
-          tar -xf "$archive" -C "$IMAGE_ARTIFACT/oci" index.json
-          actual="$(node -p \
-            'require(process.argv[1]).manifests[0].digest' \
-            "$IMAGE_ARTIFACT/oci/index.json")"
-          test "$actual" = "$EXPECTED_DIGEST"
           node --input-type=module - "$receipt" <<'NODE'
           import { readFile } from "node:fs/promises";
           const receipt = JSON.parse(await readFile(process.argv[2]));
-          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
-              receipt.ociDigest !== process.env.EXPECTED_DIGEST)
-            throw new Error("candidate image receipt mismatch");
+          if (receipt.variant !== "standard" ||
+              receipt.indexDigest !== process.env.EXPECTED_DIGEST ||
+              receipt.candidateReference !== process.env.RUNTIME_REFERENCE)
+            throw new Error("published runtime receipt mismatch");
           NODE
-          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
-          architecture="${PLATFORM#linux/}"
-          docker run --rm --volume "$IMAGE_ARTIFACT:/candidate:ro" \
-            --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
-            --override-os linux --override-arch "$architecture" \
-            oci-archive:/candidate/candidate-image.oci.tar:candidate \
-            "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
-          image_id="$(docker image inspect "pi-docker-sandboxes:$SOURCE_SHA" \
+          docker pull --platform "$PLATFORM" "$RUNTIME_REFERENCE"
+          image_id="$(docker image inspect "$RUNTIME_REFERENCE" \
             --format '{{.Id}}')"
           content="${image_id#sha256:}"
           selected="docker.io/pi-docker-sandboxes/pi:local-$content"
           docker tag "$image_id" "$selected"
-          docker save --output "$IMAGE_ARTIFACT/sbx-candidate.tar" "$selected"
-          sbx template load "$IMAGE_ARTIFACT/sbx-candidate.tar"
-          sbx template ls --json > "$IMAGE_ARTIFACT/templates.json"
+          docker save --output "$RUNTIME_EVIDENCE/sbx-runtime.tar" "$selected"
+          sbx template load "$RUNTIME_EVIDENCE/sbx-runtime.tar"
+          sbx template ls --json > "$RUNTIME_EVIDENCE/templates.json"
           template_store_id="$(node --input-type=module - \
-            "$IMAGE_ARTIFACT/templates.json" "$selected" <<'NODE'
+            "$RUNTIME_EVIDENCE/templates.json" "$selected" <<'NODE'
           import { readFile } from "node:fs/promises";
           const [path, selected] = process.argv.slice(2);
           const separator = selected.lastIndexOf(":");
@@ -191,7 +187,7 @@ jobs:
           NODE
           )"
           {
-            echo "candidate_digest=$actual"
+            echo "candidate_digest=$EXPECTED_DIGEST"
             echo "selected_image=$selected"
             echo "selected_image_id=$image_id"
             echo "template_store_id=$template_store_id"

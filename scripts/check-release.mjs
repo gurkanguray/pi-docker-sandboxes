@@ -1,13 +1,8 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
-const APPROVED_BASE_IMAGE =
-	"docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299";
-const APPROVED_TRIVY_POLICY_SHA256 =
-	"3eaef1efc293ef48b66b6d930e19d285fa67f141e0f44e39a32bf7213a65cc50";
 const exec = promisify(execFile);
 const root = process.cwd();
 const SAFE_GIT_ARGS = [
@@ -71,6 +66,8 @@ try {
 		pkg,
 		packageLock,
 		imageLock,
+		runtimeLock,
+		runtimeReleaseLock,
 		trivyPolicyText,
 		changelogText,
 		compatibility,
@@ -78,6 +75,8 @@ try {
 		json("package.json"),
 		json("package-lock.json"),
 		json("docker/image-lock.json"),
+		json("docker/runtime-lock.json"),
+		json("docker/runtime-release-lock.json"),
 		readFile(`${root}/.trivyignore.yaml`, "utf8"),
 		readFile(`${root}/CHANGELOG.md`, "utf8"),
 		readFile(`${root}/COMPATIBILITY.md`, "utf8"),
@@ -119,23 +118,46 @@ try {
 	const changelog = `${pkg.version} — ${heading[1]}`;
 	console.log(`✓ changelog: ${changelog}`);
 
-	if (imageLock.packageVersion !== pkg.version)
-		fail(`Image lock package version must match ${pkg.version}`);
 	if (imageLock.piVersion !== piVersion)
 		fail(`Image lock Pi version must match ${piVersion}`);
 	if (
 		!new RegExp(
-			`^\\|\\s*Pi\\s*\\|\\s*${escapeRegExp(piVersion)}\\s*\\|`,
+			`^\\|\\s*(?:Host\\s+)?Pi\\s*\\|\\s*${escapeRegExp(piVersion)}\\s*\\|`,
 			"m",
 		).test(compatibility)
 	)
 		fail(`COMPATIBILITY Pi version must match ${piVersion}`);
-	console.log(
-		`✓ image lock: package=${imageLock.packageVersion} pi=${imageLock.piVersion}`,
-	);
+	const standard = imageLock.images?.standard;
+	if (
+		standard?.status !== "published" ||
+		!/^ghcr\.io\/[^@]+@sha256:[0-9a-f]{64}$/.test(standard.reference ?? "") ||
+		JSON.stringify(standard.platforms) !==
+			JSON.stringify(["linux/amd64", "linux/arm64"]) ||
+		standard.privileged !== false
+	)
+		fail("Standard runtime must be published at an immutable GHCR digest");
+	const runtimeEvidence = runtimeReleaseLock;
+	if (
+		!Number.isSafeInteger(runtimeEvidence?.runId) ||
+		!Number.isSafeInteger(runtimeEvidence?.runAttempt) ||
+		!/^\d+$/.test(String(runtimeEvidence?.runId ?? "")) ||
+		!/^\d+$/.test(String(runtimeEvidence?.runAttempt ?? "")) ||
+		!/^[0-9a-f]{40}$/.test(runtimeEvidence?.sourceSha ?? "") ||
+		!/^receipt-\d+-\d+$/.test(runtimeEvidence?.receiptArtifact ?? "") ||
+		!Array.isArray(runtimeEvidence?.securityArtifacts) ||
+		runtimeEvidence.securityArtifacts.length !== 2 ||
+		!runtimeEvidence.securityArtifacts.includes(
+			`security-amd64-standard-${runtimeEvidence.runId}-${runtimeEvidence.runAttempt}`,
+		) ||
+		!runtimeEvidence.securityArtifacts.includes(
+			`security-arm64-standard-${runtimeEvidence.runId}-${runtimeEvidence.runAttempt}`,
+		)
+	)
+		fail("Standard runtime release evidence lock is incomplete");
+	if (imageLock.images?.docker?.status !== "unpublished")
+		fail("Legacy Docker runtime must remain unpublished for the standard release");
+	console.log(`✓ image lock: pi=${imageLock.piVersion} runtime=${standard.reference}`);
 
-	if (!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(imageLock.baseImage ?? ""))
-		fail("Image lock base image must use an immutable sha256 digest");
 	if (
 		!trivyExceptions ||
 		Array.isArray(trivyExceptions) ||
@@ -147,45 +169,61 @@ try {
 		fail("Trivy exceptions vulnerabilities must be an array");
 	const exceptionIds = new Set();
 	const exceptionPaths = new Set();
+	const today = new Date().toISOString().slice(0, 10);
+	const validDate = (value) =>
+		typeof value === "string" &&
+		/^\d{4}-\d{2}-\d{2}$/.test(value) &&
+		new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+	const requiredRiskKeys = [
+		"controls", "expiry", "id", "nextReview", "owner", "paths",
+		"reachability", "statement", "upstream", "variant",
+	].sort();
 	for (const exception of trivyExceptions.vulnerabilities) {
 		if (
 			!exception ||
 			Array.isArray(exception) ||
 			JSON.stringify(Object.keys(exception).sort()) !==
-				JSON.stringify(["id", "paths", "statement"])
+				JSON.stringify(requiredRiskKeys)
 		)
-			fail("Each Trivy exception must contain only id, paths, and statement");
+			fail("Each CVE risk record must be complete");
 		if (!/^CVE-\d{4}-\d{4,}$/.test(exception.id ?? ""))
 			fail("Trivy exception IDs must be CVE identifiers");
 		if (exceptionIds.has(exception.id))
 			fail(`Duplicate Trivy exception ID: ${exception.id}`);
 		exceptionIds.add(exception.id);
+		if (exception.variant !== "docker")
+			fail(`Trivy exception ${exception.id} cannot authorize the standard runtime`);
 		if (!Array.isArray(exception.paths) || exception.paths.length === 0)
 			fail(`Trivy exception ${exception.id} must use at least one scoped path`);
 		if (
 			typeof exception.statement !== "string" ||
-			!exception.statement.includes(imageLock.baseImage)
+			!exception.statement.includes("upstream Docker-owned") ||
+			!/^docker\/sandbox-templates@sha256:[0-9a-f]{64}$/.test(
+				runtimeLock.bases?.docker ?? "",
+			)
 		)
-			fail(`Trivy exception ${exception.id} must name the locked base image`);
-		if (!exception.statement.includes("upstream Docker-owned"))
-			fail(`Trivy exception ${exception.id} must identify upstream ownership`);
-		const reviewed = exception.statement.match(
-			/\breviewed (\d{4}-\d{2}-\d{2})\b/i,
-		)?.[1];
-		if (
-			!reviewed ||
-			new Date(`${reviewed}T00:00:00Z`).toISOString().slice(0, 10) !== reviewed
-		)
-			fail(`Trivy exception ${exception.id} must include a valid review date`);
+			fail(`Trivy exception ${exception.id} must bind the locked legacy base`);
+		if (typeof exception.reachability !== "string" || !exception.reachability.trim())
+			fail(`Trivy exception ${exception.id} must include reachability analysis`);
+		if (!Array.isArray(exception.controls) || !exception.controls.length ||
+			exception.controls.some((control) => typeof control !== "string" || !control.trim()))
+			fail(`Trivy exception ${exception.id} must include compensating controls`);
+		if (typeof exception.owner !== "string" || !exception.owner.trim())
+			fail(`Trivy exception ${exception.id} must include a remediation owner`);
+		if (!/^https:\/\//.test(exception.upstream ?? ""))
+			fail(`Trivy exception ${exception.id} must include an upstream reference`);
+		if (!validDate(exception.expiry) || exception.expiry < today)
+			fail(`Trivy exception ${exception.id} is expired or has invalid expiry`);
+		if (!validDate(exception.nextReview) || exception.nextReview < today ||
+			exception.nextReview > exception.expiry)
+			fail(`Trivy exception ${exception.id} has an invalid or overdue next review`);
 		for (const path of exception.paths) {
 			const segments = typeof path === "string" ? path.split("/") : [];
 			if (
 				typeof path !== "string" ||
 				!/^[A-Za-z0-9._+/-]+$/.test(path) ||
 				path.startsWith("/") ||
-				segments.some(
-					(segment) => !segment || segment === "." || segment === "..",
-				)
+				segments.some((segment) => !segment || segment === "." || segment === "..")
 			)
 				fail(`Trivy exception ${exception.id} has an invalid scoped path`);
 			const key = `${exception.id}\0${path}`;
@@ -194,17 +232,8 @@ try {
 			exceptionPaths.add(key);
 		}
 	}
-	if (imageLock.baseImage !== APPROVED_BASE_IMAGE)
-		fail(`Image lock base image must equal approved base image ${APPROVED_BASE_IMAGE}`);
-	const trivyPolicySha256 = createHash("sha256")
-		.update(trivyPolicyText)
-		.digest("hex");
-	if (trivyPolicySha256 !== APPROVED_TRIVY_POLICY_SHA256)
-		fail(
-			`Trivy exceptions must match approved Trivy policy ${APPROVED_TRIVY_POLICY_SHA256}`,
-		);
 	console.log(
-		`✓ Trivy exceptions: ${exceptionIds.size} CVEs / ${exceptionPaths.size} scoped paths`,
+		`✓ legacy-only CVE risk records: ${exceptionIds.size} CVEs / ${exceptionPaths.size} scoped paths`,
 	);
 
 	const dirty = await git(["status", "--porcelain", "--untracked-files=no"]);
@@ -213,6 +242,21 @@ try {
 
 	const commit = await git(["rev-parse", "HEAD"]);
 	if (!allowUnreleased) {
+		const signingKey = await readFile(
+			`${root}/docs/release-signing.asc`,
+			"utf8",
+		).catch(() => "");
+		if (!/-----BEGIN PGP PUBLIC KEY BLOCK-----[\s\S]+-----END PGP PUBLIC KEY BLOCK-----/.test(signingKey))
+			fail("Missing committed release signing key: docs/release-signing.asc");
+		const markerFiles = [
+			"README.md", "CHANGELOG.md", "COMPATIBILITY.md", "RELEASE.md",
+			"docs/index.md", "docs/getting-started.md",
+		];
+		for (const path of markerFiles) {
+			const text = await readFile(`${root}/${path}`, "utf8").catch(() => "");
+			if (/\b(?:Early Access|unpublished|not yet published|pre[- ]?release|alpha)\b/i.test(text))
+				fail(`Production release marker remains in ${path}`);
+		}
 		await git(["tag", "-v", tag], `git tag -v ${tag}`);
 		const tagCommit = await git(["rev-list", "-n", "1", tag]);
 		if (tagCommit !== commit)

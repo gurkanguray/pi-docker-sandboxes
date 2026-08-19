@@ -127,7 +127,7 @@ test("docs state the implemented safety, cleanup, and image defaults", async () 
 		text,
 		/--discard-changes[^\n]*(?:explicit|permanent|discard|lose)/i,
 	);
-	assert.match(text, /verified local image/i);
+	assert.match(text, /public GHCR SHA-256 digest/i);
 	assert.match(text, /pi remove npm:pi-docker-sandboxes/);
 });
 
@@ -571,35 +571,25 @@ test("pull request template covers quality and release boundaries", async () => 
 test("release instructions bind dispatch and repository prerequisites", async () => {
 	const release = await read("RELEASE.md");
 	const dispatch =
-		'gh workflow run release-candidate.yml --ref "$TAG" -f tag="$TAG"';
+		"gh workflow run release-candidate.yml --ref vX.Y.Z -f tag=vX.Y.Z";
 	assert.ok(release.includes(dispatch));
-	assert.match(release, /workflow ref and tag input must be identical/i);
-	assert.match(release, /tag commit[^\r\n]*ancestor of[^\r\n]*origin\/main/i);
-	assert.match(
-		release,
-		/https:\/\/github\.com\/gurkanguray\/pi-docker-sandboxes\/issues\/8/,
-	);
+	assert.match(release, /workflow ref and input must be identical/i);
+	assert.match(release, /signed stable tag on reviewed `main`/i);
 	for (const prerequisite of [
-		/Main Protection/i,
+		/protect `main`/i,
 		/protected `release` environment/i,
 		/signing key/i,
-		/self-hosted runner/i,
+		/ephemeral hardware lanes/i,
 		/npm trusted publish/i,
 	])
 		assert.match(release, prerequisite);
-	const manualE2E =
-		release.match(
-			/For manual `workflow_dispatch`[\s\S]*?does not[\s\S]*?candidate\./i,
-		)?.[0] ?? "";
-	for (const input of [
-		"source_sha",
-		"package_artifact",
-		"image_artifact",
-		"image_digest",
-		"run_id",
+	for (const evidence of [
+		/runtime receipts/i,
+		/raw SARIF scans/i,
+		/CycloneDX SBOMs/i,
+		/GitHub OIDC provenance/i,
 	])
-		assert.match(manualE2E, new RegExp("`" + input + "`"));
-	assert.match(manualE2E, /image-verification\.json[^\n]*`ociDigest`/i);
+		assert.match(release, evidence);
 	assert.doesNotMatch(release, /docs\/repository-settings\.md/);
 	assert.doesNotMatch(release, /proved red locally|disposable `?\/tmp/i);
 	assert.doesNotMatch(release, /select the exact signed tag/i);

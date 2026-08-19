@@ -56,7 +56,7 @@ jobs:
             if (process.argv[1].includes("-"))
               throw new Error("release versions must not be prereleases");
           ' "$version"
-          npm run release:check -- --allow-unreleased --tag "$TAG"
+          npm run release:check -- --tag "$TAG"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -112,101 +112,92 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  image-candidate:
+  runtime-evidence:
     needs: [metadata, package]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
+      attestations: read
       contents: read
+      packages: read
     outputs:
       digest: ${{ steps.runtime.outputs.digest }}
+      reference: ${{ steps.runtime.outputs.reference }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.metadata.outputs.sha }}
           persist-credentials: false
       - id: runtime
-        name: Read the exact locked multi-platform runtime
-        env:
-          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+        name: Read the immutable production runtime evidence lock
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
           import { readFile } from "node:fs/promises";
-          const lock = JSON.parse(await readFile("docker/image-lock.json"));
-          const runtime = lock.images?.standard;
-          if (runtime?.status !== "published" ||
-              !/^ghcr\.io\/[^@]+@sha256:[0-9a-f]{64}$/.test(
-                runtime.reference ?? "",
-              ) ||
-              JSON.stringify(runtime.platforms) !==
-                JSON.stringify(["linux/amd64", "linux/arm64"]))
-            throw new Error("standard runtime lock is not release-ready");
+          const runtime = JSON.parse(
+            await readFile("docker/image-lock.json"),
+          ).images?.standard;
+          const evidence = JSON.parse(
+            await readFile("docker/runtime-release-lock.json"),
+          );
+          if (runtime?.status !== "published" || evidence?.version !== 1)
+            throw new Error("production runtime evidence is not locked");
           console.log(`reference=${runtime.reference}`);
           console.log(`digest=${runtime.reference.split("@")[1]}`);
+          console.log(`run_id=${evidence.runId}`);
+          console.log(`receipt_artifact=${evidence.receiptArtifact}`);
+          console.log(
+            `security_pattern=security-*-standard-${evidence.runId}-${evidence.runAttempt}`,
+          );
           NODE
-      - name: Export the exact locked multi-platform runtime
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ steps.runtime.outputs.receipt_artifact }}
+          path: runtime
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runtime.outputs.run_id }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ${{ steps.runtime.outputs.security_pattern }}
+          path: runtime/evidence
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runtime.outputs.run_id }}
+      - name: Verify receipt, raw zero scans, SBOMs, and provenance
         env:
+          GH_TOKEN: ${{ github.token }}
           RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
-        run: |
-          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
-          docker run --rm --volume "$RUNNER_TEMP:/output" "$skopeo" copy \
-            --all "docker://$RUNTIME_REFERENCE" \
-            oci-archive:/output/candidate-image.oci.tar:candidate
-      - name: Verify and receipt the locked runtime archive
-        env:
-          EXPECTED_DIGEST: ${{ steps.runtime.outputs.digest }}
-          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
-          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
         run: |
           set -euo pipefail
-          mkdir oci
-          tar -xf "$RUNNER_TEMP/candidate-image.oci.tar" -C oci index.json
-          digest="$(node -p 'require("./oci/index.json").manifests[0].digest')"
-          test "$digest" = "$EXPECTED_DIGEST"
-          node --input-type=module <<'NODE'
-          import { writeFile } from "node:fs/promises";
-          await writeFile("image-verification.json", `${JSON.stringify({
-            sourceSha: process.env.SOURCE_SHA,
-            ociDigest: process.env.EXPECTED_DIGEST,
-            image: process.env.RUNTIME_REFERENCE,
-          }, null, 2)}\n`);
-          NODE
+          node scripts/verify-production-runtime.mjs \
+            docker/image-lock.json docker/runtime-release-lock.json \
+            runtime/runtime-image-receipt.json runtime/evidence \
+            runtime/production-runtime-verification.json
+          gh attestation verify "oci://$RUNTIME_REFERENCE" \
+            --repo "$GITHUB_REPOSITORY" --format json \
+            > runtime/runtime-provenance.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: oci-candidate-${{ needs.metadata.outputs.sha }}
-          path: |
-            ${{ runner.temp }}/candidate-image.oci.tar
-            image-verification.json
+          name: production-runtime-${{ needs.metadata.outputs.sha }}
+          path: runtime
           if-no-files-found: error
           retention-days: 90
 
-  security:
-    needs: [metadata, image-candidate]
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/security.yml
-    with:
-      source_sha: ${{ needs.metadata.outputs.sha }}
-      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
-      image_digest: ${{ needs.image-candidate.outputs.digest }}
-
   e2e:
-    needs: [metadata, package, image-candidate, security]
+    needs: [metadata, package, runtime-evidence]
     permissions:
       actions: read
       contents: read
+      packages: read
     uses: ./.github/workflows/e2e.yml
     with:
       source_sha: ${{ needs.metadata.outputs.sha }}
       package_artifact: npm-package-${{ needs.metadata.outputs.sha }}
-      image_artifact: oci-candidate-${{ needs.metadata.outputs.sha }}
-      image_digest: ${{ needs.image-candidate.outputs.digest }}
+      runtime_artifact: production-runtime-${{ needs.metadata.outputs.sha }}
+      runtime_reference: ${{ needs.runtime-evidence.outputs.reference }}
+      image_digest: ${{ needs.runtime-evidence.outputs.digest }}
 
   receipt:
-    needs: [metadata, package, image-candidate, security, e2e]
+    needs: [metadata, package, runtime-evidence, e2e]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -218,12 +209,8 @@ jobs:
           path: evidence
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: oci-candidate-${{ needs.metadata.outputs.sha }}
-          path: evidence
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: image-security-${{ needs.metadata.outputs.sha }}
-          path: evidence
+          name: production-runtime-${{ needs.metadata.outputs.sha }}
+          path: evidence/runtime
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: macos-arm64-e2e-${{ needs.metadata.outputs.sha }}
@@ -241,18 +228,16 @@ jobs:
           SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
           TAG: ${{ inputs.tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
-          IMAGE_DIGEST: ${{ needs.image-candidate.outputs.digest }}
-          SCAN_REF: ${{ needs.security.outputs.scan_ref }}
-          SBOM_REF: ${{ needs.security.outputs.sbom_ref }}
-          PROVENANCE_REF: oci-candidate-${{ needs.metadata.outputs.sha }}
+          IMAGE_DIGEST: ${{ needs.runtime-evidence.outputs.digest }}
+          RUNTIME_REFERENCE: ${{ needs.runtime-evidence.outputs.reference }}
         run: |
           node --input-type=module <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
           const packageReceipt = JSON.parse(
             await readFile("evidence/package-verification.json"),
           );
-          const imageReceipt = JSON.parse(
-            await readFile("evidence/image-verification.json"),
+          const runtimeReceipt = JSON.parse(
+            await readFile("evidence/runtime/runtime-image-receipt.json"),
           );
           const freshInstallReceipt = JSON.parse(
             await readFile("evidence/fresh-install-receipt.json"),
@@ -278,8 +263,10 @@ jobs:
           }
           const expected = process.env;
           const e2eReceipt = e2eReceipts[0];
-          if (imageReceipt.sourceSha !== expected.SOURCE_SHA ||
-              imageReceipt.ociDigest !== expected.IMAGE_DIGEST ||
+          if (runtimeReceipt.variant !== "standard" ||
+              runtimeReceipt.indexDigest !== expected.IMAGE_DIGEST ||
+              runtimeReceipt.candidateReference !==
+                expected.RUNTIME_REFERENCE ||
               packageReceipt.binVersion !== expected.VERSION ||
               imageLock.piVersion !== "0.84.1" ||
               freshInstallReceipt.sourceSha !== expected.SOURCE_SHA ||
@@ -308,9 +295,11 @@ jobs:
             version: expected.VERSION,
             tarballIntegrity: packageReceipt.integrity,
             imageDigest: expected.IMAGE_DIGEST,
-            scanRef: expected.SCAN_REF, sbomRef: expected.SBOM_REF,
-            provenanceRef:
-              `${expected.PROVENANCE_REF}#${expected.IMAGE_DIGEST}`,
+            runtimeReference: expected.RUNTIME_REFERENCE,
+            runtimeReceipt,
+            scanRef: "production-runtime/raw-sarif",
+            sbomRef: "production-runtime/cyclonedx",
+            provenanceRef: "production-runtime/runtime-provenance.json",
             freshInstallReceipt,
             e2eReceipt,
             e2eReceipts,
@@ -320,13 +309,10 @@ jobs:
             `${JSON.stringify(receipt, null, 2)}\n`,
           );
           NODE
-          cp evidence/candidate-image.cdx.json candidate-image.cdx.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-candidate-${{ needs.metadata.outputs.sha }}
-          path: |
-            release-candidate-receipt.json
-            candidate-image.cdx.json
+          path: release-candidate-receipt.json
           include-hidden-files: false
           if-no-files-found: error
           retention-days: 90
@@ -345,8 +331,103 @@ jobs:
       candidate_receipt: release-candidate-${{ needs.metadata.outputs.sha }}
 
   verify-publication:
-    needs: [metadata, publish-npm]
+    needs: [metadata, publish-npm, runtime-evidence]
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - docker-sandboxes
+      - ephemeral
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Load the exact public runtime for one installed-package launch
+        env:
+          RUNTIME_REFERENCE: ${{ needs.runtime-evidence.outputs.reference }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/public-install-docker"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          docker pull --platform linux/arm64 "$RUNTIME_REFERENCE"
+          image_id="$(docker image inspect "$RUNTIME_REFERENCE" \
+            --format '{{.Id}}')"
+          selected="docker.io/pi-docker-sandboxes/pi:public-${image_id#sha256:}"
+          docker tag "$image_id" "$selected"
+          docker save --output "$RUNNER_TEMP/public-runtime.tar" "$selected"
+          sbx template load "$RUNNER_TEMP/public-runtime.tar"
+          sbx template ls --json > "$RUNNER_TEMP/public-templates.json"
+          store_id="$(node --input-type=module - \
+            "$RUNNER_TEMP/public-templates.json" "$selected" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const [path, selected] = process.argv.slice(2);
+          const separator = selected.lastIndexOf(":");
+          const images = JSON.parse(await readFile(path)).images ?? [];
+          const matches = images.filter((item) =>
+            item.repository === selected.slice(0, separator) &&
+            item.tag === selected.slice(separator + 1));
+          if (matches.length !== 1) process.exit(1);
+          console.log(matches[0].id);
+          NODE
+          )"
+          {
+            echo "PI_RELEASE_RUNTIME_IMAGE=$selected"
+            echo "PI_RELEASE_TEMPLATE_STORE_ID=$store_id"
+          } >> "$GITHUB_ENV"
+      - name: Verify actual isolated Pi install and gallery availability
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(npm view "pi-docker-sandboxes" version)" = "$VERSION"
+          npm run --silent smoke:fresh-install -- --published "$VERSION" \
+            | tee pi-install.log
+          tail -n 1 pi-install.log > pi-install-receipt.json
+          node --input-type=module <<'NODE'
+          import receipt from "./pi-install-receipt.json" with { type: "json" };
+          if (!receipt.actualPiInstall ||
+              receipt.exactInstallSource !==
+                `npm:pi-docker-sandboxes@${process.env.VERSION}` ||
+              !receipt.packageRecordVerified ||
+              !receipt.extensionFlagsVerified ||
+              receipt.runtimeLaunches !== 1 ||
+              !receipt.cleanup?.packageRemoved ||
+              !receipt.cleanup?.packageRecordRemoved ||
+              !receipt.cleanup?.prefixRemoved ||
+              !receipt.cleanup?.piHomeRemoved) process.exit(1);
+          NODE
+          gallery=https://pi.dev/packages/pi-docker-sandboxes
+          for attempt in $(seq 1 20); do
+            if page="$(curl --fail --silent --show-error "$gallery")" &&
+              grep -F "pi install npm:pi-docker-sandboxes@$VERSION" \
+                <<<"$page"; then
+              break
+            fi
+            test "$attempt" -lt 20 || exit 1
+            sleep 30
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: public-install-${{ needs.metadata.outputs.sha }}
+          path: pi-install-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  deprecate-bootstrap:
+    needs: [metadata, verify-publication]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
     steps:
@@ -354,28 +435,30 @@ jobs:
         with:
           node-version: 24.12.0
           registry-url: https://registry.npmjs.org
-      - name: Verify npm and Pi package gallery availability
+      - name: Deprecate the one-time inert bootstrap package
         env:
-          VERSION: ${{ needs.metadata.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_DEPRECATE_TOKEN }}
         run: |
           set -euo pipefail
-          prefix="$(mktemp -d)"
-          test "$(npm view "pi-docker-sandboxes" version)" = "$VERSION"
-          npm install --ignore-scripts --prefix "$prefix" "pi-docker-sandboxes"
-          installed="$prefix/node_modules/pi-docker-sandboxes/package.json"
-          test "$(node -p 'require(process.argv[1]).version' "$installed")" \
-            = "$VERSION"
-          "$prefix/node_modules/.bin/pi-dsbx" --help
-          gallery=https://pi.dev/packages/pi-docker-sandboxes
-          for attempt in $(seq 1 20); do
-            if page="$(curl --fail --silent --show-error "$gallery")" &&
-              grep -F 'pi install npm:pi-docker-sandboxes' <<<"$page" &&
-              grep -F "$VERSION" <<<"$page"; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 20 ]; then
-              echo "Pi package gallery did not index $VERSION" >&2
-              exit 1
-            fi
-            sleep 30
-          done
+          test -n "$NODE_AUTH_TOKEN"
+          npm deprecate pi-docker-sandboxes@0.0.0 \
+            "Bootstrap only; use ${{ needs.metadata.outputs.version }}"
+
+  publish-release:
+    needs:
+      - metadata
+      - receipt
+      - runtime-evidence
+      - e2e
+      - deprecate-bootstrap
+    permissions:
+      actions: read
+      contents: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      package_artifact: npm-package-${{ needs.metadata.outputs.sha }}
+      candidate_artifact: release-candidate-${{ needs.metadata.outputs.sha }}
+      runtime_artifact: production-runtime-${{ needs.metadata.outputs.sha }}
+      public_install_artifact: public-install-${{ needs.metadata.outputs.sha }}
