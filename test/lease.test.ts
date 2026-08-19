@@ -155,6 +155,32 @@ test("canonical repository roots share one sandbox lease", async (t) => {
 	}
 });
 
+test("linked worktrees share daemon-global names but isolate generated names", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-lease-worktrees-"));
+	const linked = `${root}-linked`;
+	t.after(() => rm(root, { recursive: true, force: true }));
+	t.after(() => rm(linked, { recursive: true, force: true }));
+	await exec("git", ["init", "-b", "main"], { cwd: root });
+	await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+	await exec("git", ["config", "user.name", "Test"], { cwd: root });
+	await writeFile(join(root, "file"), "test\n");
+	await exec("git", ["add", "file"], { cwd: root });
+	await exec("git", ["commit", "-m", "initial"], { cwd: root });
+	await exec("git", ["worktree", "add", "-b", "linked", linked], { cwd: root });
+
+	const explicit = await acquireSandboxLease(root, "shared", "run");
+	try {
+		await assert.rejects(
+			() => acquireSandboxLease(linked, "shared", "destroy"),
+			/busy.*run/i,
+		);
+		const isolated = await acquireSandboxLease(linked, "generated-linked", "run");
+		await isolated.release();
+	} finally {
+		await explicit.release();
+	}
+});
+
 test("symlinked and hard-linked lease paths fail closed", async (t) => {
 	const root = await fixture(t);
 	const path = await preparedLeasePath(root);

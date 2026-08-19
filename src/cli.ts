@@ -434,8 +434,58 @@ export async function main(
 				name,
 				"sessions-restore",
 				async () => {
+					if (!(await sandboxStateExists(repository.root, name)))
+						throw new Error(`No clone state for sandbox ${name}`);
 					if (!(await client.exists(name)))
 						throw new Error(`Sandbox ${name} does not exist`);
+					const [resolved, inspection] = await Promise.all([
+						resolveKitImage(config),
+						client.inspect(name),
+					]);
+					const state = (
+						await loadSandboxStateResult(
+							repository.root,
+							name,
+							{
+								exists: true,
+								inspectedImage: String(inspection.image ?? ""),
+								expectedImage: resolved.image,
+								runtimeSchema: IMAGE_LOCK.runtimeSchema,
+								packageVersion: PACKAGE_VERSION,
+								...(resolved.templateStoreId
+									? { templateStoreId: resolved.templateStoreId }
+									: {}),
+							},
+							{
+								expectedRepositoryIdentity: repository.identity,
+								expectedWorktreeIdentity: repository.worktreeIdentity,
+							},
+						)
+					).value;
+					if (
+						state.hostRepoIdentity !== repository.identity ||
+						state.hostWorktreeIdentity !== repository.worktreeIdentity
+					)
+						throw new Error("Sandbox state belongs to another worktree");
+					if (
+						state.runtimeImage !== resolved.image ||
+						state.runtimeSchema !== IMAGE_LOCK.runtimeSchema ||
+						state.packageVersion !== PACKAGE_VERSION
+					)
+						throw new Error("Sandbox runtime is incompatible with session restore");
+					const decision = reconcileSandbox(state, {
+						exists: true,
+						imageMatches: inspection.image === state.runtimeImage,
+					});
+					if (
+						state.phase !== "ready" ||
+						decision.action !== "preserve" ||
+						state.imageAttestation?.status !== "verified" ||
+						state.imageAttestation.image !== state.runtimeImage
+					)
+						throw new Error(
+							`Sandbox is not ready for exact session restore: ${decision.action}`,
+						);
 					const restored = await restoreSessions(
 						client,
 						agentDir,

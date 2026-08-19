@@ -1,15 +1,21 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, statfs } from "node:fs/promises";
+import { lstat, open, statfs, type FileHandle } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.ts";
+import { listHostOAuthProviderIds } from "./host-auth.ts";
 import { sanitizeDetail } from "./errors.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { inspectSandboxLease } from "./lease.ts";
-import { detectHostPlatform } from "./platform.ts";
+import {
+	certifyHostPlatform,
+	detectHostPlatform,
+	type SupportedHost,
+} from "./platform.ts";
+import { resolveAvailableServices } from "./providers.ts";
 import { reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
 import { listSessionBackups, reconcileSessionStaging } from "./sessions.ts";
@@ -55,8 +61,19 @@ export interface DiagnosticsOptions {
 	platform?: NodeJS.Platform;
 	arch?: string;
 	nodeVersion?: string;
+	home?: string;
 	agentDir?: string;
 	runCommand?: (command: string, args: readonly string[]) => Promise<string>;
+	/** @internal Test-only host certification boundary. */
+	certifyPlatform?: () => Promise<SupportedHost>;
+	/** @internal Test-only host OAuth eligibility boundary. */
+	listHostOAuthProviders?: (ids: readonly string[]) => Promise<Set<string>>;
+	/** @internal Test-only KVM metadata boundary. */
+	statKvm?: () => Promise<{ isCharacterDevice(): boolean }>;
+	/** @internal Test-only KVM open boundary. */
+	openKvm?: () => Promise<Pick<FileHandle, "close">>;
+	/** @internal Test-only filesystem-stat boundary. */
+	statFilesystem?: typeof statfs;
 }
 
 function check(
@@ -118,7 +135,8 @@ export function diagnosticsExitCode(
 }
 
 function redactReceipt<T extends DoctorReceipt | StatusReceipt>(receipt: T): T {
-	return JSON.parse(sanitizeDetail(JSON.stringify(receipt), 1024 * 1024)) as T;
+	// String fields are sanitized when checks are built; never rewrite schema keys or IDs.
+	return receipt;
 }
 
 export async function buildDoctorReceipt(
@@ -142,12 +160,17 @@ export async function buildDoctorReceipt(
 		checks.push(failure("staging", cause));
 	}
 
-	let host: ReturnType<typeof detectHostPlatform> | undefined;
+	let host: SupportedHost | undefined;
+	let detectedHost: SupportedHost | undefined;
 	try {
-		host = detectHostPlatform(
+		const detected = detectHostPlatform(
 			options.platform ?? process.platform,
 			options.arch ?? process.arch,
 		);
+		detectedHost = detected;
+		host = options.certifyPlatform
+			? await options.certifyPlatform()
+			: await certifyHostPlatform(detected);
 		checks.push(
 			check("host", "pass", `host ${host.os}/${host.arch} is certified`, {
 				os: host.os,
@@ -189,16 +212,20 @@ export async function buildDoctorReceipt(
 		checks.push(failure("pi", cause));
 	}
 
+	let dockerRoot: string | undefined;
 	try {
-		const version = await runCommand("docker", [
-			"version",
-			"--format",
-			"{{.Server.Version}}",
+		const [version, root] = await Promise.all([
+			runCommand("docker", ["version", "--format", "{{.Server.Version}}"]),
+			runCommand("docker", ["info", "--format", "{{.DockerRootDir}}"]),
 		]);
+		dockerRoot = root || undefined;
 		checks.push(
-			check("docker", version ? "pass" : "fail", "Docker daemon responds", {
-				version,
-			}),
+			check(
+				"docker",
+				version && dockerRoot ? "pass" : "fail",
+				"Docker daemon and storage root respond",
+				{ version, ...(dockerRoot ? { storageRoot: dockerRoot } : {}) },
+			),
 		);
 	} catch (cause) {
 		checks.push(failure("docker", cause));
@@ -231,10 +258,19 @@ export async function buildDoctorReceipt(
 		checks.push(failure("sbx", cause));
 	}
 
-	if (host?.os === "linux") {
+	if ((host ?? detectedHost)?.os === "linux") {
 		try {
-			await access("/dev/kvm", constants.R_OK | constants.W_OK);
-			checks.push(check("kvm", "pass", "Linux KVM is readable and writable"));
+			const metadata = await (options.statKvm ?? (() => lstat("/dev/kvm")))();
+			if (!metadata.isCharacterDevice())
+				throw new Error("/dev/kvm is not a character device");
+			const handle = await (
+				options.openKvm ??
+				(() => open("/dev/kvm", constants.O_RDWR | constants.O_NOFOLLOW))
+			)();
+			await handle.close();
+			checks.push(
+				check("kvm", "pass", "Linux KVM is a usable character device"),
+			);
 		} catch (cause) {
 			checks.push(failure("kvm", cause));
 		}
@@ -248,7 +284,9 @@ export async function buildDoctorReceipt(
 	let name: string | undefined;
 	let state: Awaited<ReturnType<typeof loadSandboxState>> | undefined;
 	try {
-		config = await loadConfig(cwd);
+		config = await loadConfig(cwd, {
+			...(options.home ? { home: options.home } : {}),
+		});
 		repository = await inspectRepository(cwd);
 		name = config.sandbox.name ?? sandboxName(repository.root);
 		checks.push(
@@ -365,7 +403,9 @@ export async function buildDoctorReceipt(
 				repository.identity,
 				name,
 			);
-			const bytes = backups.reduce((total, backup) => total + backup.bytes, 0);
+			const bytes = backups
+				.slice(0, -1)
+				.reduce((total, backup) => total + backup.bytes, 0);
 			const ageCutoff = now.getTime() - config.retention.maxAgeDays * 86_400_000;
 			const expired = backups
 				.slice(0, -1)
@@ -390,29 +430,110 @@ export async function buildDoctorReceipt(
 			checks.push(check(id, "fail", "Git/configuration context is unavailable"));
 	}
 
-	try {
-		const disk = await statfs(repository?.root ?? cwd);
-		const availableBytes = Number(disk.bavail) * Number(disk.bsize);
-		checks.push(
-			check(
-				"disk",
-				availableBytes >= 1024 * 1024 * 1024 ? "pass" : "warning",
-				"Host disk space inspected",
-				{ availableBytes },
-			),
-		);
-	} catch (cause) {
-		checks.push(failure("disk", cause));
+	const diskChecks: DiagnosticCheck[] = [];
+	const stat = options.statFilesystem ?? statfs;
+	for (const [label, destination] of [
+		["repository", repository?.root ?? cwd],
+		["backups", agentDir],
+		["staging", tmpdir()],
+		...(dockerRoot ? ([["docker", dockerRoot]] as const) : []),
+	] as const) {
+		try {
+			const disk = await stat(destination);
+			const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+			diskChecks.push(
+				check(
+					`disk-${label}`,
+					availableBytes >= 1024 * 1024 * 1024 ? "pass" : "warning",
+					`${label} disk destination inspected`,
+					{ destination, availableBytes },
+				),
+			);
+		} catch (cause) {
+			diskChecks.push(failure(`disk-${label}`, cause));
+		}
 	}
+	checks.push(...diskChecks);
+	checks.push(
+		check(
+			"disk",
+			diskChecks.some((entry) => entry.level === "fail")
+				? "fail"
+				: diskChecks.some((entry) => entry.level === "warning")
+					? "warning"
+					: "pass",
+			"All write destinations inspected",
+			{ destinationCount: diskChecks.length },
+		),
+	);
 
-	if (config)
-		checks.push(
-			check("auth", "pass", "Credential policy inspected without secret values", {
-				mode: config.auth.mode,
-				providerCount: config.auth.providers.length,
-			}),
-		);
-	else checks.push(check("auth", "fail", "Credential policy is unavailable"));
+	if (config) {
+		try {
+			if (config.auth.mode === "none")
+				checks.push(
+					check("auth", "pass", "Host credential transfer is disabled", {
+						mode: config.auth.mode,
+						providerCount: 0,
+					}),
+				);
+			else if (config.auth.mode === "proxy") {
+				const capabilities = await client.capabilities();
+				const resolved = resolveAvailableServices(
+					capabilities.credentialServices,
+					config.auth.providers,
+				);
+				const configured =
+					resolved.services.length > 0
+						? await client.secretServices()
+						: new Set<string>();
+				const missing = resolved.services
+					.map((service) => service.id)
+					.filter((id) => !configured.has(id));
+				checks.push(
+					check(
+						"auth",
+						resolved.unsupported.length > 0
+							? "fail"
+							: missing.length > 0
+								? "warning"
+								: "pass",
+						resolved.unsupported.length > 0
+							? "Explicit proxy providers are unsupported"
+							: missing.length > 0
+								? "Explicit proxy providers lack configured SBX secrets"
+								: "Explicit proxy providers are available and configured",
+						{
+							mode: config.auth.mode,
+							providerCount: config.auth.providers.length,
+							unsupportedCount: resolved.unsupported.length,
+							missingCount: missing.length,
+						},
+					),
+				);
+			} else {
+				const eligible = await (
+					options.listHostOAuthProviders ?? listHostOAuthProviderIds
+				)(config.auth.providers);
+				const missing = config.auth.providers.filter((id) => !eligible.has(id));
+				checks.push(
+					check(
+						"auth",
+						missing.length > 0 ? "warning" : "pass",
+						missing.length > 0
+							? "Explicit OAuth providers lack copy-eligible credentials"
+							: "Explicit OAuth providers have copy-eligible credentials",
+						{
+							mode: config.auth.mode,
+							providerCount: config.auth.providers.length,
+							missingCount: missing.length,
+						},
+					),
+				);
+			}
+		} catch (cause) {
+			checks.push(failure("auth", cause));
+		}
+	} else checks.push(check("auth", "fail", "Credential policy is unavailable"));
 
 	checks.sort((left, right) => left.id.localeCompare(right.id));
 	const receipt: DoctorReceipt = {
@@ -428,21 +549,146 @@ export async function buildDoctorReceipt(
 export async function buildStatusReceipt(
 	options: DiagnosticsOptions = {},
 ): Promise<StatusReceipt> {
-	const doctor = await buildDoctorReceipt(options);
-	const ids = new Set([
-		"image",
-		"lease",
-		"lifecycle",
-		"upgrade",
-		"backup",
-		"git",
-	]);
-	const checks = doctor.checks.filter((entry) => ids.has(entry.id));
-	return {
+	const cwd = options.cwd ?? process.cwd();
+	const client = options.client ?? new SbxClient();
+	const now = options.now ?? new Date();
+	const agentDir = options.agentDir ?? join(homedir(), ".pi", "agent");
+	const checks: DiagnosticCheck[] = [];
+	try {
+		const config = await loadConfig(cwd, {
+			...(options.home ? { home: options.home } : {}),
+		});
+		const repository = await inspectRepository(cwd);
+		const name = config.sandbox.name ?? sandboxName(repository.root);
+		checks.push(
+			check("git", "pass", "Git worktree is clone-mode eligible", {
+				mainWorktree: repository.mainWorktree,
+				dirty: repository.dirty,
+			}),
+		);
+		let selectedImage: string | undefined;
+		try {
+			selectedImage = (await resolveKitImage(config)).image;
+			checks.push(
+				check("image", "pass", "Exact runtime image digest is selected", {
+					reference: selectedImage,
+				}),
+			);
+		} catch (cause) {
+			checks.push(failure("image", cause));
+		}
+		try {
+			const lease = await inspectSandboxLease(repository.root, name);
+			checks.push(
+				check(
+					"lease",
+					lease.status === "absent"
+						? "pass"
+						: lease.status === "live"
+							? "warning"
+							: "fail",
+					`Lifecycle lease is ${lease.status}`,
+					lease.record
+						? { operation: lease.record.operation, pid: lease.record.pid }
+						: undefined,
+				),
+			);
+		} catch (cause) {
+			checks.push(failure("lease", cause));
+		}
+		let state: Awaited<ReturnType<typeof loadSandboxState>> | undefined;
+		try {
+			const hasState = await sandboxStateExists(repository.root, name);
+			const daemonExists = await client.exists(name);
+			if (hasState) {
+				state = await loadSandboxState(repository.root, name, undefined, {
+					expectedRepositoryIdentity: repository.identity,
+					expectedWorktreeIdentity: repository.worktreeIdentity,
+				});
+				const inspection = daemonExists ? await client.inspect(name) : undefined;
+				const decision = reconcileSandbox(state, {
+					exists: daemonExists,
+					...(inspection
+						? { imageMatches: inspection.image === state.runtimeImage }
+						: {}),
+				});
+				const healthy = state.phase === "ready" && decision.action === "preserve";
+				checks.push(
+					check(
+						"lifecycle",
+						healthy ? "pass" : "fail",
+						healthy
+							? "Lifecycle state and daemon reconcile"
+							: `Lifecycle reconciliation requires ${decision.action}`,
+						{ phase: state.phase, action: decision.action },
+					),
+				);
+			} else
+				checks.push(
+					check(
+						"lifecycle",
+						daemonExists ? "fail" : "pass",
+						daemonExists
+							? "Sandbox exists without lifecycle state"
+							: "No sandbox lifecycle state is present",
+					),
+				);
+		} catch (cause) {
+			checks.push(failure("lifecycle", cause));
+		}
+		const compatible =
+			!state ||
+			(state.runtimeSchema === IMAGE_LOCK.runtimeSchema &&
+				state.packageVersion === PACKAGE_VERSION &&
+				state.runtimeImage === selectedImage);
+		checks.push(
+			check(
+				"upgrade",
+				compatible ? "pass" : "fail",
+				compatible
+					? "Runtime, package, and image versions are compatible"
+					: "Sandbox requires an explicit compatible upgrade or recreation",
+			),
+		);
+		try {
+			const backups = await listSessionBackups(
+				agentDir,
+				repository.identity,
+				name,
+			);
+			const nonLatestBytes = backups
+				.slice(0, -1)
+				.reduce((total, backup) => total + backup.bytes, 0);
+			const cutoff = now.getTime() - config.retention.maxAgeDays * 86_400_000;
+			const expired = backups
+				.slice(0, -1)
+				.some((backup) => Date.parse(backup.createdAt) < cutoff);
+			checks.push(
+				check(
+					"backup",
+					nonLatestBytes <= config.retention.maxBytes &&
+						backups.length <= Math.max(1, config.retention.maxCount) &&
+						!expired
+						? "pass"
+						: "warning",
+					"Managed session backups inspected",
+					{ count: backups.length, bytes: nonLatestBytes },
+				),
+			);
+		} catch (cause) {
+			checks.push(failure("backup", cause));
+		}
+	} catch (cause) {
+		checks.push(failure("git", cause));
+		for (const id of ["backup", "image", "lease", "lifecycle", "upgrade"])
+			checks.push(check(id, "fail", "Git/configuration context is unavailable"));
+	}
+	checks.sort((left, right) => left.id.localeCompare(right.id));
+	return redactReceipt({
 		schemaVersion: 1,
 		kind: "pi-dsbx.status",
-		generatedAt: doctor.generatedAt,
+		generatedAt: now.toISOString(),
 		ok: !checks.some((entry) => entry.level === "fail"),
 		checks,
-	};
+	});
 }

@@ -508,6 +508,24 @@ export function worktreeMetadataDirectory(root: string): string {
 	return gitDirectory;
 }
 
+export function repositoryCommonMetadataDirectory(root: string): string {
+	const gitDirectory = worktreeMetadataDirectory(root);
+	const commonReference = join(gitDirectory, "commondir");
+	let metadata;
+	try {
+		metadata = lstatSync(commonReference);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return gitDirectory;
+		throw cause;
+	}
+	if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096)
+		throw new Error("Git common-directory association is invalid");
+	const reference = readFileSync(commonReference, "utf8").replace(/\n$/, "");
+	if (!reference || /[\0\r\n]/.test(reference))
+		throw new Error("Git common-directory association is invalid");
+	return realpathSync(resolve(gitDirectory, reference));
+}
+
 export function statePath(root: string, name: string): string {
 	validateSandboxName(name);
 	return join(

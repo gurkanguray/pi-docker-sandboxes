@@ -401,7 +401,7 @@ test("new managed clone restores sessions before attach", async () => {
 		assert.ok(ready < subject.log.indexOf("attach"));
 		assert.match(
 			subject.log[restore]!,
-			/2026-08-14T12-34-56-789Z\/sessions:\/home\/agent\/\.pi\/agent\/$/,
+			/2026-08-14T12-34-56-789Z\/sessions:\/home\/agent\/\.pi\/agent\/\.sessions-restore-[a-f0-9]+$/,
 		);
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;

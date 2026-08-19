@@ -11,7 +11,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { LauncherExitCode } from "./exit-codes.ts";
 import { validateSandboxName } from "./sbx/client.ts";
-import { worktreeMetadataDirectory } from "./workspace.ts";
+import { repositoryCommonMetadataDirectory } from "./workspace.ts";
 
 export type SandboxLeaseOperation =
 	| "run"
@@ -117,7 +117,7 @@ async function prepareLeaseDirectory(
 	validate: () => Promise<void>;
 }> {
 	const canonicalRoot = await realpath(root);
-	const gitDirectory = worktreeMetadataDirectory(canonicalRoot);
+	const gitDirectory = repositoryCommonMetadataDirectory(canonicalRoot);
 	const paths = [
 		canonicalRoot,
 		gitDirectory,
@@ -181,7 +181,7 @@ async function prepareLeaseDirectory(
 export function sandboxLeasePath(root: string, name: string): string {
 	validateSandboxName(name);
 	return join(
-		worktreeMetadataDirectory(root),
+		repositoryCommonMetadataDirectory(root),
 		"pi-docker-sandbox",
 		"leases",
 		`${name}.json`,

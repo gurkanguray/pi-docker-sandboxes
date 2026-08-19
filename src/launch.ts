@@ -461,8 +461,6 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				await createEmptyInitialCommit(root);
 				repository = await inspectHostRepository(cwd);
 			}
-			if (!repository.mainWorktree)
-				throw new Error("Clone mode does not support secondary Git worktrees");
 			return launchWithLease({
 				...prepared,
 				repository,
@@ -471,8 +469,6 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			});
 		});
 	}
-	if (!repository.mainWorktree)
-		throw new Error("Clone mode does not support secondary Git worktrees");
 	const root = repository.root;
 	const name = config.sandbox.name ?? sandboxName(root, options.fresh);
 	return withSandboxLease(root, name, "run", () =>

@@ -328,8 +328,9 @@ export async function pruneSessionBackups(
 	while (retained.length > Math.max(1, retention.maxCount)) remove(retained[0]!);
 	while (
 		retained.length > 1 &&
-		retained.reduce((total, backup) => total + backup.bytes, 0) >
-			retention.maxBytes
+		retained
+			.filter((backup) => backup.id !== latest.id)
+			.reduce((total, backup) => total + backup.bytes, 0) > retention.maxBytes
 	)
 		remove(retained[0]!);
 	for (const id of removed)
@@ -471,7 +472,36 @@ export async function restoreSessions(
 		}
 	};
 	await validateSelected();
-	await client.copyTo(sandboxName, sessions, "/home/agent/.pi/agent/");
-	await validateSelected();
-	return backupDirectory;
+	const token = randomBytes(12).toString("hex");
+	const staging = `/home/agent/.pi/agent/.sessions-restore-${token}`;
+	const rollback = `/home/agent/.pi/agent/.sessions-rollback-${token}`;
+	try {
+		await client.copyTo(sandboxName, sessions, staging);
+		await validateSelected();
+		await client.exec(
+			sandboxName,
+			[
+				"sh",
+				"-ceu",
+				[
+					'target="$1"; staged="$2"; rollback="$3"',
+					'test -d "$staged"',
+					'had=0; if test -e "$target"; then test -d "$target"; mv -- "$target" "$rollback"; had=1; fi',
+					'if mv -- "$staged" "$target"; then rm -rf -- "$rollback"; else status=$?; if test "$had" = 1 && test -d "$rollback"; then mv -- "$rollback" "$target"; fi; exit "$status"; fi',
+				].join("\n"),
+				"pi-dsbx-session-restore",
+				SANDBOX_SESSIONS,
+				staging,
+				rollback,
+			],
+			{ user: "root" },
+		);
+		await validateSelected();
+		return backupDirectory;
+	} catch (cause) {
+		await client
+			.exec(sandboxName, ["rm", "-rf", "--", staging], { user: "root" })
+			.catch(() => undefined);
+		throw cause;
+	}
 }

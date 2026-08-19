@@ -26,7 +26,7 @@ async function repository(): Promise<string> {
 	return root;
 }
 
-function client(): SbxClient {
+function client(overrides: Partial<SbxClient> = {}): SbxClient {
 	return {
 		version: async () => ({ version: "0.38.0" }),
 		capabilities: async () => ({
@@ -39,6 +39,8 @@ function client(): SbxClient {
 		}),
 		list: async () => [],
 		exists: async () => false,
+		secretServices: async () => new Set<string>(),
+		...overrides,
 	} as unknown as SbxClient;
 }
 
@@ -55,8 +57,18 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 		platform: "darwin",
 		arch: "arm64",
 		nodeVersion: "v24.12.0",
-		runCommand: async (command) =>
-			command === "pi" ? IMAGE_LOCK.piVersion : `27.0.0-${secret}`,
+		certifyPlatform: () =>
+			Promise.resolve({
+				os: "darwin",
+				arch: "arm64",
+				runtimePlatform: "linux/arm64",
+			}),
+		runCommand: async (command, args) =>
+			command === "pi"
+				? IMAGE_LOCK.piVersion
+				: args[0] === "info"
+					? cwd
+					: `27.0.0-${secret}`,
 	});
 	assert.equal(receipt.schemaVersion, 1);
 	assert.equal(receipt.kind, "pi-dsbx.doctor");
@@ -82,8 +94,18 @@ test("doctor and status use deterministic nonzero reconciliation exits", async (
 		platform: "darwin" as const,
 		arch: "arm64",
 		nodeVersion: "v23.0.0",
-		runCommand: async (command: string) =>
-			command === "pi" ? IMAGE_LOCK.piVersion : "27.0.0",
+		certifyPlatform: () =>
+			Promise.resolve({
+				os: "darwin" as const,
+				arch: "arm64" as const,
+				runtimePlatform: "linux/arm64" as const,
+			}),
+		runCommand: async (command: string, args: readonly string[]) =>
+			command === "pi"
+				? IMAGE_LOCK.piVersion
+				: args[0] === "info"
+					? cwd
+					: "27.0.0",
 	};
 	const doctor = await buildDoctorReceipt(options);
 	assert.equal(
@@ -99,4 +121,95 @@ test("doctor and status use deterministic nonzero reconciliation exits", async (
 		["backup", "git", "image", "lease", "lifecycle", "upgrade"],
 	);
 	assert.equal(diagnosticsExitCode(status), 0);
+});
+
+test("doctor uses real host certification and a usable KVM character device", async () => {
+	const cwd = await repository();
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-agent-"));
+	let opened = false;
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		agentDir,
+		client: client(),
+		platform: "linux",
+		arch: "x64",
+		nodeVersion: "v24.12.0",
+		certifyPlatform: async () => ({
+			os: "linux",
+			arch: "x64",
+			runtimePlatform: "linux/amd64",
+		}),
+		statKvm: async () => ({ isCharacterDevice: () => true }),
+		openKvm: async () => {
+			opened = true;
+			return { close: async () => undefined };
+		},
+		runCommand: async (command, args) =>
+			command === "pi"
+				? IMAGE_LOCK.piVersion
+				: args[0] === "info"
+					? cwd
+					: "27.0.0",
+	});
+	assert.equal(receipt.checks.find((entry) => entry.id === "host")?.level, "pass");
+	assert.equal(receipt.checks.find((entry) => entry.id === "kvm")?.level, "pass");
+	assert.equal(opened, true);
+});
+
+test("doctor fails unsupported versions, non-device KVM, and missing explicit auth", async () => {
+	const cwd = await repository();
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-diagnostics-home-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "docker-sandboxes.json"),
+		JSON.stringify({ version: 2, auth: { mode: "proxy", providers: ["openai"] } }),
+	);
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		agentDir: join(home, ".pi", "agent"),
+		home: home,
+		client: client({
+			capabilities: async () => ({
+				clone: true,
+				noShareSkills: true,
+				kitValidate: true,
+				inspectJson: true,
+				policyCheckNetwork: true,
+				credentialServices: ["openai"],
+			}),
+		}),
+		platform: "linux",
+		arch: "x64",
+		nodeVersion: "v24.12.0",
+		certifyPlatform: () =>
+			Promise.reject(new Error("Ubuntu 24.04 or newer is required")),
+		statKvm: async () => ({ isCharacterDevice: () => false }),
+		runCommand: async (command, args) =>
+			command === "pi"
+				? IMAGE_LOCK.piVersion
+				: args[0] === "info"
+					? cwd
+					: "27.0.0",
+	});
+	assert.equal(receipt.checks.find((entry) => entry.id === "host")?.level, "fail");
+	assert.equal(receipt.checks.find((entry) => entry.id === "kvm")?.level, "fail");
+	assert.equal(receipt.checks.find((entry) => entry.id === "auth")?.level, "warning");
+});
+
+test("status receipt is observational and skips doctor probes", async () => {
+	const cwd = await repository();
+	const commands: string[] = [];
+	const receipt = await buildStatusReceipt({
+		cwd,
+		client: client(),
+		runCommand: async (command) => {
+			commands.push(command);
+			throw new Error("status must not probe commands");
+		},
+		certifyPlatform: async () => {
+			throw new Error("status must not certify host");
+		},
+	});
+	assert.equal(receipt.kind, "pi-dsbx.status");
+	assert.deepEqual(commands, []);
 });

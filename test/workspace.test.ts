@@ -221,7 +221,7 @@ test("repository inspection and names are deterministic", async () => {
 	assert.notEqual(sandboxName(root, true), sandboxName(root, true));
 });
 
-test("linked worktrees share repository identity and keep distinct state", async () => {
+test("linked worktrees keep distinct state and share daemon-global leases", async () => {
 	const root = await repository();
 	const linked = await mkdtemp(join(tmpdir(), "pi-dsbx-linked-state-"));
 	await rm(linked, { recursive: true });
@@ -245,12 +245,12 @@ test("linked worktrees share repository identity and keep distinct state", async
 	);
 	assert.equal((await loadSandboxState(root, mainState.name)).hostRoot, root);
 	assert.equal((await loadSandboxState(linked, linkedState.name)).hostRoot, linked);
-	const [mainLease, linkedLease] = await Promise.all([
-		acquireSandboxLease(root, "shared-name", "run"),
-		acquireSandboxLease(linked, "shared-name", "run"),
-	]);
-	assert.notEqual(mainLease.path, linkedLease.path);
-	await Promise.all([mainLease.release(), linkedLease.release()]);
+	const mainLease = await acquireSandboxLease(root, "shared-name", "run");
+	await assert.rejects(
+		() => acquireSandboxLease(linked, "shared-name", "run"),
+		/busy.*run/i,
+	);
+	await mainLease.release();
 });
 
 test("host staging reconciliation removes only recorded abandoned ownership", async () => {

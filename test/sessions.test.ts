@@ -171,7 +171,7 @@ test("session retention prunes oldest by count, age, and bytes but keeps latest"
 	for (const [policy, expected] of [
 		[{ maxCount: 2, maxAgeDays: 3650, maxBytes: 1_000_000 }, 2],
 		[{ maxCount: 10, maxAgeDays: 1, maxBytes: 1_000_000 }, 1],
-		[{ maxCount: 10, maxAgeDays: 3650, maxBytes: 5 }, 1],
+		[{ maxCount: 10, maxAgeDays: 3650, maxBytes: 5 }, 2],
 	] as const) {
 		const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-retention-"));
 		const root = sessionBackupRoot(agentDir, "repo", "sandbox");
@@ -198,6 +198,36 @@ test("session retention prunes oldest by count, age, and bytes but keeps latest"
 			false,
 		);
 	}
+});
+
+test("byte retention excludes the protected latest backup", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-retention-latest-"));
+	const root = sessionBackupRoot(agentDir, "repo", "sandbox");
+	for (const [id, contents] of [
+		["2026-08-10T00-00-00-000Z", "1234"],
+		["2026-08-11T00-00-00-000Z", "5678"],
+		["2026-08-12T00-00-00-000Z", "x".repeat(100)],
+	] as const) {
+		await mkdir(join(root, id, "sessions"), { recursive: true });
+		await writeFile(join(root, id, "sessions", "data"), contents);
+	}
+	await pruneSessionBackups(
+		agentDir,
+		"repo",
+		"sandbox",
+		{ maxCount: 10, maxAgeDays: 3650, maxBytes: 8 },
+		new Date("2026-08-13T00:00:00.000Z"),
+	);
+	assert.deepEqual(
+		(await listSessionBackups(agentDir, "repo", "sandbox")).map(
+			(backup) => backup.id,
+		),
+		[
+			"2026-08-10T00-00-00-000Z",
+			"2026-08-11T00-00-00-000Z",
+			"2026-08-12T00-00-00-000Z",
+		],
+	);
 });
 
 test("session list/delete and owned stale staging are explicit and bounded", async () => {
@@ -229,7 +259,7 @@ test("session list/delete and owned stale staging are explicit and bounded", asy
 	assert.deepEqual(await listSessionBackups(agentDir, "repo", "sandbox"), []);
 });
 
-test("restore selects only the latest backup and copies its sessions directory", async () => {
+test("restore selects only the latest backup and atomically swaps exact sessions", async () => {
 	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-sessions-"));
 	const root = sessionBackupRoot(agentDir, "repo", "sandbox");
 	for (const timestamp of [
@@ -243,19 +273,45 @@ test("restore selects only the latest backup and copies its sessions directory",
 		copyTo: async (name: string, source: string, destination: string) => {
 			calls.push([name, source, destination]);
 		},
+		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
 	assert.equal(
 		await restoreSessions(client, agentDir, "repo", "sandbox"),
 		join(root, "2026-08-14T12-34-56-789Z"),
 	);
-	assert.deepEqual(calls, [
-		[
-			"sandbox",
-			join(root, "2026-08-14T12-34-56-789Z", "sessions"),
-			"/home/agent/.pi/agent/",
-		],
-	]);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]?.[0], "sandbox");
+	assert.equal(
+		calls[0]?.[1],
+		join(root, "2026-08-14T12-34-56-789Z", "sessions"),
+	);
+	assert.match(calls[0]?.[2] ?? "", /^\/home\/agent\/\.pi\/agent\/\.sessions-restore-/);
+});
+
+test("restore failure keeps rollback logic and removes only unique staging", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-sessions-rollback-"));
+	const root = sessionBackupRoot(agentDir, "repo", "sandbox");
+	const id = "2026-08-14T12-34-56-789Z";
+	await mkdir(join(root, id, "sessions"), { recursive: true });
+	const calls: readonly string[][] = [];
+	const failure = new Error("injected atomic swap failure");
+	const client = {
+		copyTo: async () => undefined,
+		exec: async (_name: string, argv: string[]) => {
+			(calls as string[][]).push(argv);
+			if (argv[0] === "sh") throw failure;
+			return { stdout: "", stderr: "", code: 0 };
+		},
+	} as unknown as SbxClient;
+
+	await assert.rejects(
+		restoreSessions(client, agentDir, "repo", "sandbox", id),
+		failure,
+	);
+	assert.match(calls[0]?.[2] ?? "", /mv -- \"\$rollback\" \"\$target\"/);
+	assert.deepEqual(calls[1]?.slice(0, 4), ["rm", "-rf", "--", calls[0]?.[6]]);
+	assert.match(calls[0]?.[6] ?? "", /\.sessions-restore-/);
 });
 
 test("restore rejects a symlink in its controlled path ancestors", async () => {
@@ -305,6 +361,7 @@ test("restore ignores partial and arbitrary entries when selecting newest backup
 		copyTo: async (_name: string, value: string) => {
 			source = value;
 		},
+		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
 	assert.equal(
@@ -411,6 +468,7 @@ test("restore propagates a candidate disappearance race", async () => {
 			error.code = "ENOENT";
 			throw error;
 		},
+		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 	} as unknown as SbxClient;
 
 	await assert.rejects(
