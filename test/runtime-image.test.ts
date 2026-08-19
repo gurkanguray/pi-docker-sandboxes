@@ -65,6 +65,7 @@ test("runtime archive verifier binds both platform manifests and smoke tests", a
 	assert.match(verifier, /indexDigest/);
 	assert.match(verifier, /platformDigests/);
 	assert.match(verifier, /unsupported OCI platform/);
+	assert.match(verifier, /attestation-manifest/);
 	assert.match(verifier, /org\.opencontainers\.image\.source/);
 	assert.match(verifier, /org\.opencontainers\.image\.base\.name/);
 	assert.match(verifier, /docker run/);

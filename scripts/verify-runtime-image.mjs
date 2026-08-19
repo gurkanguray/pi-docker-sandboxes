@@ -76,11 +76,23 @@ async function inspectArchive(archive, variant, sourceSha) {
 			indexDigest = descriptor.digest;
 		}
 		const platformDigests = {};
+		const attestationReferences = [];
 		let labels;
 		for (const descriptor of index.manifests ?? []) {
 			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
-			if (!expectedPlatforms.includes(platform))
+			if (!expectedPlatforms.includes(platform)) {
+				if (
+					platform === "unknown/unknown" &&
+					descriptor.annotations?.["vnd.docker.reference.type"] ===
+						"attestation-manifest"
+				) {
+					attestationReferences.push(
+						descriptor.annotations["vnd.docker.reference.digest"],
+					);
+					continue;
+				}
 				throw new Error(`unsupported OCI platform: ${platform}`);
+			}
 			if (platformDigests[platform])
 				throw new Error(`duplicate OCI manifest for ${platform}`);
 			const manifest = JSON.parse(await readBlob(layout, descriptor.digest));
@@ -114,6 +126,9 @@ async function inspectArchive(archive, variant, sourceSha) {
 			throw new Error(
 				"archive must contain exactly linux/amd64 and linux/arm64 images",
 			);
+		for (const reference of attestationReferences)
+			if (!Object.values(platformDigests).includes(reference))
+				throw new Error(`attestation references unknown manifest: ${reference}`);
 		return { indexDigest, platformDigests, labels };
 	} finally {
 		await rm(layout, { recursive: true, force: true });
