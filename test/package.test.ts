@@ -49,7 +49,7 @@ test("packed CLI runs from node_modules", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-pack-"));
 	try {
 		const { stdout } = await execNpm(
-			["pack", "--ignore-scripts", "--silent", "--pack-destination", directory],
+			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
 		const packageDirectory = join(
@@ -108,7 +108,7 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-pack-"));
 	try {
 		const { stdout } = await execNpm(
-			["pack", "--ignore-scripts", "--silent", "--pack-destination", directory],
+			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
 		const { stdout: listing } = await exec("tar", [

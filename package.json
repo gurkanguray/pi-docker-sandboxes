@@ -36,7 +36,7 @@
   },
   "scripts": {
     "build:cli": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; rm -rf dist && tsc --project tsconfig.cli.json",
-    "prepack": "if [ -f .source-checkout ]; then npm run build:cli; fi",
+    "prepack": "node scripts/prepack.mjs",
     "typecheck": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; tsc --noEmit",
     "test": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/*.test.ts",
     "test:coverage": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-coverage.mjs",
