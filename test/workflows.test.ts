@@ -330,7 +330,7 @@ test("release workflows are valid npm-only gates", async () => {
 	for (const step of runtimeSecuritySteps.filter((candidate) =>
 		candidate.uses?.startsWith("aquasecurity/trivy-action@"),
 	))
-		assert.equal(step.with?.input, "runtime/runtime.oci.tar");
+		assert.equal(step.with?.input, "runtime/oci");
 	const publishRuntime = runtime.jobs.publish;
 	assert.equal(publishRuntime.environment?.name, "release-runtime");
 	assert.deepEqual(publishRuntime.permissions, {

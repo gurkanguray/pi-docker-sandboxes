@@ -93,11 +93,15 @@ jobs:
         with:
           name: runtime-${{ matrix.variant }}-${{ needs.source.outputs.sha }}
           path: runtime
+      - name: Extract the exact OCI archive
+        run: |
+          mkdir runtime/oci
+          tar -xf runtime/runtime.oci.tar -C runtime/oci
       - name: Scan exact platform manifest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          input: runtime/runtime.oci.tar
+          input: runtime/oci
           format: sarif
           output: runtime-${{ matrix.variant }}-${{ matrix.arch }}.sarif
           severity: HIGH,CRITICAL
@@ -110,7 +114,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          input: runtime/runtime.oci.tar
+          input: runtime/oci
           format: cyclonedx
           output: runtime-${{ matrix.variant }}-${{ matrix.arch }}.cdx.json
           additional-args: --platform linux/${{ matrix.arch }}
