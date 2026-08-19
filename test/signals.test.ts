@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import test, { type TestContext } from "node:test";
+import { promisify } from "node:util";
 import { runInherited, SbxNotInstalledError } from "../src/sbx/client.ts";
 import {
 	INHERITED_GRACE_MS,
@@ -10,22 +12,48 @@ import {
 
 const moduleUrl = new URL("../src/sbx/client.ts", import.meta.url).href;
 const isWindows = process.platform === "win32";
+const exec = promisify(execFile);
+
+interface MarkedProcess {
+	pid: number;
+	processGroup: number;
+	command: string;
+}
+
+async function markedProcesses(marker: string): Promise<MarkedProcess[]> {
+	const { stdout } = await exec("ps", ["-ax", "-o", "pid=,pgid=,command="], {
+		encoding: "utf8",
+	});
+	return stdout
+		.split("\n")
+		.map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+		.filter((match): match is RegExpMatchArray => match !== null)
+		.map((match) => ({
+			pid: Number(match[1]),
+			processGroup: Number(match[2]),
+			command: match[3]!,
+		}))
+		.filter((process) => process.command.includes(marker));
+}
 
 interface WrappedProcess {
 	child: ChildProcess;
 	exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 	output: string;
 	waitForLine(line: string): Promise<void>;
+	assertNoOwnedProcesses(): Promise<void>;
 }
 
 function spawnWrapped(t: TestContext, source: string): WrappedProcess {
+	const marker = `pi-dsbx-signal-${randomUUID()}`;
 	const child = spawn(
 		process.execPath,
 		[
 			"--experimental-strip-types",
 			"--input-type=module",
 			"-e",
-			`import {runInherited} from ${JSON.stringify(moduleUrl)}; process.exitCode = await runInherited(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(`console.log("process-group:" + process.pid); ${source}`)}], process.env);`,
+			`import {runInherited} from ${JSON.stringify(moduleUrl)}; process.exitCode = await runInherited(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(`console.log("process-group:" + process.pid); ${source}`)}, process.argv[1]], process.env);`,
+			marker,
 		],
 		{ stdio: ["ignore", "pipe", "pipe"] },
 	);
@@ -76,15 +104,19 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 		});
 	});
 	t.after(async () => {
-		const killGroup = (signal: NodeJS.Signals) => {
+		const signalOwnedGroup = async (signal: NodeJS.Signals) => {
 			if (!processGroup) return;
+			const ownsGroup = (await markedProcesses(marker)).some(
+				(process) => process.processGroup === processGroup,
+			);
+			if (!ownsGroup) return;
 			try {
 				process.kill(-processGroup, signal);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
 			}
 		};
-		killGroup("SIGTERM");
+		await signalOwnedGroup("SIGTERM");
 		if (child.exitCode === null && child.signalCode === null)
 			child.kill("SIGTERM");
 		let fallback: NodeJS.Timeout | undefined;
@@ -96,16 +128,12 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 		]);
 		if (fallback) clearTimeout(fallback);
 		if (!closedCleanly) {
-			killGroup("SIGKILL");
+			await signalOwnedGroup("SIGKILL");
 			if (child.exitCode === null && child.signalCode === null)
 				child.kill("SIGKILL");
 		}
 		await Promise.all([exit, close]);
-		if (processGroup)
-			assert.throws(
-				() => process.kill(-processGroup!, 0),
-				(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-			);
+		assert.deepEqual(await markedProcesses(marker), []);
 	});
 	return {
 		child,
@@ -126,6 +154,10 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 				entries.push({ resolve, reject });
 				waiters.set(line, entries);
 			});
+		},
+		async assertNoOwnedProcesses() {
+			await close;
+			assert.deepEqual(await markedProcesses(marker), []);
 		},
 	};
 }
@@ -363,10 +395,7 @@ test("readiness rejects on early exit and leaves no child", {
 	assert.deepEqual(await wrapper.exit, { code: 7, signal: null });
 	const pid = Number(wrapper.output.match(/child-pid:(\d+)/)?.[1]);
 	assert.ok(pid > 0);
-	assert.throws(
-		() => process.kill(pid, 0),
-		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-	);
+	await wrapper.assertNoOwnedProcesses();
 });
 
 test("natural direct-child exit kills a TERM-resistant same-group grandchild before resolving", {
@@ -380,7 +409,7 @@ test("natural direct-child exit kills a TERM-resistant same-group grandchild bef
 	`;
 	const child = `
 		import { spawn } from "node:child_process";
-		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}], {
+		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
 			stdio: ["ignore", "inherit", "inherit", "ipc"],
 		});
 		grandchild.once("message", () => {
@@ -398,10 +427,7 @@ test("natural direct-child exit kills a TERM-resistant same-group grandchild bef
 	);
 	const pid = Number(wrapper.output.match(/natural-grandchild:(\d+)/)?.[1]);
 	assert.ok(pid > 0);
-	assert.throws(
-		() => process.kill(pid, 0),
-		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-	);
+	await wrapper.assertNoOwnedProcesses();
 });
 
 test("forwarded TERM reaps a resistant grandchild before preserving the direct-child result", {
@@ -415,7 +441,7 @@ test("forwarded TERM reaps a resistant grandchild before preserving the direct-c
 	`;
 	const child = `
 		import { spawn } from "node:child_process";
-		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}], {
+		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
 			stdio: ["ignore", "inherit", "inherit", "ipc"],
 		});
 		process.on("SIGTERM", () => process.exit(42));
@@ -432,10 +458,7 @@ test("forwarded TERM reaps a resistant grandchild before preserving the direct-c
 	);
 	const pid = Number(wrapper.output.match(/forwarded-grandchild:(\d+)/)?.[1]);
 	assert.ok(pid > 0);
-	assert.throws(
-		() => process.kill(pid, 0),
-		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-	);
+	await wrapper.assertNoOwnedProcesses();
 });
 
 test("forwarded TERM boundedly kills a resistant direct child and descendant", {
@@ -449,7 +472,7 @@ test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 	`;
 	const child = `
 		import { spawn } from "node:child_process";
-		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}], {
+		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
 			stdio: ["ignore", "inherit", "inherit", "ipc"],
 		});
 		process.on("SIGTERM", () => console.log("resistant-direct-ignored"));
@@ -465,16 +488,9 @@ test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 		{ code: 137, signal: null },
 		wrapper.output,
 	);
-	for (const pid of [
-		Number(wrapper.output.match(/process-group:(\d+)/)?.[1]),
-		Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]),
-	]) {
-		assert.ok(pid > 0);
-		assert.throws(
-			() => process.kill(pid, 0),
-			(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-		);
-	}
+	assert.ok(Number(wrapper.output.match(/process-group:(\d+)/)?.[1]) > 0);
+	assert.ok(Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]) > 0);
+	await wrapper.assertNoOwnedProcesses();
 });
 
 test("inherited runner preserves a child-defined SIGINT exit", {
@@ -538,7 +554,7 @@ test("termination reaches a grandchild in the child process group", {
 		`;
 	const child = `
 			import { spawn } from "node:child_process";
-			const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}], {
+			const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}, process.argv[1]], {
 				stdio: ["ignore", "inherit", "inherit", "ipc"],
 			});
 			grandchild.once("message", () => console.log("ready:" + grandchild.pid));

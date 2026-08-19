@@ -121,6 +121,37 @@ test("Kit owns an exact private copy of the sandbox runtime", async () => {
 	assert.equal((await stat(join(runtimePath, ".."))).mode & 0o777, 0o700);
 });
 
+test("Kit enforces runtime modes with restrictive umask and an existing directory", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-kit-modes-"));
+	const runtimeDirectory = join(
+		directory,
+		"files",
+		"home",
+		".pi",
+		"agent",
+		"runtime",
+	);
+	await mkdir(runtimeDirectory, { recursive: true, mode: 0o755 });
+	const spec = buildKitSpec({
+		config: mergeConfig(),
+		services: [],
+		image: standard,
+	});
+	const previousUmask = process.umask(0o777);
+	try {
+		await writeKitDirectory(directory, spec);
+	} finally {
+		process.umask(previousUmask);
+	}
+	assert.equal((await stat(runtimeDirectory)).mode & 0o777, 0o700);
+	assert.equal(
+		(
+			await stat(join(runtimeDirectory, "pi-docker-sandboxes.mjs"))
+		).mode & 0o777,
+		0o600,
+	);
+});
+
 test("personalization cannot overwrite the Kit-owned runtime", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-kit-collision-"));
 	const personalization = await mkdtemp(

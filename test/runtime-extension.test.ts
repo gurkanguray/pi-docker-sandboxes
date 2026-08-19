@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface RuntimeExtensionModule {
+	default(
+		pi: ExtensionAPI,
+		dependencies?: {
+			env?: NodeJS.ProcessEnv;
+			readMountInfo?: () => Promise<string>;
+		},
+	): Promise<void>;
 	registerSandboxRuntime(
 		pi: ExtensionAPI,
 		context: { env: NodeJS.ProcessEnv; mountInfo: string },
@@ -57,6 +67,42 @@ test("sandbox runtime is standalone from every host controller subsystem", async
 		/(?:from\s+|import\s*\()["'][^"']*(?:src\/(?:launch|image|workspace|config)|image-lock|host-auth)[^"']*["']/,
 	);
 	assert.doesNotMatch(source, /registerFlag\s*\(/);
+});
+
+test("standalone runtime loads without resolving host extension imports", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-runtime-isolated-"));
+	const isolatedRuntime = join(directory, "pi-docker-sandboxes.mjs");
+	await writeFile(isolatedRuntime, await readFile(runtimeUrl));
+	const runtime = (await import(
+		pathToFileURL(isolatedRuntime).href
+	)) as RuntimeExtensionModule;
+	const fake = fakeApi();
+	await runtime.default(fake.pi, {
+		env: { PI_DOCKER_SANDBOX_ACTIVE: "1" },
+		readMountInfo: async () => readOnlySourceMount,
+	});
+	assert.ok(fake.command());
+});
+
+test("default export registers through injected attestation evidence", async () => {
+	const runtime = (await import(runtimeUrl.href)) as RuntimeExtensionModule;
+	const fake = fakeApi();
+	await runtime.default(fake.pi, {
+		env: {
+			PI_DOCKER_SANDBOX_ACTIVE: "1",
+			PI_DOCKER_SANDBOX_PROFILE: "hardened",
+		},
+		readMountInfo: async () => readOnlySourceMount,
+	});
+	assert.deepEqual(
+		fake
+			.command()
+			?.getArgumentCompletions?.("")
+			.map(({ value }) => value),
+		["status", "doctor"],
+	);
+	assert.ok(fake.sessionStart());
+	assert.equal(fake.flagRegistrations(), 0);
 });
 
 test("attested runtime exposes status and diagnostics only", async () => {

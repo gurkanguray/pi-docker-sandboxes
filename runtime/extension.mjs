@@ -69,12 +69,18 @@ export async function registerSandboxRuntime(pi, context) {
 	});
 }
 
-export default async function sandboxRuntimeExtension(pi) {
+export default async function sandboxRuntimeExtension(
+	pi,
+	{
+		env = process.env,
+		readMountInfo = () => readFile("/proc/self/mountinfo", "utf8"),
+	} = {},
+) {
 	let mountInfo = "";
 	try {
-		mountInfo = await readFile("/proc/self/mountinfo", "utf8");
+		mountInfo = await readMountInfo();
 	} catch {
 		// Missing evidence is intentionally treated as failed attestation.
 	}
-	await registerSandboxRuntime(pi, { env: process.env, mountInfo });
+	await registerSandboxRuntime(pi, { env, mountInfo });
 }

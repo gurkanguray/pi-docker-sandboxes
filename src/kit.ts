@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DockerSandboxConfig } from "./config.ts";
 import type { CredentialService } from "./config.ts";
@@ -157,11 +157,14 @@ export async function writeKitDirectory(
 	const agentDirectory = join(directory, "files", "home", ".pi", "agent");
 	const runtimeDirectory = join(agentDirectory, "runtime");
 	await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+	await chmod(runtimeDirectory, 0o700);
+	const runtimePath = join(runtimeDirectory, "pi-docker-sandboxes.mjs");
 	await writeFile(
-		join(runtimeDirectory, "pi-docker-sandboxes.mjs"),
+		runtimePath,
 		await readFile(new URL("../runtime/extension.mjs", import.meta.url)),
 		{ flag: "wx", mode: 0o600 },
 	);
+	await chmod(runtimePath, 0o600);
 	if (options.personalization)
 		await cp(options.personalization, agentDirectory, {
 			recursive: true,

@@ -22,6 +22,18 @@ const selectedImage = process.env.PI_DOCKER_SANDBOX_E2E_IMAGE;
 const selectedTemplateStoreId =
 	process.env.PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID;
 const exec = promisify(execFile);
+const SANDBOX_RUNTIME_EXTENSION =
+	"/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs";
+const CONTROLLER_PACKAGE_DIRECTORY =
+	"/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes";
+
+async function assertControllerPackageAbsent(
+	execSandbox: (name: string, argv: readonly string[]) => Promise<unknown>,
+	name: string,
+): Promise<void> {
+	await execSandbox(name, ["test", "!", "-e", CONTROLLER_PACKAGE_DIRECTORY]);
+}
+
 async function recordSandbox(name: string): Promise<void> {
 	const path = process.env.PI_DOCKER_SANDBOX_E2E_NAMES;
 	if (path) await appendFile(path, `${name}\n`);
@@ -51,6 +63,24 @@ const e2eLaunch: typeof launch = async (options) => {
 			: options.resolveImage,
 	});
 };
+test("E2E runtime gate fails closed when the controller package is present", async () => {
+	const presenceFailure = new Error("controller package present");
+	const calls: Array<{ name: string; argv: readonly string[] }> = [];
+	await assert.rejects(
+		assertControllerPackageAbsent(async (name, argv) => {
+			calls.push({ name, argv });
+			throw presenceFailure;
+		}, "sandbox-fixture"),
+		(error) => error === presenceFailure,
+	);
+	assert.deepEqual(calls, [
+		{
+			name: "sandbox-fixture",
+			argv: ["test", "!", "-e", CONTROLLER_PACKAGE_DIRECTORY],
+		},
+	]);
+});
+
 async function host(
 	command: string,
 	args: string[],
@@ -122,10 +152,15 @@ sandboxTest(
 			await assert.rejects(() => lstat(stagingPath));
 			await rm(stagingProbe);
 
+			await assertControllerPackageAbsent(
+				(sandbox, argv) => client.exec(sandbox, argv),
+				name,
+			);
+			await client.exec(name, ["test", "-f", SANDBOX_RUNTIME_EXTENSION]);
 			const runtime = await client.exec(name, [
 				"sh",
 				"-c",
-				"env; printf '\\nPI_VERSION='; pi --version; test ! -e /usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes; test -f /home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs; printf '\\nRUNTIME_EXTENSION=kit\\n'",
+				"set -eu; env; printf '\\nPI_VERSION='; pi --version; printf '\\nRUNTIME_EXTENSION=kit\\n'",
 			]);
 			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_ACTIVE=1/);
 			assert.match(runtime.stdout, /PI_VERSION=0\.84\.1/);
@@ -149,14 +184,19 @@ sandboxTest(
 					assert.notEqual(githubProxy, process.env.GH_TOKEN);
 			}
 
-			const doctorScript =
-				"import {readFile} from 'node:fs/promises'; import {sandboxDiagnostics} from '/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs'; console.log(JSON.stringify(sandboxDiagnostics(process.env, await readFile('/proc/self/mountinfo', 'utf8'))))";
 			const doctor = await client.exec(name, [
-				"sh",
-				"-c",
-				`node --input-type=module -e ${JSON.stringify(doctorScript)}`,
+				"pi",
+				"-e",
+				SANDBOX_RUNTIME_EXTENSION,
+				"--print",
+				"--no-session",
+				"/docker-sandbox doctor",
 			]);
-			assert.doesNotMatch(doctor.stdout, /"level":"fail"/);
+			assert.equal(doctor.code, 0);
+			assert.doesNotMatch(
+				`${doctor.stdout}\n${doctor.stderr}`,
+				/no model selected|api key|authentication failed/i,
+			);
 			const boundary = await client.exec(name, [
 				"sh",
 				"-c",
