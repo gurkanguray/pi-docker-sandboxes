@@ -13,8 +13,7 @@ function fail(message) {
 }
 
 function allowed(path, files, hasLicense) {
-	if (path === "package.json" || (hasLicense && path === "LICENSE"))
-		return true;
+	if (path === "package.json" || (hasLicense && path === "LICENSE")) return true;
 	return files.some((entry) => {
 		const normalized = entry.replace(/^\.\//, "");
 		if (normalized.endsWith("/")) return path.startsWith(normalized);

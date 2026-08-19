@@ -329,10 +329,7 @@ test("directory sync failures propagate through create and release", async (t) =
 				"sync-create",
 				"run",
 				runtime(root, {
-					syncDirectory: async (
-						path: string,
-						handle: { sync(): Promise<void> },
-					) => {
+					syncDirectory: async (path: string, handle: { sync(): Promise<void> }) => {
 						if (path.endsWith("/leases")) throw invalid;
 						await handle.sync();
 					},
@@ -352,12 +349,8 @@ test("directory sync failures propagate through create and release", async (t) =
 		"sync-release",
 		"run",
 		runtime(root, {
-			syncDirectory: async (
-				path: string,
-				handle: { sync(): Promise<void> },
-			) => {
-				if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2)
-					throw invalid;
+			syncDirectory: async (path: string, handle: { sync(): Promise<void> }) => {
+				if (path.endsWith("/leases") && ++leaseDirectorySyncs === 2) throw invalid;
 				await handle.sync();
 			},
 		}),
@@ -418,8 +411,7 @@ test("concurrent in-process acquisition has exactly one winner", async (t) => {
 		attempts.filter(
 			(result) =>
 				result.status === "rejected" &&
-				(result.reason as { exitCode?: number }).exitCode ===
-					LEASE_BUSY_EXIT_CODE,
+				(result.reason as { exitCode?: number }).exitCode === LEASE_BUSY_EXIT_CODE,
 		).length,
 		15,
 	);

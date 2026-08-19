@@ -89,8 +89,7 @@ const launch: typeof productionLaunch = (options) =>
 				await writeFile(path, packageTarball);
 				return path;
 			}),
-		resolveImage:
-			options.resolveImage ?? (async () => ({ image: launchImage })),
+		resolveImage: options.resolveImage ?? (async () => ({ image: launchImage })),
 		certifyPlatform:
 			options.certifyPlatform ??
 			(async () => ({
@@ -211,10 +210,7 @@ test("Linux KVM preflight precedes repository and sandbox mutation", async () =>
 			},
 		}),
 		(error: unknown) => {
-			assert.equal(
-				(error as { detail?: string }).detail,
-				"KVM O_RDWR denied",
-			);
+			assert.equal((error as { detail?: string }).detail, "KVM O_RDWR denied");
 			return true;
 		},
 	);
@@ -230,9 +226,7 @@ test("host certification rejection precedes repository inspection", async () => 
 			client: launchClient,
 			config: launchConfig,
 			certifyPlatform: async () => {
-				throw new Error(
-					"Ubuntu 24.04 or newer is required; detected ubuntu 22.04",
-				);
+				throw new Error("Ubuntu 24.04 or newer is required; detected ubuntu 22.04");
 			},
 			inspectRepository: async (...args) => {
 				inspected = true;
@@ -472,9 +466,7 @@ test("verified npm tarballs are copied, installed locally, and always cleaned", 
 				assert.equal(result.agentExitCode, 0);
 				if (failure === "install")
 					assert.ok(
-						result.warnings.some((warning) =>
-							/package was skipped/.test(warning),
-						),
+						result.warnings.some((warning) => /package was skipped/.test(warning)),
 					);
 			}
 			assert.ok(events.indexOf("copy") > events.indexOf("create"));
@@ -677,9 +669,8 @@ test("native packages prompt once and install a compiler only after yes", async 
 			const client = {
 				...launchClient,
 				validateKit: async (directory: string) => {
-					kitAllow = JSON.parse(
-						await readFile(join(directory, "spec.yaml"), "utf8"),
-					).permissions.network.allow;
+					kitAllow = JSON.parse(await readFile(join(directory, "spec.yaml"), "utf8"))
+						.permissions.network.allow;
 				},
 				create: async () => {
 					events.push("create");
@@ -777,10 +768,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 				);
 				assert.deepEqual(
 					statuses.filter((status) => status.startsWith("installing npm:")),
-					[
-						"installing npm:context-mode@1.0.0",
-						"installing npm:pi-subagents@1.0.0",
-					],
+					["installing npm:context-mode@1.0.0", "installing npm:pi-subagents@1.0.0"],
 				);
 				assert.deepEqual(kitAllow, [
 					"api.github.com",
@@ -942,10 +930,7 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 		for (const failure of ["compiler", "package"] as const) {
 			let attachedSettings: { packages?: string[] } | undefined;
 			let kitSettingsPath = "";
-			const sandboxSettingsPath = join(
-				home,
-				`sandbox-${failure}-settings.json`,
-			);
+			const sandboxSettingsPath = join(home, `sandbox-${failure}-settings.json`);
 			let skillsPresent = false;
 			const delivered: string[] = [];
 			const execs: string[][] = [];
@@ -996,9 +981,7 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 					);
 				},
 				attach: async () => {
-					attachedSettings = JSON.parse(
-						await readFile(sandboxSettingsPath, "utf8"),
-					);
+					attachedSettings = JSON.parse(await readFile(sandboxSettingsPath, "utf8"));
 					return 0;
 				},
 				exec: async (
@@ -1017,8 +1000,7 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 						const packageSpec = argv.at(-1)!;
 						const npmTarball = packageSpec.startsWith("/tmp/pi-dsbx-package-");
 						if (
-							packageSpec ===
-								lockedGit("git:github.com/example/failing-package") ||
+							packageSpec === lockedGit("git:github.com/example/failing-package") ||
 							(failure === "package" && npmTarball && npmInstallIndex++ === 0)
 						)
 							return { stdout: "", stderr: "npm ERR secret-value", code: 1 };
@@ -1325,9 +1307,7 @@ test("missing proxy credentials are optional and guidance precedes launch", asyn
 	});
 	const spec = JSON.parse(kit);
 	assert.deepEqual(
-		spec.credentials.map(
-			(credential: { service: string }) => credential.service,
-		),
+		spec.credentials.map((credential: { service: string }) => credential.service),
 		["openai"],
 	);
 	assert.equal(spec.credentials[0].required, false);
@@ -1338,8 +1318,7 @@ test("missing proxy credentials are optional and guidance precedes launch", asyn
 			events.indexOf("warning:  sbx secret set openai"),
 	);
 	assert.ok(
-		events.indexOf("warning:  sbx secret set openai") <
-			events.indexOf("create"),
+		events.indexOf("warning:  sbx secret set openai") < events.indexOf("create"),
 	);
 	assert.ok(events.indexOf("create") < events.indexOf("attach"));
 	assert.equal(
@@ -1433,8 +1412,7 @@ test("launch does not warn for copied oauth host providers", async () => {
 		assert.equal(
 			result.warnings.some(
 				(warning) =>
-					warning ===
-					"Host provider openai-codex has no sandbox credential service",
+					warning === "Host provider openai-codex has no sandbox credential service",
 			),
 			false,
 		);
@@ -1444,8 +1422,7 @@ test("launch does not warn for copied oauth host providers", async () => {
 		);
 		assert.ok(
 			result.warnings.some(
-				(warning) =>
-					warning.includes("VM-readable") && warning.includes("persist"),
+				(warning) => warning.includes("VM-readable") && warning.includes("persist"),
 			),
 		);
 	} finally {
@@ -1572,10 +1549,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 			);
 			const cleanup = commands.find((args) => args[0] === "rm");
 			assert.ok(cleanup, `${failure} failure must attempt OAuth cleanup`);
-			assert.match(
-				cleanup.at(-1) ?? "",
-				/^\/root\/\.pi-docker-sandboxes-auth-/,
-			);
+			assert.match(cleanup.at(-1) ?? "", /^\/root\/\.pi-docker-sandboxes-auth-/);
 		}
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -1585,9 +1559,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 
 test("oauth-copy rejects explicitly requested providers without copyable tokens", async () => {
 	const root = await committedRepository();
-	const home = await mkdtemp(
-		join(tmpdir(), "pi-dsbx-launch-oauth-ineligible-"),
-	);
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-oauth-ineligible-"));
 	const agent = join(home, ".pi", "agent");
 	await mkdir(agent, { recursive: true });
 	const oldHome = process.env.HOME;
@@ -1952,21 +1924,14 @@ test("creating intent persists before create and repository reinspection", async
 			create: async () => {
 				calls.push("create");
 				assert.equal(await exists(path), true);
-				if (mode === "launch-failure")
-					throw new Error("injected launch failure");
+				if (mode === "launch-failure") throw new Error("injected launch failure");
 				if (mode === "head-drift") {
 					await writeFile(join(root, "drift.txt"), "drift\n");
 					await git(root, "add", "drift.txt");
 					await git(root, "commit", "-m", "drift");
 				}
 				if (mode === "identity-drift")
-					await git(
-						root,
-						"remote",
-						"add",
-						"origin",
-						"https://example.invalid/repo",
-					);
+					await git(root, "remote", "add", "origin", "https://example.invalid/repo");
 			},
 			inspect: async () => {
 				calls.push("inspect");
@@ -2024,10 +1989,7 @@ test("capability and existence failures are phased and redact sbx stderr", async
 					(error as { detail?: string }).detail?.includes(secret),
 					false,
 				);
-				assert.match(
-					(error as { detail?: string }).detail ?? "",
-					/\[redacted\]/,
-				);
+				assert.match((error as { detail?: string }).detail ?? "", /\[redacted\]/);
 				assert.ok((error as { recovery?: readonly string[] }).recovery?.length);
 				return true;
 			},
@@ -2246,11 +2208,7 @@ test("re-exec maps sandbox flags and preserves inner Pi argv", () => {
 		"hello world",
 	]);
 	assert.ok(parsed);
-	assert.deepEqual(parsed.innerPiArgs, [
-		"--model",
-		"openai/gpt",
-		"hello world",
-	]);
+	assert.deepEqual(parsed.innerPiArgs, ["--model", "openai/gpt", "hello world"]);
 	assert.deepEqual(parsed.launcherArgs.slice(-4), [
 		"--",
 		"--model",

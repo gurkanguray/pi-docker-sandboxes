@@ -287,9 +287,9 @@ function option(args: string[], name: string): string | undefined {
 export function launchProcessExitCode(
 	result: Pick<LaunchResult, "agentExitCode" | "launcherExitCode">,
 ): number {
-	return result.agentExitCode !== 0
-		? result.agentExitCode
-		: result.launcherExitCode;
+	return result.agentExitCode === 0
+		? result.launcherExitCode
+		: result.agentExitCode;
 }
 
 export async function main(
@@ -619,19 +619,19 @@ export async function main(
 				console.log(`Applied ${patchPath}`);
 				return 0;
 			}
-			const dirty = !state
-				? undefined
-				: (
+			const dirty = state
+				? (
 						await client.exec(name, ["git", "status", "--porcelain=v1"], {
 							workdir: state.hostRoot,
 						})
-					).stdout.trim().length > 0;
+					).stdout.trim().length > 0
+				: undefined;
 			let discardAuthorized = discardChanges;
 			if ((!state || dirty) && !discardAuthorized)
 				discardAuthorized = await confirm(
-					!state
-						? "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state."
-						: "Sandbox has unexported changes. Destroy and discard them permanently?",
+					state
+						? "Sandbox has unexported changes. Destroy and discard them permanently?"
+						: "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state.",
 				);
 			if (
 				dirty === false &&
@@ -641,7 +641,7 @@ export async function main(
 				throw new Error("Destroy cancelled");
 			const disposition = decideDisposition({
 				keep: false,
-				changes: !state ? "unknown" : dirty ? "changed" : "clean",
+				changes: state ? (dirty ? "changed" : "clean") : "unknown",
 				exportRequested: false,
 				exportSucceeded: false,
 				discardAuthorized,
