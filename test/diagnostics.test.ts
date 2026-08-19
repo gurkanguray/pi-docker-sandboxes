@@ -66,11 +66,7 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 				runtimePlatform: "linux/arm64",
 			}),
 		runCommand: async (command, args) =>
-			command === "pi"
-				? "0.84.2"
-				: args[0] === "info"
-					? cwd
-					: `27.0.0-${secret}`,
+			command === "pi" ? "0.84.2" : args[0] === "info" ? cwd : `27.0.0-${secret}`,
 	});
 	assert.equal(receipt.schemaVersion, 1);
 	assert.equal(receipt.kind, "pi-dsbx.doctor");
@@ -122,20 +118,13 @@ test("doctor rejects prerelease Node and Pi versions for stable ranges", async (
 			runtimePlatform: "linux/arm64",
 		}),
 		runCommand: async (command, args) =>
-			command === "pi"
-				? "0.84.2-beta"
-				: args[0] === "info"
-					? cwd
-					: "27.0.0",
+			command === "pi" ? "0.84.2-beta" : args[0] === "info" ? cwd : "27.0.0",
 	});
 	assert.equal(
 		receipt.checks.find((entry) => entry.id === "node")?.level,
 		"fail",
 	);
-	assert.equal(
-		receipt.checks.find((entry) => entry.id === "pi")?.level,
-		"fail",
-	);
+	assert.equal(receipt.checks.find((entry) => entry.id === "pi")?.level, "fail");
 	assert.equal(
 		receipt.checks.find((entry) => entry.id === "pi")?.data?.version,
 		"0.84.2-beta",
@@ -333,9 +322,7 @@ test("Docker Desktop VM storage reports usage without host statfs ENOENT", async
 		statFilesystem: (async (path: string) => {
 			statted.push(path);
 			if (path === "/var/lib/docker") {
-				const error = new Error(
-					"not host-addressable",
-				) as NodeJS.ErrnoException;
+				const error = new Error("not host-addressable") as NodeJS.ErrnoException;
 				error.code = "ENOENT";
 				throw error;
 			}

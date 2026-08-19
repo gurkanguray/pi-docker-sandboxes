@@ -363,9 +363,7 @@ export async function buildDoctorReceipt(
 				(() => open("/dev/kvm", constants.O_RDWR | constants.O_NOFOLLOW))
 			)();
 			await handle.close();
-			checks.push(
-				check("kvm", "pass", "Linux KVM is a usable character device"),
-			);
+			checks.push(check("kvm", "pass", "Linux KVM is a usable character device"));
 		} catch (cause) {
 			checks.push(failure("kvm", cause));
 		}
@@ -435,17 +433,14 @@ export async function buildDoctorReceipt(
 					expectedRepositoryIdentity: repository.identity,
 					expectedWorktreeIdentity: repository.worktreeIdentity,
 				});
-				const inspection = daemonExists
-					? await client.inspect(name)
-					: undefined;
+				const inspection = daemonExists ? await client.inspect(name) : undefined;
 				const decision = reconcileSandbox(state, {
 					exists: daemonExists,
 					...(inspection
 						? { imageMatches: inspection.image === state.runtimeImage }
 						: {}),
 				});
-				const healthy =
-					state.phase === "ready" && decision.action === "preserve";
+				const healthy = state.phase === "ready" && decision.action === "preserve";
 				checks.push(
 					check(
 						"lifecycle",
@@ -504,8 +499,7 @@ export async function buildDoctorReceipt(
 			const bytes = backups
 				.slice(0, -1)
 				.reduce((total, backup) => total + backup.bytes, 0);
-			const ageCutoff =
-				now.getTime() - config.retention.maxAgeDays * 86_400_000;
+			const ageCutoff = now.getTime() - config.retention.maxAgeDays * 86_400_000;
 			const expired = backups
 				.slice(0, -1)
 				.some((backup) => Date.parse(backup.createdAt) < ageCutoff);
@@ -526,9 +520,7 @@ export async function buildDoctorReceipt(
 		}
 	} else {
 		for (const id of ["image", "lease", "lifecycle", "upgrade", "backup"])
-			checks.push(
-				check(id, "fail", "Git/configuration context is unavailable"),
-			);
+			checks.push(check(id, "fail", "Git/configuration context is unavailable"));
 	}
 
 	const diskChecks: DiagnosticCheck[] = [];
@@ -736,17 +728,14 @@ export async function buildStatusReceipt(
 					expectedRepositoryIdentity: repository.identity,
 					expectedWorktreeIdentity: repository.worktreeIdentity,
 				});
-				const inspection = daemonExists
-					? await client.inspect(name)
-					: undefined;
+				const inspection = daemonExists ? await client.inspect(name) : undefined;
 				const decision = reconcileSandbox(state, {
 					exists: daemonExists,
 					...(inspection
 						? { imageMatches: inspection.image === state.runtimeImage }
 						: {}),
 				});
-				const healthy =
-					state.phase === "ready" && decision.action === "preserve";
+				const healthy = state.phase === "ready" && decision.action === "preserve";
 				checks.push(
 					check(
 						"lifecycle",
@@ -815,9 +804,7 @@ export async function buildStatusReceipt(
 	} catch (cause) {
 		checks.push(failure("git", cause));
 		for (const id of ["backup", "image", "lease", "lifecycle", "upgrade"])
-			checks.push(
-				check(id, "fail", "Git/configuration context is unavailable"),
-			);
+			checks.push(check(id, "fail", "Git/configuration context is unavailable"));
 	}
 	checks.sort((left, right) => left.id.localeCompare(right.id));
 	return redactReceipt({

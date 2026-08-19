@@ -154,7 +154,10 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(imageRun, /console\.log\(matches\[0\]\.id\);/);
 	assert.doesNotMatch(imageRun, /templates\.images\?\.find\(/);
 	const security = await readFile(new URL("security.yml", workflows), "utf8");
-	assert.doesNotMatch(security, /workflow_call|runtime\.Dockerfile|build-push-action/);
+	assert.doesNotMatch(
+		security,
+		/workflow_call|runtime\.Dockerfile|build-push-action/,
+	);
 	assert.match(security, /docker\/runtime-release-lock\.json/);
 	assert.match(security, /verify-production-runtime\.mjs/);
 	assert.match(security, /gh attestation verify "oci:\/\/\$RUNTIME_REFERENCE"/);
@@ -294,8 +297,8 @@ test("release workflows are valid npm-only gates", async () => {
 		);
 
 	const receiptSteps = release.jobs.receipt.steps ?? [];
-	const receiptCheckout = receiptSteps.find(
-		(step) => step.uses?.startsWith("actions/checkout@"),
+	const receiptCheckout = receiptSteps.find((step) =>
+		step.uses?.startsWith("actions/checkout@"),
 	);
 	assert.equal(receiptCheckout?.with?.ref, "${{ needs.metadata.outputs.sha }}");
 	assert.ok(
@@ -376,7 +379,8 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(releaseResume ?? "", /existing GitHub Release metadata differs/);
 	assert.match(releaseResume ?? "", /existing GitHub Release asset set differs/);
 	const releaseAssembly = durable.jobs.release.steps?.find(
-		(step) => step.name === "Verify signed tag and assemble durable release evidence",
+		(step) =>
+			step.name === "Verify signed tag and assemble durable release evidence",
 	)?.run;
 	assert.match(releaseAssembly ?? "", /candidate\.releaseRunId/);
 	assert.match(releaseAssembly ?? "", /original workflow run/);

@@ -47,7 +47,10 @@ function imageIdentity(value) {
 }
 
 function versionAtLeast(actual, minimum) {
-	const left = actual.match(/^\d+(?:\.\d+)*$/)?.[0].split(".").map(Number);
+	const left = actual
+		.match(/^\d+(?:\.\d+)*$/)?.[0]
+		.split(".")
+		.map(Number);
 	const right = minimum.split(".").map(Number);
 	if (!left) return false;
 	for (let index = 0; index < Math.max(left.length, right.length); index++) {
@@ -93,8 +96,7 @@ try {
 		if (!versionAtLeast(osVersion, "14"))
 			fail(`macOS 14 or newer is required; got ${osVersion}`);
 	} else if (process.platform === "linux") {
-		if (osName !== "ubuntu")
-			fail(`Supported host OS is Ubuntu; got ${osName}`);
+		if (osName !== "ubuntu") fail(`Supported host OS is Ubuntu; got ${osName}`);
 		if (!versionAtLeast(osVersion, "24.04"))
 			fail(`Ubuntu 24.04 or newer is required; got ${osVersion}`);
 	} else fail(`Supported host OS is macOS or Ubuntu; got ${process.platform}`);
