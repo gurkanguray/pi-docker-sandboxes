@@ -38,3 +38,12 @@ No hardware receipt was fabricated locally. The following remain mandatory non-g
 - real Ubuntu arm64 KVM Docker Sandboxes E2E against that same digest.
 
 A missing self-hosted runner leaves its required matrix job queued or failed; no workflow uses a green fallback or `continue-on-error` for hardware E2E.
+
+## Post-Task10 formatter inspection
+
+The pending diffs in `src/sessions.ts`, `test/concurrency.test.ts`, `test/sessions.test.ts`, `test/signals.test.ts`, `test/upgrade.test.ts`, and `test/workflows.test.ts` were formatting-only: parsed TypeScript ASTs were identical to `HEAD`, so no behavior changes required reversion.
+
+- Focused formatter-affected tests: passed, 55 total, 54 passed and 1 Windows-only test skipped.
+- `env -u NODE_OPTIONS npm run check`: passed, including typecheck and 498 tests (491 passed, 7 hardware/E2E tests skipped).
+- `env -u NODE_OPTIONS npm run test:coverage`: passed at 90.29% lines, 81.00% branches, and 85.18% functions.
+- `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7`: passed with no findings.
