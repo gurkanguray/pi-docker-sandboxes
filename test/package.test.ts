@@ -220,6 +220,9 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 		]);
 		const files = new Set(listing.trim().split("\n"));
 		assert.equal(files.has("package/docker/image-lock.json"), true);
+		assert.equal(files.has("package/docker/runtime-lock.json"), true);
+		assert.equal(files.has("package/docker/runtime-package.json"), true);
+		assert.equal(files.has("package/docker/runtime-package-lock.json"), true);
 		assert.equal(files.has("package/src/image-lock.ts"), true);
 		assert.equal(files.has("package/src/platform.ts"), true);
 		assert.equal(files.has("package/src/state-schema.ts"), true);
@@ -243,8 +246,10 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 		]);
 		assert.doesNotMatch(dockerfile, /pi-docker-sandboxes\.tgz/);
 		assert.doesNotMatch(dockerfile, /node_modules\/pi-docker-sandboxes/);
-		assert.match(dockerfile, /pi-coding-agent@\$\{PI_VERSION\}/);
-		assert.match(dockerfile, /fd-find=\$\{FD_DEBIAN_VERSION\}/);
+		assert.doesNotMatch(dockerfile, /apt-get/);
+		assert.match(dockerfile, /runtime-package-lock\.json/);
+		assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+		assert.match(dockerfile, /sha256sum --check/);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
