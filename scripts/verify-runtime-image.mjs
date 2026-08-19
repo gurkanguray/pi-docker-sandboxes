@@ -96,8 +96,7 @@ export function validateAttestationManifest(
 	for (const statement of statements) {
 		if (
 			statement?._type !== "https://in-toto.io/Statement/v1" ||
-			typeof statement.predicateType !== "string" ||
-			!statement.predicateType
+			statement.predicateType !== "https://slsa.dev/provenance/v1"
 		)
 			throw new Error("malformed in-toto attestation statement");
 		if (!Array.isArray(statement.subject))

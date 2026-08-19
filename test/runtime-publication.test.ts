@@ -189,16 +189,20 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 			),
 		/subject/,
 	);
-	assert.throws(
-		() =>
-			validateAttestationManifest(
-				descriptor,
-				manifest,
-				[{ ...statement, _type: "bad" }],
-				new Map([[digestA, platform]]),
-			),
-		/malformed/,
-	);
+	for (const invalidStatement of [
+		{ ...statement, _type: "bad" },
+		{ ...statement, predicateType: "https://slsa.dev/provenance/v0.2" },
+	])
+		assert.throws(
+			() =>
+				validateAttestationManifest(
+					descriptor,
+					manifest,
+					[invalidStatement],
+					new Map([[digestA, platform]]),
+				),
+			/malformed/,
+		);
 	assert.throws(
 		() =>
 			validateAttestationManifest(

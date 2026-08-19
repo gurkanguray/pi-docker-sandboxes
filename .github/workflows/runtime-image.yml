@@ -86,7 +86,7 @@ jobs:
           target: ${{ inputs.variant }}
           push: false
           no-cache: true
-          provenance: false
+          provenance: mode=max
           build-args: |
             SOURCE_SHA=${{ needs.source.outputs.sha }}
             STANDARD_BASE=${{ needs.source.outputs.standard_base }}
@@ -154,7 +154,6 @@ jobs:
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
           ignore-unfixed: false
-          trivyignores: .trivyignore.yaml
           exit-code: "1"
           additional-args: --platform linux/${{ matrix.arch }}
       - name: Generate exact platform CycloneDX SBOM
