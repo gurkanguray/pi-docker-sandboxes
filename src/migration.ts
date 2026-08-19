@@ -153,6 +153,7 @@ export async function writeJsonAtomic(
 	options: {
 		directoryPrepared?: boolean;
 		validateDirectory?: () => Promise<void>;
+		beforeRename?: () => Promise<void>;
 	} = {},
 ): Promise<void> {
 	const flags = atomicWriteFlags();
@@ -184,6 +185,8 @@ export async function writeJsonAtomic(
 		await file.sync();
 		await file.close();
 		file = undefined;
+		await validateDirectory();
+		await options.beforeRename?.();
 		await validateDirectory();
 		await rename(temporary, path);
 		created = false;

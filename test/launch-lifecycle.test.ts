@@ -295,6 +295,10 @@ async function runCase(
 			? {
 					saveState: async (state: SandboxState) => {
 						saveStateCalls++;
+						if (options.onSaveState && state.version === 2)
+							log.push(
+								`save:${state.phase}:${state.imageAttestation?.status ?? "none"}`,
+							);
 						options.onSaveState?.(structuredClone(state));
 						if (saveStateCalls >= (options.saveStateErrorAfter ?? Infinity))
 							throw new Error("injected attestation state save failure");
@@ -372,13 +376,16 @@ test("new managed clone restores sessions before attach", async () => {
 			keep: true,
 			managedSessions: true,
 			sessionBackup: true,
+			onSaveState: () => {},
 		});
 		await subject.operation;
 		const restore = subject.log.findIndex((entry) =>
 			entry.startsWith("restore-sessions:"),
 		);
+		const ready = subject.log.indexOf("save:ready:verified");
 		assert.ok(restore > subject.log.indexOf("create"));
-		assert.ok(restore < subject.log.indexOf("attach"));
+		assert.ok(restore < ready);
+		assert.ok(ready < subject.log.indexOf("attach"));
 		assert.match(
 			subject.log[restore]!,
 			/2026-08-14T12-34-56-789Z\/sessions:\/home\/agent\/\.pi\/agent\/$/,
@@ -549,15 +556,23 @@ test("recorded image attestation is enforced on every resume", async () => {
 	}
 });
 
-test("startup reconciles creating and refuses interrupted export", async () => {
-	const creating = await runCase({
-		existed: true,
-		persistedPhase: "creating",
-		keep: true,
-	});
-	const resumed = await creating.operation;
-	assert.equal(resumed.state?.phase, "ready");
-	assert.equal(creating.log.includes("attach"), true);
+test("startup preserves interrupted creating and exporting for explicit recovery", async () => {
+	for (const existed of [true, false]) {
+		const creating = await runCase({
+			existed,
+			persistedPhase: "creating",
+			keep: true,
+		});
+		await assert.rejects(creating.operation, /interrupted creation/i);
+		assert.equal(creating.log.includes("attach"), false);
+		assert.equal(creating.log.includes("remove"), false);
+		const persisted = await loadSandboxState(
+			creating.fixture.root,
+			creating.fixture.name,
+		);
+		assert.equal(persisted.phase, "creating");
+		assert.equal(persisted.imageAttestation?.status, undefined);
+	}
 
 	const exporting = await runCase({
 		existed: true,

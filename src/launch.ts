@@ -24,7 +24,7 @@ import {
 	writeKitDirectory,
 } from "./kit.ts";
 import { withSandboxLease } from "./lease.ts";
-import { reconcileSandbox } from "./reconcile.ts";
+import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import {
 	createPersonalizationSnapshot,
 	listNativePackageSpecs,
@@ -105,6 +105,18 @@ export interface LaunchStateCleanup {
 	removeState(path: string): Promise<void>;
 }
 
+export type LaunchCrashPoint =
+	| "before-create"
+	| "after-create"
+	| "before-image-inspection"
+	| "after-image-inspection"
+	| "before-ready-transition"
+	| "after-ready-transition"
+	| "before-export-publication"
+	| "after-export-publication"
+	| "before-removal-confirmation"
+	| "after-removal-confirmation";
+
 export interface LaunchOptions {
 	cwd: string;
 	config?: ConfigOverride;
@@ -135,6 +147,8 @@ export interface LaunchOptions {
 	printApiKey?: (id: string) => Promise<string | undefined>;
 	/** @internal Test-only host provider listing. */
 	listHostProviders?: () => Promise<string[]>;
+	/** @internal Deterministic process-crash hook. */
+	onCrashPoint?: (point: LaunchCrashPoint) => Promise<void>;
 }
 
 const HOST_ENV_ALLOWLIST = [
@@ -513,6 +527,10 @@ async function launchWithLease(context: {
 							: {}),
 					}
 				: undefined,
+			{
+				expectedRepositoryIdentity: repository.identity,
+				expectedWorktreeIdentity: repository.root,
+			},
 		);
 		state = loadedState.value;
 		warnings.push(...loadedState.warnings);
@@ -550,11 +568,6 @@ async function launchWithLease(context: {
 			await removeSandboxState(root, name);
 			state = undefined;
 			existing = false;
-		} else if (decision.action === "mark-ready") {
-			state.phase = "ready";
-			state.updatedAt = new Date().toISOString();
-			delete state.lastOperationError;
-			await (options.saveState ?? saveSandboxState)(state);
 		} else if (decision.action === "mark-failed") {
 			state.phase = "failed";
 			state.updatedAt = new Date().toISOString();
@@ -826,8 +839,10 @@ async function launchWithLease(context: {
 			primaryOperation = "create sandbox";
 			options.onStatus?.("creating sandbox");
 			lifecycle.preserved = true;
+			await options.onCrashPoint?.("before-create");
 			await client.create(request);
 			lifecycle.created = true;
+			await options.onCrashPoint?.("after-create");
 			primaryOperation = "reinspect repository after sandbox creation";
 			const createdAgainst = await inspectHostRepository(root);
 			if (
@@ -837,7 +852,10 @@ async function launchWithLease(context: {
 				throw new Error("Host repository changed during sandbox creation");
 			primaryOperation = "verify created sandbox image";
 			try {
-				verifyCreatedImage(await client.inspect(name), {
+				await options.onCrashPoint?.("before-image-inspection");
+				const createdInspection = await client.inspect(name);
+				await options.onCrashPoint?.("after-image-inspection");
+				verifyCreatedImage(createdInspection, {
 					image: state.runtimeImage,
 					...(state.templateStoreId
 						? { templateStoreId: state.templateStoreId }
@@ -853,11 +871,6 @@ async function launchWithLease(context: {
 				await (options.saveState ?? saveSandboxState)(state);
 				throw cause;
 			}
-			state.phase = "ready";
-			state.updatedAt = new Date().toISOString();
-			state.imageAttestation!.status = "verified";
-			primaryOperation = "persist ready sandbox state";
-			await (options.saveState ?? saveSandboxState)(state);
 			let compilerInstalled = nativePackagesToInstall.length === 0;
 			if (nativePackagesToInstall.length > 0) {
 				primaryOperation = "install sandbox compiler toolchain";
@@ -962,6 +975,15 @@ async function launchWithLease(context: {
 			await restoreSessions(client, agentDir, state.hostRepoIdentity, name);
 		}
 
+		if (!existing && state) {
+			primaryPhase = "create";
+			primaryOperation = "persist ready sandbox state";
+			await options.onCrashPoint?.("before-ready-transition");
+			markSandboxReady(state);
+			await (options.saveState ?? saveSandboxState)(state);
+			await options.onCrashPoint?.("after-ready-transition");
+		}
+
 		primaryPhase = "run";
 		primaryOperation = "attach to sandbox";
 		options.onStatus?.("starting Pi");
@@ -1049,9 +1071,10 @@ async function launchWithLease(context: {
 							state!.phase = "exporting";
 							state!.updatedAt = new Date().toISOString();
 							await (options.saveState ?? saveSandboxState)(state!);
+							await options.onCrashPoint?.("before-export-publication");
 							await exportPatch(client, state!, config.export.directory);
-							state!.phase = "ready";
-							state!.updatedAt = new Date().toISOString();
+							await options.onCrashPoint?.("after-export-publication");
+							markSandboxReady(state!);
 							await (options.saveState ?? saveSandboxState)(state!);
 						},
 					);
@@ -1088,7 +1111,10 @@ async function launchWithLease(context: {
 						state.updatedAt = new Date().toISOString();
 						await (options.saveState ?? saveSandboxState)(state);
 						await client.remove(name, true);
-						if (await client.exists(name))
+						await options.onCrashPoint?.("before-removal-confirmation");
+						const removalConfirmed = !(await client.exists(name));
+						await options.onCrashPoint?.("after-removal-confirmation");
+						if (!removalConfirmed)
 							throw new Error(
 								"Sandbox removal was not confirmed by the daemon",
 							);

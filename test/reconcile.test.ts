@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { reconcileSandbox, type SandboxInspection } from "../src/reconcile.ts";
+import { reconcileSandbox } from "../src/reconcile.ts";
+import type { LaunchCrashPoint } from "../src/launch.ts";
 import type { SandboxPhase, SandboxStateV2 } from "../src/state-schema.ts";
-import { loadSandboxState } from "../src/workspace.ts";
 
 const exec = promisify(execFile);
 const image = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
+const crashFixture = new URL(
+	"./fixtures/lifecycle-crash-launcher.ts",
+	import.meta.url,
+).pathname;
 
 function state(phase: SandboxPhase): SandboxStateV2 {
 	return {
@@ -37,8 +41,15 @@ test("reconciliation transition table preserves ambiguous custody", () => {
 			exists: true,
 			imageMatches: true,
 		}),
-		{ action: "mark-ready" },
+		{
+			action: "preserve",
+			reason: "interrupted creation requires explicit recovery",
+		},
 	);
+	assert.deepEqual(reconcileSandbox(state("creating"), { exists: false }), {
+		action: "preserve",
+		reason: "interrupted creation requires explicit recovery",
+	});
 	assert.deepEqual(reconcileSandbox(state("removing"), { exists: false }), {
 		action: "remove-state",
 	});
@@ -73,53 +84,92 @@ test("known image mismatch never resumes or removes a sandbox", () => {
 		);
 });
 
-test("Python SIGKILL phase probe restarts without authorizing ambiguous removal", async () => {
-	for (const phase of ["creating", "ready", "exporting", "removing"] as const) {
-		const root = await mkdtemp(join(tmpdir(), `pi-dsbx-kill-${phase}-`));
-		const name = `pi-kill-${phase}`;
-		const persisted = {
-			...state(phase),
-			name,
-			hostRoot: root,
-			hostWorktreeIdentity: root,
-		};
-		const nodeSource = [
-			'import { mkdir, open, rename } from "node:fs/promises";',
-			'import { dirname } from "node:path";',
-			`const path = ${JSON.stringify(join(root, ".git/pi-docker-sandbox/state", `${name}.json`))};`,
-			`const value = ${JSON.stringify(persisted)};`,
-			"await mkdir(dirname(path), { recursive: true });",
-			"const temp = `${path}.partial`;",
-			'const file = await open(temp, "wx", 0o600);',
-			"await file.writeFile(`${JSON.stringify(value)}\\n`);",
-			"await file.sync(); await file.close();",
-			"await rename(temp, path);",
-			'const parent = await open(dirname(path), "r"); await parent.sync(); await parent.close();',
-			'process.stdout.write("persisted\\n");',
-			"await new Promise(() => {});",
-		].join("\n");
-		const python = [
-			"import os, signal, subprocess, sys",
-			"p = subprocess.Popen([sys.argv[1], '--input-type=module', '-e', sys.argv[2]], stdout=subprocess.PIPE, text=True)",
-			"assert p.stdout.readline().strip() == 'persisted'",
-			"os.kill(p.pid, signal.SIGKILL)",
-			"assert p.wait() == -signal.SIGKILL",
-		].join("\n");
-		await exec("python3", ["-c", python, process.execPath, nodeSource]);
-		assert.equal(
-			JSON.parse(
-				await readFile(
-					join(root, ".git/pi-docker-sandbox/state", `${name}.json`),
-					"utf8",
-				),
-			).phase,
-			phase,
-		);
-		const restarted = await loadSandboxState(root, name);
-		const inspection: SandboxInspection = { exists: "unknown" };
-		assert.notEqual(
-			reconcileSandbox(restarted, inspection).action,
-			"remove-state",
-		);
+async function repository(): Promise<string> {
+	const root = await realpath(
+		await mkdtemp(join(tmpdir(), "pi-dsbx-production-crash-")),
+	);
+	await exec("git", ["init", "-b", "main"], { cwd: root });
+	await exec("git", ["config", "user.email", "test@example.com"], {
+		cwd: root,
+	});
+	await exec("git", ["config", "user.name", "Test"], { cwd: root });
+	await writeFile(join(root, "file.txt"), "initial\n");
+	await exec("git", ["add", "file.txt"], { cwd: root });
+	await exec("git", ["commit", "-m", "initial"], { cwd: root });
+	return root;
+}
+
+interface RestartReceipt {
+	phase: SandboxPhase;
+	attestation?: "pending" | "verified";
+	exists: boolean;
+	patches: number;
+	decision: ReturnType<typeof reconcileSandbox>;
+}
+
+async function killAndRestart(point: LaunchCrashPoint): Promise<RestartReceipt> {
+	const root = await repository();
+	const python = [
+		"import json, os, signal, subprocess, sys",
+		"node, fixture, root, point = sys.argv[1:]",
+		"p = subprocess.Popen([node, '--experimental-strip-types', fixture, 'launch', root, point], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)",
+		"assert p.stdout.readline().strip() == 'CRASH:' + point",
+		"os.kill(p.pid, signal.SIGKILL)",
+		"assert p.wait() == -signal.SIGKILL",
+		"restart = subprocess.run([node, '--experimental-strip-types', fixture, 'reconcile', root], capture_output=True, text=True)",
+		"assert restart.returncode == 0, restart.stderr",
+		"print(restart.stdout.strip())",
+	].join("\n");
+	const result = await exec("python3", [
+		"-c",
+		python,
+		process.execPath,
+		crashFixture,
+		root,
+		point,
+	]);
+	return JSON.parse(result.stdout) as RestartReceipt;
+}
+
+test("Python SIGKILL probes production launch lifecycle crash points", async () => {
+	for (const point of [
+		"before-create",
+		"after-create",
+		"before-image-inspection",
+		"after-image-inspection",
+		"before-ready-transition",
+	] as const) {
+		const receipt = await killAndRestart(point);
+		assert.equal(receipt.phase, "creating", point);
+		assert.equal(receipt.attestation, "pending", point);
+		assert.equal(receipt.decision.action, "preserve", point);
+	}
+
+	const ready = await killAndRestart("after-ready-transition");
+	assert.equal(ready.phase, "ready");
+	assert.equal(ready.attestation, "verified");
+	assert.equal(ready.decision.action, "preserve");
+
+	for (const [point, patches] of [
+		["before-export-publication", 0],
+		["after-export-publication", 1],
+	] as const) {
+		const receipt = await killAndRestart(point);
+		assert.equal(receipt.phase, "exporting", point);
+		assert.equal(receipt.patches, patches, point);
+		assert.deepEqual(receipt.decision, {
+			action: "preserve",
+			reason: "interrupted export",
+		});
+	}
+
+	for (const point of [
+		"before-removal-confirmation",
+		"after-removal-confirmation",
+	] as const) {
+		const receipt = await killAndRestart(point);
+		assert.equal(receipt.phase, "removing", point);
+		assert.equal(receipt.exists, false, point);
+		assert.equal(receipt.decision.action, "remove-state", point);
 	}
 });

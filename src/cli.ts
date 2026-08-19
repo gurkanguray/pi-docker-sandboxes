@@ -16,6 +16,7 @@ import { buildLocalImage } from "./image.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { launch } from "./launch.ts";
 import { SandboxLeaseBusyError, withSandboxLease } from "./lease.ts";
+import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
 import {
 	attestSandbox,
@@ -358,23 +359,75 @@ export async function main(
 			const hasState = await sandboxStateExists(repository.root, name);
 			const state = hasState
 				? (
-						await loadSandboxStateResult(repository.root, name, async () => {
-							const config = await loadConfig(cwd);
-							const resolved = await resolveKitImage(config);
-							const inspection = await client.inspect(name);
-							return {
-								exists: true,
-								inspectedImage: String(inspection.image ?? ""),
-								expectedImage: resolved.image,
-								runtimeSchema: IMAGE_LOCK.runtimeSchema,
-								packageVersion: PACKAGE_VERSION,
-								...(resolved.templateStoreId
-									? { templateStoreId: resolved.templateStoreId }
-									: {}),
-							};
-						})
+						await loadSandboxStateResult(
+							repository.root,
+							name,
+							async () => {
+								const config = await loadConfig(cwd);
+								const resolved = await resolveKitImage(config);
+								const inspection = await client.inspect(name);
+								return {
+									exists: true,
+									inspectedImage: String(inspection.image ?? ""),
+									expectedImage: resolved.image,
+									runtimeSchema: IMAGE_LOCK.runtimeSchema,
+									packageVersion: PACKAGE_VERSION,
+									...(resolved.templateStoreId
+										? { templateStoreId: resolved.templateStoreId }
+										: {}),
+								};
+							},
+							{
+								expectedRepositoryIdentity: repository.identity,
+								expectedWorktreeIdentity: repository.root,
+							},
+						)
 					).value
 				: undefined;
+			const daemonExists = await client.exists(name);
+			if (!state)
+				throw new Error(
+					daemonExists
+						? "Sandbox exists without durable lifecycle state; automatic mutation is refused"
+						: `No clone state for sandbox ${name}`,
+				);
+			const inspection = daemonExists ? await client.inspect(name) : undefined;
+			const decision = reconcileSandbox(state, {
+				exists: daemonExists,
+				...(inspection
+					? { imageMatches: inspection.image === state.runtimeImage }
+					: {}),
+			});
+			if (decision.action === "mark-failed") {
+				state.phase = "failed";
+				state.updatedAt = new Date().toISOString();
+				state.lastOperationError = {
+					category: "image",
+					at: state.updatedAt,
+				};
+				await saveSandboxState(state);
+				throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+			}
+			if (decision.action === "remove-state") {
+				if (command !== "destroy")
+					throw new Error("Sandbox is absent; lifecycle state preserved");
+				await removeSandboxState(
+					repository.root,
+					name,
+					dependencies.removeState,
+				);
+				console.log(`Sandbox ${name} was already absent; removed stale state`);
+				return 0;
+			}
+			if (state.phase !== "ready" || decision.reason !== "sandbox is ready")
+				throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+			if (
+				state.imageAttestation?.status !== "verified" ||
+				state.imageAttestation.image !== state.runtimeImage
+			)
+				throw new Error(
+					"Ready lifecycle state lacks verified runtime image attestation; sandbox preserved",
+				);
 			if (command === "export") {
 				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
 				const config = await loadConfig(cwd);
@@ -386,8 +439,7 @@ export async function main(
 					state,
 					config.export.directory,
 				);
-				state.phase = "ready";
-				state.updatedAt = new Date().toISOString();
+				markSandboxReady(state);
 				await saveSandboxState(state);
 				console.log(`${result.path}\n${result.summary.join("\n")}`);
 				return 0;

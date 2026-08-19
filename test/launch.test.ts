@@ -1118,7 +1118,6 @@ test("no-host-auth excludes OAuth credentials from generated Kit files", async (
 });
 
 test("OAuth staging cleanup runs after copy or install failure", async () => {
-	const root = await committedRepository();
 	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-oauth-cleanup-"));
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(
@@ -1135,6 +1134,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 	process.env.HOME = home;
 	try {
 		for (const failure of ["copy", "install"] as const) {
+			const root = await committedRepository();
 			const commands: string[][] = [];
 			const client = {
 				...launchClient,
