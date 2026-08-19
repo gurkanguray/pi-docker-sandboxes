@@ -44,6 +44,28 @@ function escapeRegExp(value) {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function compareVersions(left, right) {
+	const parse = (value) => {
+		const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+		if (!match) fail(`Invalid exact version: ${value}`);
+		return match.slice(1).map(Number);
+	};
+	const a = parse(left);
+	const b = parse(right);
+	for (let index = 0; index < 3; index++)
+		if (a[index] !== b[index]) return a[index] - b[index];
+	return 0;
+}
+
+function satisfiesVersionRange(version, range) {
+	const match = /^>=(\d+\.\d+\.\d+) <(\d+\.\d+\.\d+)$/.exec(range);
+	if (!match) fail(`Pi peer range must be a bounded exact range: ${range}`);
+	return (
+		compareVersions(version, match[1]) >= 0 &&
+		compareVersions(version, match[2]) < 0
+	);
+}
+
 function argumentsFrom(argv) {
 	let tag;
 	let allowUnreleased = false;
@@ -118,15 +140,15 @@ try {
 	const changelog = `${pkg.version} — ${heading[1]}`;
 	console.log(`✓ changelog: ${changelog}`);
 
-	if (imageLock.piVersion !== piVersion)
-		fail(`Image lock Pi version must match ${piVersion}`);
+	const piRange = pkg.peerDependencies?.["@earendil-works/pi-coding-agent"];
+	if (!piRange) fail("Package must declare a bounded Pi peer range");
+	if (!satisfiesVersionRange(imageLock.piVersion, piRange))
+		fail(`Image lock Pi ${imageLock.piVersion} must satisfy ${piRange}`);
 	if (
-		!new RegExp(
-			`^\\|\\s*(?:Host\\s+)?Pi\\s*\\|\\s*${escapeRegExp(piVersion)}\\s*\\|`,
-			"m",
-		).test(compatibility)
+		!compatibility.includes("| Host Pi peer range |") ||
+		!compatibility.includes(piRange)
 	)
-		fail(`COMPATIBILITY Pi version must match ${piVersion}`);
+		fail(`COMPATIBILITY Pi range must match ${piRange}`);
 	const standard = imageLock.images?.standard;
 	if (
 		standard?.status !== "published" ||

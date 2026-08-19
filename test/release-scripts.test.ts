@@ -28,7 +28,10 @@ const freshInstallSmoke = new URL(
 	import.meta.url,
 );
 const version = "1.2.3";
-const piVersion = "0.84.1";
+const piVersion = "0.84.2";
+const runtimePiVersion = "0.84.1";
+const piRange = ">=0.84.1 <0.85.0";
+
 const baseImage =
 	"docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299";
 const packageRoot = new URL("../", import.meta.url);
@@ -105,6 +108,7 @@ async function fixture(fixtureVersion = version): Promise<string> {
 			name: "pi-docker-sandboxes",
 			version: fixtureVersion,
 			devDependencies: { "@earendil-works/pi-coding-agent": piVersion },
+			peerDependencies: { "@earendil-works/pi-coding-agent": piRange },
 		}),
 	);
 	await writeFile(
@@ -127,12 +131,12 @@ async function fixture(fixtureVersion = version): Promise<string> {
 	);
 	await writeFile(
 		join(directory, "COMPATIBILITY.md"),
-		`# Compatibility\n\n| Component | Tested | Status |\n|---|---|---|\n| Pi | ${piVersion} | tested |\n`,
+		`# Compatibility\n\n| Component | Requirement | Status |\n|---|---|---|\n| Host Pi | \`${piRange}\` | supported |\n`,
 	);
 	await writeFile(
 		join(directory, "docker", "image-lock.json"),
 		JSON.stringify({
-			piVersion,
+			piVersion: runtimePiVersion,
 			images: {
 				standard: {
 					status: "published",
