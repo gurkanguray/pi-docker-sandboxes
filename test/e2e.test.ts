@@ -11,13 +11,42 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { launch } from "../src/launch.ts";
-import { SbxClient } from "../src/sbx/client.ts";
-import { runInherited } from "../src/sbx/inherited-runner.mjs";
-import { applyPatch, exportPatch } from "../src/workspace.ts";
+import { importControllerModule } from "./e2e-controller-modules.ts";
 
 const enabled = process.env.PI_DOCKER_SANDBOX_E2E === "1";
+const installedPackageRoot =
+	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT ??
+	fileURLToPath(new URL("..", import.meta.url));
+const runtimeReceiptPath = process.env.PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT;
+if (enabled && !process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT)
+	throw new Error("Real E2E requires the installed candidate package root");
+if (enabled && !runtimeReceiptPath)
+	throw new Error("Real E2E requires a sandbox runtime receipt path");
+
+const [launchLoaded, clientLoaded, inheritedLoaded, workspaceLoaded] =
+	await Promise.all([
+		importControllerModule(installedPackageRoot, "src/launch.ts"),
+		importControllerModule(installedPackageRoot, "src/sbx/client.ts"),
+		importControllerModule(installedPackageRoot, "src/sbx/inherited-runner.mjs"),
+		importControllerModule(installedPackageRoot, "src/workspace.ts"),
+	]);
+const { launch } = launchLoaded.module as typeof import("../src/launch.ts");
+const { SbxClient } =
+	clientLoaded.module as typeof import("../src/sbx/client.ts");
+const { runInherited } =
+	inheritedLoaded.module as typeof import("../src/sbx/inherited-runner.mjs");
+const { applyPatch, exportPatch } =
+	workspaceLoaded.module as typeof import("../src/workspace.ts");
+for (const loaded of [
+	launchLoaded,
+	clientLoaded,
+	inheritedLoaded,
+	workspaceLoaded,
+])
+	console.log(`E2E_CONTROLLER_MODULE_PATH=${loaded.modulePath}`);
+
 const selectedImage = process.env.PI_DOCKER_SANDBOX_E2E_IMAGE;
 const selectedTemplateStoreId =
 	process.env.PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID;
@@ -163,7 +192,26 @@ sandboxTest(
 				"set -eu; env; printf '\\nPI_VERSION='; pi --version; printf '\\nRUNTIME_EXTENSION=kit\\n'",
 			]);
 			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_ACTIVE=1/);
-			assert.match(runtime.stdout, /PI_VERSION=0\.84\.1/);
+			const piVersion = runtime.stdout.match(
+				/^PI_VERSION=(?:\S+\s+)?(\d+\.\d+\.\d+)\s*$/m,
+			)?.[1];
+			assert.ok(piVersion, "sandbox runtime must report its Pi version");
+			const imageLock = JSON.parse(
+				await readFile(
+					join(installedPackageRoot, "docker/image-lock.json"),
+					"utf8",
+				),
+			) as { piVersion?: string };
+			assert.equal(imageLock.piVersion, "0.84.1");
+			assert.equal(piVersion, imageLock.piVersion);
+			await writeFile(
+				runtimeReceiptPath!,
+				`${JSON.stringify(
+					{ piVersion, imageLockPiVersion: imageLock.piVersion },
+					null,
+					2,
+				)}\n`,
+			);
 			assert.match(runtime.stdout, /RUNTIME_EXTENSION=kit/);
 			for (const key of [
 				"OPENAI_API_KEY",
@@ -216,11 +264,7 @@ sandboxTest(
 			);
 			await assert.rejects(() => readFile(join(root, "escape.txt")));
 
-			const hostDockerId = await host("docker", [
-				"info",
-				"--format",
-				"{{.ID}}",
-			]);
+			const hostDockerId = await host("docker", ["info", "--format", "{{.ID}}"]);
 			const sandboxDockerId = (
 				await client.exec(name, ["docker", "info", "--format", "{{.ID}}"])
 			).stdout.trim();
@@ -231,15 +275,8 @@ sandboxTest(
 				"mkdir -p /tmp/rootfs; echo x >/tmp/rootfs/x; tar -C /tmp/rootfs -cf /tmp/rootfs.tar .; docker import /tmp/rootfs.tar pi-dsbx-empty:test >/dev/null; docker create --name pi-dsbx-private-test pi-dsbx-empty:test true >/dev/null",
 			]);
 			assert.match(
-				(
-					await client.exec(name, [
-						"docker",
-						"ps",
-						"-a",
-						"--format",
-						"{{.Names}}",
-					])
-				).stdout,
+				(await client.exec(name, ["docker", "ps", "-a", "--format", "{{.Names}}"]))
+					.stdout,
 				/pi-dsbx-private-test/,
 			);
 			assert.doesNotMatch(
@@ -258,8 +295,7 @@ sandboxTest(
 						"-c",
 						"curl --connect-timeout 5 --max-time 10 -fsS https://example.com/",
 					]),
-				(error: Error) =>
-					/denied|blocked|policy|curl|exit/i.test(error.message),
+				(error: Error) => /denied|blocked|policy|curl|exit/i.test(error.message),
 			);
 
 			await client.exec(
@@ -271,10 +307,7 @@ sandboxTest(
 				],
 				{ workdir: launched.state!.hostRoot },
 			);
-			assert.equal(
-				await readFile(join(root, "tracked.txt"), "utf8"),
-				"before\n",
-			);
+			assert.equal(await readFile(join(root, "tracked.txt"), "utf8"), "before\n");
 			const patch = await exportPatch(
 				client,
 				launched.state!,
@@ -282,23 +315,14 @@ sandboxTest(
 			);
 			assert.ok(patch.bytes > 0);
 			await applyPatch(launched.state!, patch.path);
-			assert.equal(
-				await readFile(join(root, "tracked.txt"), "utf8"),
-				"after\n",
-			);
+			assert.equal(await readFile(join(root, "tracked.txt"), "utf8"), "after\n");
 			await assert.rejects(() => readFile(join(root, "deleted.txt")));
 			assert.deepEqual(
 				await readFile(join(root, "binary.dat")),
 				Buffer.from([0, 1, 255]),
 			);
-			assert.equal(
-				(await lstat(join(root, "link.txt"))).isSymbolicLink(),
-				true,
-			);
-			assert.equal(
-				(await lstat(join(root, "executable.sh"))).mode & 0o111,
-				0o111,
-			);
+			assert.equal((await lstat(join(root, "link.txt"))).isSymbolicLink(), true);
+			assert.equal((await lstat(join(root, "executable.sh"))).mode & 0o111, 0o111);
 		} finally {
 			if (await client.exists(name)) await client.remove(name, true);
 			await rm(root, { recursive: true, force: true });
@@ -429,8 +453,7 @@ sandboxTest(
 		} finally {
 			for (const name of Object.values(names))
 				if (await client.exists(name)) await client.remove(name, true);
-			for (const root of roots)
-				await rm(root, { recursive: true, force: true });
+			for (const root of roots) await rm(root, { recursive: true, force: true });
 		}
 	},
 );
@@ -474,10 +497,7 @@ sandboxTest(
 				piArgs: ["--help"],
 			});
 			assert.equal(launched.agentExitCode, 0);
-			assert.equal(
-				await host("git", ["rev-list", "--count", "HEAD"], root),
-				"1",
-			);
+			assert.equal(await host("git", ["rev-list", "--count", "HEAD"], root), "1");
 			assert.equal(
 				await host("git", ["show", "--format=", "--name-only", "HEAD"], root),
 				"",
@@ -526,11 +546,7 @@ sandboxTest(
 					packagePrefix,
 					packageSource,
 				]);
-				installSource = join(
-					packagePrefix,
-					"node_modules",
-					"pi-docker-sandboxes",
-				);
+				installSource = join(packagePrefix, "node_modules", "pi-docker-sandboxes");
 			}
 			await run("pi", ["install", installSource]);
 			await run("git", ["init", "-b", "main"], repository);
@@ -553,10 +569,7 @@ sandboxTest(
 				repository,
 			);
 			assert.equal(await client.exists(name), true);
-			assert.equal(
-				await readFile(join(repository, "host.txt"), "utf8"),
-				"host\n",
-			);
+			assert.equal(await readFile(join(repository, "host.txt"), "utf8"), "host\n");
 		} finally {
 			if (await client.exists(name)) await client.remove(name, true);
 			await rm(root, { recursive: true, force: true });

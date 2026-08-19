@@ -8,14 +8,14 @@
 
 | Component | Requirement |
 | --- | --- |
-| Host | macOS 14+ on Apple silicon or Ubuntu 24.04+ on ARM64 |
+| Host | macOS 14+ on Apple silicon or Ubuntu 24.04+ on amd64/ARM64 |
 | Pi | `>=0.84.1 <0.85.0` |
 | Node.js | `>=22.19.0 <25` |
 | Docker | 29+ validated |
 | Docker Sandboxes | 0.38.x |
-| Locked image | `linux/arm64` |
+| Standard image | `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` (`linux/amd64`, `linux/arm64`) |
 
-macOS 26.5.2 on Apple silicon is the validated candidate host, with Pi 0.84.1, Node.js 24.12.0, and Docker Sandboxes 0.38.0. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md) for x64 and Windows limitations.
+macOS 26.5.2 on Apple silicon is the validated candidate host, with Pi 0.84.1, Node.js 24.12.0, and Docker Sandboxes 0.38.0. Ubuntu amd64/ARM64 hardware validation remains blocked until the required hosted runners are available. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md) for details.
 
 Run from a Git repository. If the repository has no commits:
 
@@ -32,12 +32,6 @@ npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx doctor
 ```
 
 Fix any reported error before continuing.
-
-## Build the image
-
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
-```
 
 ## Run
 

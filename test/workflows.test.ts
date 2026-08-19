@@ -276,6 +276,9 @@ test("release workflows are valid npm-only gates", async () => {
 		"packageReceipt.binVersion !== expected.VERSION",
 		"freshInstallReceipt.version !== expected.VERSION",
 		"e2eReceipt.packageVersion !== expected.VERSION",
+		'imageLock.piVersion !== "0.84.1"',
+		"e2e.piVersion !== imageLock.piVersion",
+		"e2e.imageLockPiVersion !== imageLock.piVersion",
 	])
 		assert.ok(
 			receiptRun.includes(check),
@@ -496,17 +499,36 @@ test("release workflows are valid npm-only gates", async () => {
 	for (const evidence of [
 		/PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH/,
 		/PI_CODING_AGENT_DIR/,
+		/PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT/,
+		/PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT/,
+		/sandbox-runtime-receipt\.json/,
 		/cleanup-receipt\.json/,
 		/npm-package-\$SOURCE_SHA/,
 		/oci-candidate-\$SOURCE_SHA/,
 	])
 		assert.match(e2e, evidence);
 	assert.doesNotMatch(e2e, /continue-on-error:\s*true/);
+	const candidateBinding = e2eWorkflow.jobs["hardware-e2e"].steps?.find(
+		(step) => step.name === "Bind candidate inputs and install in a clean prefix",
+	)?.run;
+	assert.match(candidateBinding ?? "", /realpath\(process\.argv\[2\]\)/);
+	assert.match(candidateBinding ?? "", /outside isolated prefix/);
+	const receiptStep = e2eWorkflow.jobs["hardware-e2e"].steps?.find(
+		(step) => step.name === "Write artifact-bound E2E receipt",
+	)?.run;
+	assert.match(receiptStep ?? "", /RUNTIME_RECEIPT/);
+	assert.match(receiptStep ?? "", /image_lock_pi_version/);
+	assert.doesNotMatch(receiptStep ?? "", /pi --version/);
 	const e2eTest = await readFile(
 		new URL("../test/e2e.test.ts", import.meta.url),
 		"utf8",
 	);
 	assert.match(e2eTest, /\/docker-sandbox doctor/);
+	assert.match(e2eTest, /PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT/);
+	assert.match(e2eTest, /importControllerModule\(installedPackageRoot/);
+	assert.doesNotMatch(e2eTest, /^import .*from "\.\.\/src\//m);
+	assert.match(e2eTest, /PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT/);
+	assert.match(e2eTest, /imageLock\.piVersion, "0\.84\.1"/);
 	assert.match(e2eTest, /sandbox attestation verified/i);
 	assert.match(e2eTest, /host source mount is read-only/i);
 	assert.match(

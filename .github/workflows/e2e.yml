@@ -224,10 +224,25 @@ jobs:
           console.log(`package_version=${receipt.binVersion}`);
           NODE
           test "${{ steps.image.outputs.candidate_digest }}" = "$IMAGE_DIGEST"
-          installed="$E2E_PREFIX/node_modules/pi-docker-sandboxes/package.json"
+          installed_root="$E2E_PREFIX/node_modules/pi-docker-sandboxes"
+          installed="$installed_root/package.json"
+          node --input-type=module - "$E2E_PREFIX" "$installed_root" <<'NODE'
+          import { realpath } from "node:fs/promises";
+          import { isAbsolute, relative, sep } from "node:path";
+          const prefix = await realpath(process.argv[2]);
+          const root = await realpath(process.argv[3]);
+          const pathFromPrefix = relative(prefix, root);
+          if (pathFromPrefix === ".." ||
+              pathFromPrefix.startsWith(`..${sep}`) ||
+              isAbsolute(pathFromPrefix))
+            throw new Error(
+              "installed package root is outside isolated prefix",
+            );
+          NODE
           {
             printf 'tarball=%s\n' "$tarball"
             printf 'installed_package=%s\n' "$installed"
+            printf 'installed_package_root=%s\n' "$installed_root"
           } >> "$GITHUB_OUTPUT"
       - name: Run complete real E2E
         id: e2e
@@ -244,6 +259,10 @@ jobs:
           PI_DOCKER_SANDBOX_E2E_PACKAGE: ${{ steps.candidate.outputs.tarball }}
           PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION: >-
             ${{ steps.candidate.outputs.package_version }}
+          PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT: >-
+            ${{ steps.candidate.outputs.installed_package_root }}
+          PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT: >-
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
         run: |
           export PATH="$E2E_PREFIX/node_modules/.bin:$PATH"
           test "$PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH" = 1
@@ -261,6 +280,8 @@ jobs:
           TARBALL: ${{ steps.candidate.outputs.tarball }}
           INSTALLED_PACKAGE: ${{ steps.candidate.outputs.installed_package }}
           E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
+          RUNTIME_RECEIPT: >-
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
           E2E_OUTCOME: ${{ steps.e2e.outcome }}
         run: |
           count="$(grep -c 'E2E_TEST_PASSED=1' \
@@ -271,7 +292,23 @@ jobs:
             status=failed
           fi
           sbx_version="$(sbx --version | awk '{print $NF}' || true)"
-          pi_version="$(pi --version | awk '{print $NF}' || true)"
+          pi_version=""
+          image_lock_pi_version=""
+          if test -s "$RUNTIME_RECEIPT" && test -n "$INSTALLED_PACKAGE"; then
+            installed_root="$(dirname "$INSTALLED_PACKAGE")"
+            pi_version="$(node -p \
+              'require(process.argv[1]).piVersion' \
+              "$RUNTIME_RECEIPT" 2>/dev/null || true)"
+            image_lock_pi_version="$(node -p \
+              'require(process.argv[1]).piVersion' \
+              "$installed_root/docker/image-lock.json" 2>/dev/null || true)"
+            runtime_lock_pi_version="$(node -p \
+              'require(process.argv[1]).imageLockPiVersion' \
+              "$RUNTIME_RECEIPT" 2>/dev/null || true)"
+            if test "$runtime_lock_pi_version" != "$image_lock_pi_version"; then
+              image_lock_pi_version=""
+            fi
+          fi
           if command -v sw_vers >/dev/null 2>&1; then
             host_version="$(sw_vers -productVersion)"
           else
@@ -294,6 +331,7 @@ jobs:
             --architecture "$(uname -m)" \
             --sbx-version "$sbx_version" \
             --pi-version "$pi_version" \
+            --image-lock-pi-version "$image_lock_pi_version" \
             --receipt "$E2E_RECEIPT" \
             --test "Pi diagnostics, clone, daemon, and network boundaries" \
             --test "binary patch round trip and host staging cleanup" \
@@ -326,6 +364,7 @@ jobs:
             architecture: process.arch,
             sbxVersion: null,
             piVersion: null,
+            imageLockPiVersion: null,
             packageVersion: process.env.PACKAGE_VERSION || null,
             tests: ["E2E receipt generation"],
             testsCount: 0,
@@ -391,6 +430,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pi-dsbx-e2e.log
             ${{ runner.temp }}/e2e-receipt.json
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
             ${{ runner.temp }}/cleanup-receipt.json
           if-no-files-found: error
           retention-days: 14

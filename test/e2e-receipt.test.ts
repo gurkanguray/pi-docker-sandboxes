@@ -75,6 +75,7 @@ async function runReceipt(
 		architecture: "arm64",
 		"sbx-version": "0.38.0",
 		"pi-version": "0.84.1",
+		"image-lock-pi-version": "0.84.1",
 		receipt: join(fixture.root, "e2e-receipt.json"),
 		...overrides,
 	};
@@ -122,6 +123,11 @@ for (const [name, overrides, message] of [
 		{ "selected-image-id": `sha256:${"b".repeat(64)}` },
 		/image digest/i,
 	],
+	[
+		"sandbox runtime Pi version",
+		{ "pi-version": "0.84.2" },
+		/sandbox runtime Pi version/i,
+	],
 ] as const) {
 	test(`E2E receipt rejects mismatched ${name}`, async () => {
 		const value = await fixture();
@@ -151,6 +157,7 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			"architecture",
 			"sbxVersion",
 			"piVersion",
+			"imageLockPiVersion",
 			"packageVersion",
 			"tests",
 			"testsCount",
@@ -167,6 +174,7 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			architecture: "arm64",
 			sbxVersion: "0.38.0",
 			piVersion: "0.84.1",
+			imageLockPiVersion: "0.84.1",
 			packageVersion: "1.2.3",
 			tests: ["real scenario"],
 			testsCount: 1,
@@ -208,12 +216,16 @@ test("failed E2E receipt exists when candidate evidence is unavailable", async (
 			"installed-package": "",
 			"selected-image": "",
 			"selected-image-id": "",
+			"pi-version": "",
+			"image-lock-pi-version": "",
 		});
 		assert.equal(result.code, 0, result.stderr);
 		const receipt = JSON.parse(await readFile(result.receipt, "utf8"));
 		assert.equal(receipt.packageIntegrity, null);
 		assert.equal(receipt.packageVersion, null);
 		assert.equal(receipt.selectedImage, null);
+		assert.equal(receipt.piVersion, null);
+		assert.equal(receipt.imageLockPiVersion, null);
 		assert.equal(receipt.status, "failed");
 		assert.equal(receipt.passedAt, null);
 	} finally {

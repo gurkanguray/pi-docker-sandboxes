@@ -61,9 +61,7 @@ try {
 	const expectedSourceSha = required(values, "source-sha");
 	const sourceSha = (await exec("git", ["rev-parse", "HEAD"])).stdout.trim();
 	if (sourceSha !== expectedSourceSha)
-		fail(
-			`Source SHA mismatch: expected ${expectedSourceSha}, got ${sourceSha}`,
-		);
+		fail(`Source SHA mismatch: expected ${expectedSourceSha}, got ${sourceSha}`);
 
 	const expectedImageDigest = required(values, "image-digest");
 	const selectedImage = optional(values, "selected-image");
@@ -72,6 +70,8 @@ try {
 	const expectedIntegrity = optional(values, "package-integrity");
 	const expectedPackageVersion = optional(values, "package-version");
 	const installedPackageArgument = optional(values, "installed-package");
+	const piVersion = optional(values, "pi-version");
+	const imageLockPiVersion = optional(values, "image-lock-pi-version");
 	let packageIntegrity = null;
 	let packageVersion = null;
 
@@ -87,7 +87,17 @@ try {
 			!selectedImageId
 		)
 			fail("Passing receipt requires complete package and image evidence");
+		if (!piVersion || !imageLockPiVersion)
+			fail("Passing receipt requires sandbox runtime Pi evidence");
 	}
+	if (Boolean(piVersion) !== Boolean(imageLockPiVersion))
+		fail("Sandbox runtime Pi evidence must be complete or absent");
+	if (imageLockPiVersion && imageLockPiVersion !== "0.84.1")
+		fail("Image lock Pi version must be 0.84.1");
+	if (piVersion && piVersion !== imageLockPiVersion)
+		fail(
+			`Sandbox runtime Pi version mismatch: expected ${imageLockPiVersion}, got ${piVersion}`,
+		);
 
 	if (
 		packageArgument &&
@@ -150,7 +160,8 @@ try {
 		macosVersion: required(values, "macos-version"),
 		architecture: required(values, "architecture"),
 		sbxVersion: optional(values, "sbx-version"),
-		piVersion: optional(values, "pi-version"),
+		piVersion,
+		imageLockPiVersion,
 		packageVersion,
 		tests,
 		testsCount,

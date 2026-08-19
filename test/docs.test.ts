@@ -53,9 +53,7 @@ test("README gives a concise path into the product documentation", async () => {
 	])
 		assert.match(
 			readme,
-			new RegExp(
-				`https://gurkanguray\\.github\\.io/pi-docker-sandboxes/${route}`,
-			),
+			new RegExp(`https://gurkanguray\\.github\\.io/pi-docker-sandboxes/${route}`),
 		);
 });
 
@@ -76,9 +74,9 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 		assert.ok(reference.includes("`" + flag + "`"), flag);
 
 	const extension = await read("extensions/docker-sandboxes/index.ts");
-	const extensionFlags = [
-		...extension.matchAll(/registerFlag\("([^"]+)"/g),
-	].map(([, flag]) => `--${flag}`);
+	const extensionFlags = [...extension.matchAll(/registerFlag\("([^"]+)"/g)].map(
+		([, flag]) => `--${flag}`,
+	);
 	for (const flag of extensionFlags)
 		assert.ok(reference.includes("`" + flag + "`"), flag);
 	for (const command of ["status", "doctor", "config"])
@@ -108,10 +106,7 @@ test("CLI reference stays aligned with the CLI and extension", async () => {
 	assert.match(reference, /\/resume/);
 	assert.match(reference, /--keep[^\r\n]*same sandbox/i);
 	assert.match(reference, /pi-dsbx run[^\n]*-- --session (?:ID|SESSION_ID)/);
-	assert.doesNotMatch(
-		reference,
-		/`pi-dsbx image build`[^\n]*accepts no flags/i,
-	);
+	assert.doesNotMatch(reference, /`pi-dsbx image build`[^\n]*accepts no flags/i);
 });
 
 test("docs state the implemented safety, cleanup, and image defaults", async () => {
@@ -144,7 +139,6 @@ test("getting started separates compatibility from release validation", async ()
 	const ordered = [
 		"## Requirements",
 		"## Install after release",
-		"## Build the image",
 		"## Run",
 		"## Keep your work",
 		"## Next steps",
@@ -160,8 +154,18 @@ test("getting started separates compatibility from release validation", async ()
 	])
 		assert.ok(gettingStarted.includes(value), value);
 	assert.match(gettingStarted, /macOS 14\+[^\r\n]*Apple silicon/i);
-	assert.match(gettingStarted, /Ubuntu 24\.04\+[^\r\n]*(?:ARM64|Arm64)/i);
+	assert.match(
+		gettingStarted,
+		/Ubuntu 24\.04\+[^\r\n]*amd64[^\r\n]*(?:ARM64|Arm64)/i,
+	);
+	assert.match(
+		gettingStarted,
+		/ghcr\.io\/gurkanguray\/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b/,
+	);
+	assert.match(gettingStarted, /`linux\/amd64`[^\r\n]*`linux\/arm64`/i);
 	assert.match(gettingStarted, /macOS 26\.5\.2[^\r\n]*(?:validated|tested)/i);
+	assert.match(gettingStarted, /hardware validation[^\r\n]*blocked/i);
+	assert.doesNotMatch(gettingStarted, /pi-dsbx image build/);
 	assert.doesNotMatch(
 		gettingStarted,
 		/other macOS releases[^\n]*unsupported|Linux[^\n]*unsupported/i,
@@ -195,6 +199,15 @@ test("configuration explains every user-facing choice", async () => {
 		/anthropic[^\n]*google[^\n]*openai[^\n]*openrouter[^\n]*xai/i,
 	])
 		assert.match(configuration, choice);
+	assert.match(
+		configuration,
+		/ghcr\.io\/gurkanguray\/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b/,
+	);
+	assert.match(configuration, /`linux\/amd64`[^\r\n]*`linux\/arm64`/i);
+	assert.doesNotMatch(
+		configuration,
+		/standard verified image is `linux\/arm64`/i,
+	);
 });
 
 test("README links to product and policy documentation", async () => {
@@ -315,16 +328,22 @@ test("support, compatibility, and security each have one job", async () => {
 		assert.ok(compatibility.includes(value), value);
 	for (const requirement of [
 		/macOS 14\+[^\r\n]*Apple Silicon[^\r\n]*supported/i,
-		/Ubuntu 24\.04\+[^\r\n]*(?:ARM64|Arm64)[^\r\n]*supported/i,
+		/Ubuntu 24\.04\+[^\r\n]*amd64[^\r\n]*(?:ARM64|Arm64)[^\r\n]*supported/i,
 		/macOS 26\.5\.2[^\r\n]*(?:validated|tested)/i,
 		/Docker Sandboxes[^\r\n]*0\.38\.x/i,
 		/Windows 11[^\r\n]*(?:current package|package currently)[^\r\n]*incompatible/i,
-		/(?:x64|amd64)[^\r\n]*`linux\/arm64`/i,
+		/ghcr\.io\/gurkanguray\/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b/,
+		/`linux\/amd64`[^\r\n]*`linux\/arm64`/i,
+		/hardware validation[^\r\n]*blocked/i,
 	])
 		assert.match(compatibility, requirement);
 	assert.doesNotMatch(
 		compatibility,
 		/other macOS releases[^\n]*unsupported|Linux (?:is )?unsupported|Windows (?:is )?unsupported/i,
+	);
+	assert.doesNotMatch(
+		compatibility,
+		/(?:x64|amd64)[^\r\n]*incompatible[^\r\n]*linux\/arm64|Required for image build/i,
 	);
 
 	assert.match(
@@ -509,7 +528,8 @@ test("issue forms accept every documented host status", async () => {
 	assert.match(feature, /security boundar/i);
 	assert.match(platform, /Platform report/i);
 	assert.match(platform, /upstream-supported|Docker Sandboxes/i);
-	assert.match(platform, /`linux\/arm64`/i);
+	assert.match(platform, /Ubuntu 24\.04\+[^\r\n]*amd64[^\r\n]*ARM64/i);
+	assert.match(platform, /`linux\/amd64`[\s\S]*?`linux\/arm64`/i);
 	assert.match(platform, /does not\s+(?:establish|guarantee)[^\n]*roadmap/i);
 	assert.doesNotMatch(
 		platform,

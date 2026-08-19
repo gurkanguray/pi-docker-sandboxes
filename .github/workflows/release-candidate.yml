@@ -257,6 +257,9 @@ jobs:
           const freshInstallReceipt = JSON.parse(
             await readFile("evidence/fresh-install-receipt.json"),
           );
+          const imageLock = JSON.parse(
+            await readFile("docker/image-lock.json"),
+          );
           const hardware = [
             "macos-arm64",
             "ubuntu-amd64-kvm",
@@ -278,6 +281,7 @@ jobs:
           if (imageReceipt.sourceSha !== expected.SOURCE_SHA ||
               imageReceipt.ociDigest !== expected.IMAGE_DIGEST ||
               packageReceipt.binVersion !== expected.VERSION ||
+              imageLock.piVersion !== "0.84.1" ||
               freshInstallReceipt.sourceSha !== expected.SOURCE_SHA ||
               freshInstallReceipt.version !== expected.VERSION ||
               freshInstallReceipt.integrity !== packageReceipt.integrity ||
@@ -290,6 +294,8 @@ jobs:
                 e2e.candidateDigest !== expected.IMAGE_DIGEST ||
                 e2e.packageVersion !== expected.VERSION ||
                 e2e.packageIntegrity !== packageReceipt.integrity ||
+                e2e.piVersion !== imageLock.piVersion ||
+                e2e.imageLockPiVersion !== imageLock.piVersion ||
                 e2e.status !== "passed" || !e2e.passedAt ||
                 e2e.cleanup?.status !== "passed" ||
                 e2e.cleanup?.homeRemoved !== true))

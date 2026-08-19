@@ -10,9 +10,9 @@
 | --- | --- |
 | Host Pi | `>=0.84.1 <0.85.0` |
 | Node.js | `>=22.19.0 <25` |
-| Host Docker | Required for image build; 29+ validated |
+| Host Docker | 29+ validated |
 | Docker Sandboxes | 0.38.x |
-| Locked image | `linux/arm64` |
+| Standard image | `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` (`linux/amd64`, `linux/arm64`) |
 | Docker Kit schema | v2 |
 
 ## Supported hosts
@@ -20,9 +20,9 @@
 | Host | Package status |
 | --- | --- |
 | macOS 14+ on Apple Silicon | Supported; see the exact release validation below. |
-| Ubuntu 24.04+ on ARM64 | Supported; not yet hardware-validated by this project. |
+| Ubuntu 24.04+ on amd64 or ARM64 | Supported; hardware validation remains blocked until the required hosted runners are available. |
 
-Both hosts meet the official [Docker Sandboxes prerequisites](https://docs.docker.com/ai/sandboxes/install/), run Pi, and match the package's locked image architecture. Bug reports are welcome from either host.
+Both hosts meet the official [Docker Sandboxes prerequisites](https://docs.docker.com/ai/sandboxes/install/), run Pi, and match a platform published by the standard multiarch image. Bug reports are welcome from either host.
 
 ## Release validation
 
@@ -40,8 +40,7 @@ This records evidence; it does not narrow the supported hosts above.
 
 ## Known limitations
 
-- Ubuntu 24.04+ x64 is supported upstream, but the standard package path is currently incompatible because the locked image is `linux/arm64`.
-- Windows 11 x64 is supported by Docker Sandboxes and [Pi with Bash](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/windows.md), but the current package is incompatible because the locked image is ARM64 and inherited process-group execution rejects Windows.
+- Windows 11 x64 is supported by Docker Sandboxes and [Pi with Bash](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/windows.md), but the current package is incompatible because inherited process-group execution rejects Windows.
 - Custom images require immutable SHA-256 digests; supplying one does not establish a supported cross-architecture path.
 - Docker Sandbox Kits remain experimental.
 

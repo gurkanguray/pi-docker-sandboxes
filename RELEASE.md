@@ -71,12 +71,10 @@ release approval.
 
 ## Candidate OCI image
 
-CI copies the verified npm tarball into the Docker build context and performs
-one `linux/arm64` Buildx solve tagged with its source SHA. QEMU verifies that
-loaded image, then digest-pinned Skopeo exports the same Docker daemon image to
-an OCI archive, so there is no second unverified build digest. The same
-`npm run image:verify` smoke test used by maintainers fails if the arm64 image
-cannot execute. CI uploads the OCI archive with the JSON verification receipt.
+CI reads the exact published standard multiarch reference from
+`docker/image-lock.json`. Digest-pinned Skopeo exports all locked platforms to
+one OCI archive, and CI verifies its manifest digest before uploading the
+archive with the JSON verification receipt.
 The
 security workflow scans the repository and a deterministically rebuilt image
 for HIGH/CRITICAL findings, uploads SARIF, and emits a CycloneDX SBOM.

@@ -101,10 +101,6 @@ To disable the exit prompt, set `export.onExit` to `never`. Changed work remains
 
 ## Images
 
-The standard verified image is `linux/arm64`. Custom images must use an immutable SHA-256 digest, but supplying one does not establish a supported cross-architecture path. Without one, build the verified local image:
-
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
-```
+The standard verified image is `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` for `linux/amd64` and `linux/arm64`. Custom images must use an immutable SHA-256 digest, but supplying one does not establish a supported cross-architecture path.
 
 See the [CLI reference](cli-reference.md) for all overrides.
