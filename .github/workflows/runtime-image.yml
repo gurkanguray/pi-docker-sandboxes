@@ -7,10 +7,27 @@ on:
         required: true
         type: choice
         options: [standard, docker]
+  pull_request:
+    paths:
+      - .github/workflows/runtime-image.yml
+      - docker/runtime.Dockerfile
+      - docker/runtime-lock.json
+      - docker/runtime-package.json
+      - docker/runtime-package-lock.json
+      - scripts/finalize-runtime-receipt.mjs
+      - scripts/runtime-build-args.mjs
+      - scripts/runtime-lock.mjs
+      - scripts/verify-runtime-environment.mjs
+      - scripts/verify-runtime-image.mjs
+      - test/runtime-image.test.ts
+      - test/runtime-publication.test.ts
+      - test/runtime-workflow.test.ts
 permissions:
   contents: read
 concurrency:
-  group: runtime-image-${{ github.sha }}-${{ inputs.variant }}
+  group: >-
+    runtime-image-${{ github.event_name }}-${{
+    github.event.pull_request.number || github.sha }}
   cancel-in-progress: false
 jobs:
   source:
@@ -19,6 +36,7 @@ jobs:
       contents: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      variant: ${{ steps.source.outputs.variant }}
       run_identity: ${{ steps.source.outputs.run_identity }}
       artifact: ${{ steps.source.outputs.artifact }}
       buildx_version: ${{ steps.lock.outputs.buildx_version }}
@@ -37,18 +55,39 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - id: source
         name: Bind source commit
         env:
-          VARIANT: ${{ inputs.variant }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SOURCE_SHA: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.sha || github.sha }}
+          VARIANT: ${{ github.event.inputs.variant || 'standard' }}
         run: |
           set -euo pipefail
           git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
-          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          case "$EVENT_NAME" in
+            pull_request)
+              test "$SOURCE_SHA" = "$PR_HEAD_SHA"
+              test "$VARIANT" = "standard"
+              test "$(git merge-base "$SOURCE_SHA" refs/remotes/origin/main)" = "$(git rev-parse refs/remotes/origin/main)"
+              ;;
+            workflow_dispatch)
+              test "$SOURCE_SHA" = "$GITHUB_SHA"
+              test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+              case "$VARIANT" in standard|docker) ;; *) exit 1 ;; esac
+              ;;
+            *) exit 1 ;;
+          esac
           {
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$SOURCE_SHA"
+            echo "variant=$VARIANT"
             echo "run_identity=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             echo "artifact=$VARIANT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >> "$GITHUB_OUTPUT"
@@ -83,7 +122,7 @@ jobs:
           context: docker
           file: docker/runtime.Dockerfile
           platforms: linux/amd64,linux/arm64
-          target: ${{ inputs.variant }}
+          target: ${{ needs.source.outputs.variant }}
           push: false
           no-cache: true
           provenance: mode=max
@@ -102,7 +141,7 @@ jobs:
       - name: Verify both exact platform manifests under QEMU
         env:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          VARIANT: ${{ inputs.variant }}
+          VARIANT: ${{ needs.source.outputs.variant }}
         run: |
           cd "$RUNNER_TEMP"
           node "$GITHUB_WORKSPACE/scripts/verify-runtime-image.mjs" \
@@ -150,7 +189,8 @@ jobs:
           version: v0.74.0
           input: runtime/oci
           format: sarif
-          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
+          output: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
           ignore-unfixed: false
@@ -162,14 +202,15 @@ jobs:
           version: v0.74.0
           input: runtime/oci
           format: cyclonedx
-          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
+          output: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.cdx.json
           additional-args: --platform linux/${{ matrix.arch }}
       - name: Bind platform evidence identities
         if: always() && steps.scan.outcome != 'cancelled'
         env:
           ARCH: ${{ matrix.arch }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          VARIANT: ${{ inputs.variant }}
+          VARIANT: ${{ needs.source.outputs.variant }}
         run: |
           node --input-type=module <<'NODE'
           import { createHash } from "node:crypto";
@@ -208,22 +249,24 @@ jobs:
         uses: >-
           github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
         with:
-          sarif_file: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
-          category: runtime-${{ inputs.variant }}-${{ matrix.arch }}
+          sarif_file: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
+          category: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: >-
             security-${{ matrix.arch }}-${{ needs.source.outputs.artifact }}
           path: |
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.evidence.json
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.cdx.json
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.evidence.json
           if-no-files-found: error
           retention-days: 90
 
   receipt:
-    if: inputs.variant == 'standard'
+    if: needs.source.outputs.variant == 'standard'
     needs: [source, build, security]
     runs-on: ubuntu-latest
     permissions:
@@ -255,7 +298,9 @@ jobs:
           retention-days: 90
 
   publish:
-    if: inputs.variant == 'standard'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      needs.source.outputs.variant == 'standard'
     needs: [source, receipt]
     runs-on: ubuntu-latest
     environment:

@@ -8,12 +8,14 @@ type Step = {
 	name?: string;
 	uses?: string;
 	run?: string;
+	env?: Record<string, unknown>;
 	with?: Record<string, unknown>;
 };
 type Job = {
 	if?: string;
 	needs?: string | string[];
 	environment?: { name?: string; url?: string };
+	outputs?: Record<string, unknown>;
 	permissions?: Record<string, string>;
 	steps?: Step[];
 };
@@ -29,6 +31,24 @@ const workflowPath = new URL(
 );
 const checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262";
 const sourceRef = "${{ needs.source.outputs.sha }}";
+const sourceVariant = "${{ needs.source.outputs.variant }}";
+const selectedSource =
+	"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
+const pullRequestPaths = [
+	".github/workflows/runtime-image.yml",
+	"docker/runtime.Dockerfile",
+	"docker/runtime-lock.json",
+	"docker/runtime-package.json",
+	"docker/runtime-package-lock.json",
+	"scripts/finalize-runtime-receipt.mjs",
+	"scripts/runtime-build-args.mjs",
+	"scripts/runtime-lock.mjs",
+	"scripts/verify-runtime-environment.mjs",
+	"scripts/verify-runtime-image.mjs",
+	"test/runtime-image.test.ts",
+	"test/runtime-publication.test.ts",
+	"test/runtime-workflow.test.ts",
+];
 const needs = (job: Job) =>
 	Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : [];
 const stepNamed = (job: Job, name: string) => {
@@ -38,7 +58,11 @@ const stepNamed = (job: Job, name: string) => {
 };
 
 function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
-	assert.deepEqual(Object.keys(workflow.on), ["workflow_dispatch"]);
+	assert.deepEqual(Object.keys(workflow.on), [
+		"workflow_dispatch",
+		"pull_request",
+	]);
+	assert.deepEqual(workflow.on.pull_request, { paths: pullRequestPaths });
 	assert.deepEqual(workflow.permissions, { contents: "read" });
 	assert.deepEqual(Object.keys(workflow.jobs), [
 		"source",
@@ -57,6 +81,9 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 		"security-events": "write",
 	});
 	assert.deepEqual(receipt.permissions, { contents: "read" });
+	assert.equal(source.if, undefined);
+	assert.equal(build.if, undefined);
+	assert.equal(security.if, undefined);
 	assert.deepEqual(publish.permissions, {
 		contents: "read",
 		packages: "write",
@@ -64,24 +91,45 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 		attestations: "write",
 	});
 
+	assert.equal(source.outputs?.variant, "${{ steps.source.outputs.variant }}");
 	const sourceCheckout = source.steps?.[0];
 	assert.equal(sourceCheckout?.uses, checkout);
+	assert.equal(sourceCheckout.with?.ref, selectedSource);
 	assert.equal(sourceCheckout.with?.["fetch-depth"], 0);
-	const sourceRun = source.steps?.find((step) => step.id === "source")?.run;
+	const sourceStep = source.steps?.find((step) => step.id === "source");
+	const sourceRun = sourceStep?.run;
 	assert.ok(sourceRun, "source binding step is required");
+	assert.equal(sourceStep.env?.SOURCE_SHA, selectedSource);
+	assert.equal(
+		sourceStep.env?.VARIANT,
+		"${{ github.event.inputs.variant || 'standard' }}",
+	);
 	for (const check of [
 		'git fetch --force origin "refs/heads/main:refs/remotes/origin/main"',
-		'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"',
-		'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+		'test "$(git rev-parse HEAD)" = "$SOURCE_SHA"',
+		'test "$SOURCE_SHA" = "$PR_HEAD_SHA"',
+		'test "$VARIANT" = "standard"',
+		'test "$(git merge-base "$SOURCE_SHA" refs/remotes/origin/main)" = "$(git rev-parse refs/remotes/origin/main)"',
+		'test "$SOURCE_SHA" = "$GITHUB_SHA"',
+		'test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"',
+		'echo "variant=$VARIANT"',
 	])
-		assert.ok(sourceRun.includes(check), `source binding must enforce: ${check}`);
+		assert.ok(
+			sourceRun.includes(check),
+			`source binding must enforce: ${check}`,
+		);
 
 	for (const job of [build, security, receipt, publish]) {
 		const jobCheckout = job.steps?.find((step) => step.uses === checkout);
-		assert.ok(jobCheckout, "downstream job must use the pinned checkout action");
+		assert.ok(
+			jobCheckout,
+			"downstream job must use the pinned checkout action",
+		);
 		assert.equal(jobCheckout.with?.ref, sourceRef);
 		assert.equal(jobCheckout.with?.["persist-credentials"], false);
 	}
+	for (const job of [build, security, receipt, publish])
+		assert.doesNotMatch(JSON.stringify(job), /inputs\.variant/);
 
 	for (const job of Object.values(workflow.jobs))
 		for (const step of job.steps ?? [])
@@ -114,14 +162,27 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 			);
 		}
 
-	assert.equal(receipt.if, "inputs.variant == 'standard'");
+	assert.equal(receipt.if, "needs.source.outputs.variant == 'standard'");
 	assert.deepEqual(needs(receipt), ["source", "build", "security"]);
-	assert.equal(publish.if, "inputs.variant == 'standard'");
+	assert.equal(
+		publish.if,
+		"github.event_name == 'workflow_dispatch' && needs.source.outputs.variant == 'standard'",
+	);
 	assert.deepEqual(needs(publish), ["source", "receipt"]);
 	assert.deepEqual(publish.environment, {
 		name: "release-runtime",
 		url: "https://github.com/${{ github.repository }}/pkgs",
 	});
+	assert.equal(
+		stepNamed(build, "Build exact multi-platform archive without cache").with
+			?.target,
+		sourceVariant,
+	);
+	assert.equal(
+		stepNamed(security, "Scan exact platform manifest").with?.output,
+		`runtime-${sourceVariant}-${"${{ matrix.arch }}"}.sarif`,
+	);
+
 	const verifyIndex = publish.steps?.findIndex(
 		(step) => step.name === "Verify release-runtime protection",
 	);
@@ -172,8 +233,10 @@ test("runtime workflow policy rejects security and publication weakening", async
 		[
 			"Trivy ignore file",
 			(value) => {
-				stepNamed(value.jobs.security, "Scan exact platform manifest")
-					.with!.trivyignores = ".trivyignore.yaml";
+				stepNamed(
+					value.jobs.security,
+					"Scan exact platform manifest",
+				).with!.trivyignores = ".trivyignore.yaml";
 			},
 		],
 		[
@@ -185,9 +248,9 @@ test("runtime workflow policy rejects security and publication weakening", async
 			},
 		],
 		[
-			"nonmanual trigger",
+			"broadened pull request trigger",
 			(value) => {
-				value.on.push = {};
+				(value.on.pull_request as { paths: string[] }).paths.push("docker/**");
 			},
 		],
 		[
@@ -197,14 +260,38 @@ test("runtime workflow policy rejects security and publication weakening", async
 			},
 		],
 		[
-			"source SHA may be an ancestor of main",
+			"wrong pull request SHA binding",
 			(value) => {
 				const source = value.jobs.source.steps?.find(
 					(step) => step.id === "source",
 				);
 				source!.run = source!.run!.replace(
-					'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"',
-					'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main',
+					'test "$SOURCE_SHA" = "$PR_HEAD_SHA"',
+					"true # accept merge commit",
+				);
+			},
+		],
+		[
+			"wrong pull request variant",
+			(value) => {
+				const source = value.jobs.source.steps?.find(
+					(step) => step.id === "source",
+				);
+				source!.run = source!.run!.replace(
+					'test "$VARIANT" = "standard"',
+					"true # accept docker",
+				);
+			},
+		],
+		[
+			"stale pull request base",
+			(value) => {
+				const source = value.jobs.source.steps?.find(
+					(step) => step.id === "source",
+				);
+				source!.run = source!.run!.replace(
+					'test "$(git merge-base "$SOURCE_SHA" refs/remotes/origin/main)" = "$(git rev-parse refs/remotes/origin/main)"',
+					'git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main',
 				);
 			},
 		],
@@ -234,9 +321,9 @@ test("runtime workflow policy rejects security and publication weakening", async
 			},
 		],
 		[
-			"nonstandard publication",
+			"pull request publication bypass",
 			(value) => {
-				delete value.jobs.publish.if;
+				value.jobs.publish.if = "needs.source.outputs.variant == 'standard'";
 			},
 		],
 	];
