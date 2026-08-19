@@ -13,9 +13,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { npmCommand } from "../scripts/npm-command.mjs";
 
 const exec = promisify(execFile);
+const execNpm = (
+	args: string[],
+	options: { cwd: string | URL },
+): Promise<{ stdout: string; stderr: string }> => {
+	const npmCli = process.env.npm_execpath;
+	const command = npmCli ? process.execPath : "npm";
+	const commandArgs = npmCli ? [npmCli, ...args] : args;
+	return exec(command, commandArgs, {
+		...options,
+		encoding: "utf8",
+	}) as Promise<{ stdout: string; stderr: string }>;
+};
 const root = new URL("..", import.meta.url);
 
 test("runtime doctor ranges match package requirements", async () => {
@@ -33,8 +44,7 @@ test("runtime doctor ranges match package requirements", async () => {
 test("packed CLI runs from node_modules", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-pack-"));
 	try {
-		const { stdout } = await exec(
-			npmCommand,
+		const { stdout } = await execNpm(
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
@@ -93,8 +103,7 @@ test("packed CLI runs from node_modules", async () => {
 test("npm package includes the image lock and standalone runtime contracts", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-pack-"));
 	try {
-		const { stdout } = await exec(
-			npmCommand,
+		const { stdout } = await execNpm(
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
