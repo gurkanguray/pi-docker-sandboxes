@@ -490,16 +490,30 @@ async function preserveV1StateBytes(path: string, bytes: Buffer): Promise<void> 
 	}
 }
 
+export type SandboxMigrationEvidenceProvider =
+	| SandboxMigrationEvidence
+	| (() => Promise<SandboxMigrationEvidence>);
+
 export async function loadSandboxStateResult(
 	root: string,
 	name: string,
-	evidence?: SandboxMigrationEvidence,
+	evidence?: SandboxMigrationEvidenceProvider,
 ): Promise<Migration<SandboxStateV2>> {
 	const path = statePath(root, name);
 	let migrated: Migration<SandboxStateV2>;
 	try {
 		const bytes = await readFile(path);
-		migrated = migrateSandboxState(JSON.parse(bytes.toString("utf8")), path, evidence);
+		const input: unknown = JSON.parse(bytes.toString("utf8"));
+		const migrationEvidence =
+			typeof evidence === "function" &&
+			input !== null &&
+			typeof input === "object" &&
+			(input as { version?: unknown }).version === 1
+				? await evidence()
+				: typeof evidence === "function"
+					? undefined
+					: evidence;
+		migrated = migrateSandboxState(input, path, migrationEvidence);
 		if (migrated.migrated) {
 			await preserveV1StateBytes(path, bytes);
 			await saveSandboxState(migrated.value);
@@ -534,7 +548,7 @@ export async function loadSandboxStateResult(
 export async function loadSandboxState(
 	root: string,
 	name: string,
-	evidence?: SandboxMigrationEvidence,
+	evidence?: SandboxMigrationEvidenceProvider,
 ): Promise<SandboxStateV2> {
 	return (await loadSandboxStateResult(root, name, evidence)).value;
 }

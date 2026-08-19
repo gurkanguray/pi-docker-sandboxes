@@ -11,7 +11,9 @@ import {
 } from "./config.ts";
 import { decideDisposition } from "./disposition.ts";
 import { formatError, OperationError } from "./errors.ts";
+import { IMAGE_LOCK } from "./image-lock.ts";
 import { buildLocalImage } from "./image.ts";
+import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { launch } from "./launch.ts";
 import { SandboxLeaseBusyError, withSandboxLease } from "./lease.ts";
 import { SbxClient } from "./sbx/client.ts";
@@ -25,7 +27,7 @@ import {
 	applyPatch,
 	exportPatch,
 	inspectRepository,
-	loadSandboxState,
+	loadSandboxStateResult,
 	removeSandboxState,
 	saveSandboxState,
 	sandboxStateExists,
@@ -355,7 +357,23 @@ export async function main(
 		return withSandboxLease(repository.root, name, command, async () => {
 			const hasState = await sandboxStateExists(repository.root, name);
 			const state = hasState
-				? await loadSandboxState(repository.root, name)
+				? (
+						await loadSandboxStateResult(repository.root, name, async () => {
+							const config = await loadConfig(cwd);
+							const resolved = await resolveKitImage(config);
+							const inspection = await client.inspect(name);
+							return {
+								exists: true,
+								inspectedImage: String(inspection.image ?? ""),
+								expectedImage: resolved.image,
+								runtimeSchema: IMAGE_LOCK.runtimeSchema,
+								packageVersion: PACKAGE_VERSION,
+								...(resolved.templateStoreId
+									? { templateStoreId: resolved.templateStoreId }
+									: {}),
+							};
+						})
+					).value
 				: undefined;
 			if (command === "export") {
 				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);

@@ -154,14 +154,19 @@ test("version 1 file migration durably preserves exact source bytes", async () =
 	const image = `example.invalid/pi@sha256:${"d".repeat(64)}`;
 	const source = ` {\n  "version": 1,\n  "name": "${name}",\n  "hostBaseCommit": "base",\n  "hostBranch": "main",\n  "hostRepoIdentity": "identity",\n  "hostRoot": ${JSON.stringify(root)},\n  "workspaceMode": "clone",\n  "createdAt": "2026-08-12T00:00:00.000Z"\n}\n`;
 	await writeFile(path, source);
-	const migrated = await loadSandboxStateResult(root, name, {
-		exists: true,
-		inspectedImage: image,
-		expectedImage: image,
-		runtimeSchema: 1,
-		packageVersion: "1.0.0",
-		migratedAt: "2026-08-18T00:00:00.000Z",
+	let evidenceCalls = 0;
+	const migrated = await loadSandboxStateResult(root, name, async () => {
+		evidenceCalls++;
+		return {
+			exists: true,
+			inspectedImage: image,
+			expectedImage: image,
+			runtimeSchema: 1,
+			packageVersion: "1.0.0",
+			migratedAt: "2026-08-18T00:00:00.000Z",
+		};
 	});
+	assert.equal(evidenceCalls, 1);
 	assert.equal(migrated.migrated, true);
 	assert.equal(await readFile(`${path}.v1.backup`, "utf8"), source);
 	assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
