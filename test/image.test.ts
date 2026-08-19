@@ -76,6 +76,14 @@ test("Dockerfile requires the lock-supplied base image", async () => {
 	);
 	assert.match(dockerfile, /^ARG BASE_IMAGE\nFROM \$\{BASE_IMAGE\}$/m);
 	assert.doesNotMatch(dockerfile, /^ARG BASE_IMAGE=/m);
+	assert.match(
+		dockerfile,
+		/rm -f \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	);
+	assert.match(
+		dockerfile,
+		/test ! -e \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	);
 });
 
 test("npm pack output errors are structured", async () => {
