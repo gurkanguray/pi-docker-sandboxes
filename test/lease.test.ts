@@ -286,6 +286,9 @@ test("Python launches two actual pi-dsbx run processes with one lifecycle owner"
 		cp(new URL("../docker", import.meta.url), join(harness, "docker"), {
 			recursive: true,
 		}),
+		cp(new URL("../runtime", import.meta.url), join(harness, "runtime"), {
+			recursive: true,
+		}),
 		symlink(
 			new URL("../node_modules", import.meta.url),
 			join(harness, "node_modules"),

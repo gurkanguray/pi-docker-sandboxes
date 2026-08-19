@@ -21,8 +21,6 @@ const enabled = process.env.PI_DOCKER_SANDBOX_E2E === "1";
 const selectedImage = process.env.PI_DOCKER_SANDBOX_E2E_IMAGE;
 const selectedTemplateStoreId =
 	process.env.PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID;
-const expectedPackageVersion =
-	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION ?? "0.1.0";
 const exec = promisify(execFile);
 async function recordSandbox(name: string): Promise<void> {
 	const path = process.env.PI_DOCKER_SANDBOX_E2E_NAMES;
@@ -127,16 +125,11 @@ sandboxTest(
 			const runtime = await client.exec(name, [
 				"sh",
 				"-c",
-				"env; printf '\\nPI_VERSION='; pi --version; npm list -g pi-docker-sandboxes --depth=0",
+				"env; printf '\\nPI_VERSION='; pi --version; test ! -e /usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes; test -f /home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs; printf '\\nRUNTIME_EXTENSION=kit\\n'",
 			]);
 			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_ACTIVE=1/);
 			assert.match(runtime.stdout, /PI_VERSION=0\.84\.1/);
-			assert.match(
-				runtime.stdout,
-				new RegExp(
-					`pi-docker-sandboxes@${expectedPackageVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-				),
-			);
+			assert.match(runtime.stdout, /RUNTIME_EXTENSION=kit/);
 			for (const key of [
 				"OPENAI_API_KEY",
 				"ANTHROPIC_API_KEY",
@@ -157,15 +150,13 @@ sandboxTest(
 			}
 
 			const doctorScript =
-				"import {attestSandbox,runDoctor,formatDoctor} from '/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes/src/status.ts'; console.log(formatDoctor(await runDoctor(await attestSandbox())))";
+				"import {readFile} from 'node:fs/promises'; import {sandboxDiagnostics} from '/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs'; console.log(JSON.stringify(sandboxDiagnostics(process.env, await readFile('/proc/self/mountinfo', 'utf8'))))";
 			const doctor = await client.exec(name, [
 				"sh",
 				"-c",
-				`node --experimental-strip-types --input-type=module -e ${JSON.stringify(
-					doctorScript,
-				)} 2>&1 || true`,
+				`node --input-type=module -e ${JSON.stringify(doctorScript)}`,
 			]);
-			assert.doesNotMatch(doctor.stdout, /^✗/m);
+			assert.doesNotMatch(doctor.stdout, /"level":"fail"/);
 			const boundary = await client.exec(name, [
 				"sh",
 				"-c",

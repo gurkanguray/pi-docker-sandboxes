@@ -35,7 +35,7 @@ test("image verification script fails explicitly without a success receipt", asy
 				assert.equal(output.code, 1);
 				assert.match(
 					output.stderr ?? "",
-					/production runtime image verification is unavailable until Task 8/,
+					/production runtime image verification is unavailable until the runtime image workflow/,
 				);
 				assert.doesNotMatch(output.stdout ?? "", /✓/);
 				const receipt = JSON.parse(
@@ -46,7 +46,7 @@ test("image verification script fails explicitly without a success receipt", asy
 					phase: "prepare",
 					operation: "verify image",
 					detail:
-						"production runtime image verification is unavailable until Task 8",
+						"production runtime image verification is unavailable until the runtime image workflow",
 				});
 				return true;
 			},

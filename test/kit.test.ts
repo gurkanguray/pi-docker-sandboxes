@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -75,13 +76,18 @@ test("Kit v2 generation is deterministic and secret-free", () => {
 	assert.equal(spec.version, "1.0.0");
 	assert.equal(spec.security.privileged, false);
 	assert.equal(spec.sandbox.image, standard);
+	assert.deepEqual(spec.sandbox.entrypoint, [
+		"pi",
+		"-e",
+		"/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs",
+	]);
 	assert.deepEqual(spec.sandbox.command.interactive, []);
 	assert.ok(spec.permissions.network.allow.includes("api.openai.com"));
 	assert.ok(spec.permissions.network.allow.includes("docs.example.com"));
 	assert.equal(JSON.stringify(spec).includes("API_KEY=sk-"), false);
 });
 
-test("Kit files are owner-private", async () => {
+test("Kit owns an exact private copy of the sandbox runtime", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-kit-"));
 	const spec = buildKitSpec({
 		config: mergeConfig(),
@@ -92,5 +98,46 @@ test("Kit files are owner-private", async () => {
 	assert.deepEqual(
 		JSON.parse(await readFile(join(directory, "spec.yaml"), "utf8")),
 		spec,
+	);
+	const runtimePath = join(
+		directory,
+		"files",
+		"home",
+		".pi",
+		"agent",
+		"runtime",
+		"pi-docker-sandboxes.mjs",
+	);
+	const [installed, source] = await Promise.all([
+		readFile(runtimePath),
+		readFile(new URL("../runtime/extension.mjs", import.meta.url)),
+	]);
+	assert.equal(
+		createHash("sha256").update(installed).digest("hex"),
+		createHash("sha256").update(source).digest("hex"),
+	);
+	assert.equal((await stat(join(directory, "spec.yaml"))).mode & 0o777, 0o600);
+	assert.equal((await stat(runtimePath)).mode & 0o777, 0o600);
+	assert.equal((await stat(join(runtimePath, ".."))).mode & 0o777, 0o700);
+});
+
+test("personalization cannot overwrite the Kit-owned runtime", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-kit-collision-"));
+	const personalization = await mkdtemp(
+		join(tmpdir(), "pi-dsbx-personalization-"),
+	);
+	await mkdir(join(personalization, "runtime"));
+	await writeFile(
+		join(personalization, "runtime", "pi-docker-sandboxes.mjs"),
+		"throw new Error('user collision');\n",
+	);
+	const spec = buildKitSpec({
+		config: mergeConfig(),
+		services: [],
+		image: standard,
+	});
+	await assert.rejects(
+		writeKitDirectory(directory, spec, { personalization }),
+		/already exists|EEXIST/i,
 	);
 });

@@ -1,4 +1,4 @@
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DockerSandboxConfig } from "./config.ts";
 import type { CredentialService } from "./config.ts";
@@ -107,7 +107,7 @@ export function buildKitSpec(options: KitOptions): PiKitSpec {
 			entrypoint: [
 				"pi",
 				"-e",
-				"/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes",
+				"/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs",
 			],
 			command: { default: [], interactive: [] },
 		},
@@ -154,13 +154,18 @@ export async function writeKitDirectory(
 		`${JSON.stringify(spec, null, 2)}\n`,
 		{ mode: 0o600 },
 	);
-	if (options.personalization) {
-		const destination = join(directory, "files", "home", ".pi", "agent");
-		await mkdir(destination, { recursive: true, mode: 0o700 });
-		await cp(options.personalization, destination, {
+	const agentDirectory = join(directory, "files", "home", ".pi", "agent");
+	const runtimeDirectory = join(agentDirectory, "runtime");
+	await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+	await writeFile(
+		join(runtimeDirectory, "pi-docker-sandboxes.mjs"),
+		await readFile(new URL("../runtime/extension.mjs", import.meta.url)),
+		{ flag: "wx", mode: 0o600 },
+	);
+	if (options.personalization)
+		await cp(options.personalization, agentDirectory, {
 			recursive: true,
 			force: false,
 			errorOnExist: true,
 		});
-	}
 }

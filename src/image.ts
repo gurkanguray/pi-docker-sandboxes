@@ -101,7 +101,7 @@ export async function verifyImageReceipt(
 	_lock: RuntimeImageLock,
 ): Promise<never> {
 	throw new Error(
-		"production runtime image verification is unavailable until Task 8",
+		"production runtime image verification is unavailable until the runtime image workflow",
 	);
 }
 
@@ -110,7 +110,7 @@ export function compareImageReceipts(
 	_candidate: ImageVerificationReceipt,
 ): never {
 	throw new Error(
-		"production runtime image parity verification is unavailable until Task 8",
+		"production runtime image parity verification is unavailable until the runtime image workflow",
 	);
 }
 

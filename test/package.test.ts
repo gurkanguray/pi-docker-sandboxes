@@ -31,6 +31,9 @@ test("source package builds the CLI exactly once before scriptless packing", asy
 		for (const path of ["package.json", "tsconfig.json", "tsconfig.cli.json"])
 			await cp(join(rootPath, path), join(source, path));
 		await cp(join(rootPath, "src"), join(source, "src"), { recursive: true });
+		await cp(join(rootPath, "runtime"), join(source, "runtime"), {
+			recursive: true,
+		});
 		await symlink(join(rootPath, "node_modules"), join(source, "node_modules"));
 		await writeFile(join(source, ".source-checkout"), "");
 		const { packPackage, runImageCommand } = await import("../src/image.ts");
@@ -203,7 +206,7 @@ test("installed read-only package repacks without scripts or a compiler", async 
 	}
 });
 
-test("npm package includes the image lock contract", async () => {
+test("npm package includes the image lock and standalone runtime contracts", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-pack-"));
 	try {
 		const { stdout } = await exec(
@@ -221,7 +224,27 @@ test("npm package includes the image lock contract", async () => {
 		assert.equal(files.has("package/src/platform.ts"), true);
 		assert.equal(files.has("package/src/state-schema.ts"), true);
 		assert.equal(files.has("package/dist/cli.js"), true);
+		assert.equal(files.has("package/runtime/extension.mjs"), true);
+		assert.equal(files.has("package/runtime/package.json"), true);
 		assert.equal(files.has("package/scripts/verify-image.mjs"), false);
+		const { stdout: runtimeSource } = await exec("tar", [
+			"-xOf",
+			join(directory, stdout.trim()),
+			"package/runtime/extension.mjs",
+		]);
+		assert.doesNotMatch(
+			runtimeSource,
+			/(?:from\s+|import\s*\()["'][^"']*(?:src\/(?:launch|image|workspace|config)|image-lock|host-auth)[^"']*["']/,
+		);
+		const { stdout: dockerfile } = await exec("tar", [
+			"-xOf",
+			join(directory, stdout.trim()),
+			"package/docker/Dockerfile",
+		]);
+		assert.doesNotMatch(dockerfile, /pi-docker-sandboxes\.tgz/);
+		assert.doesNotMatch(dockerfile, /node_modules\/pi-docker-sandboxes/);
+		assert.match(dockerfile, /pi-coding-agent@\$\{PI_VERSION\}/);
+		assert.match(dockerfile, /fd-find=\$\{FD_DEBIAN_VERSION\}/);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}

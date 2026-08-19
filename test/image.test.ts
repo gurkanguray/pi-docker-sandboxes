@@ -15,7 +15,7 @@ test("local production runtime builds fail closed before invoking tools", async 
 	);
 });
 
-test("verification and parity APIs fail closed until Task 8", async () => {
+test("verification and parity APIs fail closed until the runtime image workflow", async () => {
 	const reference = `example.invalid/runtime@sha256:${"a".repeat(64)}` as const;
 	const lock: RuntimeImageLock = {
 		version: 2,
@@ -37,7 +37,7 @@ test("verification and parity APIs fail closed until Task 8", async () => {
 	};
 	await assert.rejects(
 		verifyImageReceipt(reference, lock),
-		/production runtime image verification is unavailable until Task 8/,
+		/production runtime image verification is unavailable until the runtime image workflow/,
 	);
 	assert.throws(
 		() =>
@@ -53,7 +53,7 @@ test("verification and parity APIs fail closed until Task 8", async () => {
 					platform: "linux/arm64",
 				},
 			),
-		/production runtime image parity verification is unavailable until Task 8/,
+		/production runtime image parity verification is unavailable until the runtime image workflow/,
 	);
 });
 

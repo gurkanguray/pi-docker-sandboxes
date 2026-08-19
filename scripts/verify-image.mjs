@@ -22,7 +22,7 @@ if (!image || image === "--help" || image === "-h") {
 	process.exitCode = image ? 0 : 2;
 } else {
 	const error = new Error(
-		"production runtime image verification is unavailable until Task 8",
+		"production runtime image verification is unavailable until the runtime image workflow",
 	);
 	const result = failure(error);
 	console.error(`Image verification failed: ${result.detail}`);
