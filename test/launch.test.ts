@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	access,
 	mkdir,
@@ -38,7 +39,8 @@ import {
 } from "../src/sbx/client.ts";
 
 const exec = promisify(execFile);
-const packageIntegrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+const packageTarball = Buffer.from("verified npm tarball fixture");
+const packageIntegrity = `sha512-${createHash("sha512").update(packageTarball).digest("base64")}`;
 const packageCommit = "a".repeat(40);
 const lockedNpm = (name: string) => ({
 	source: `npm:${name}@1.0.0`,
@@ -78,6 +80,14 @@ const launchImage = `example.invalid/image@sha256:${"a".repeat(64)}`;
 const launch: typeof productionLaunch = (options) =>
 	productionLaunch({
 		...options,
+		fetchNpmPackage:
+			options.fetchNpmPackage ??
+			(async (_lock, destination) => {
+				await mkdir(destination, { recursive: true, mode: 0o700 });
+				const path = join(destination, "verified-package.tgz");
+				await writeFile(path, packageTarball);
+				return path;
+			}),
 		resolveImage:
 			options.resolveImage ?? (async () => ({ image: launchImage })),
 		certifyPlatform:
@@ -101,6 +111,7 @@ const launchClient = {
 	secretServices: async () => new Set<string>(),
 	exists: async () => false,
 	validateKit: async () => undefined,
+	copyTo: async () => undefined,
 	create: async () => undefined,
 	inspect: async () => ({ image: launchImage }),
 	attach: async () => 0,
@@ -240,8 +251,13 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 				events.push("create");
 			},
 			exec: async (_name: string, argv: string[]) => {
-				assert.deepEqual(argv.slice(0, 2), ["pi", "install"]);
-				events.push(`install:${argv[2]}`);
+				if (argv[0] === "pi")
+					events.push(
+						argv[2]?.startsWith("/tmp/pi-dsbx-package-")
+							? "install:npm-local"
+							: `install:${argv[2]}`,
+					);
+				else if (argv[0] === "rm") events.push("cleanup:npm-local");
 				return { stdout: "", stderr: "", code: 0 };
 			},
 			attach: async () => {
@@ -257,7 +273,8 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 		assert.deepEqual(events, [
 			"create",
 			`install:${ponytail}`,
-			"install:npm:pi-subagents@1.0.0",
+			"install:npm-local",
+			"cleanup:npm-local",
 			"attach",
 		]);
 		assert.equal(
@@ -296,6 +313,106 @@ test("mutable package inputs fail before sandbox mutation", async () => {
 			/immutable package source required/,
 		);
 		assert.equal(created, 0);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("npm artifact verification completes before sandbox mutation", async () => {
+	const root = await committedRepository();
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-npm-verify-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: [lockedNpm("example")] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	let created = 0;
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					create: async () => {
+						created++;
+					},
+				} as unknown as SbxClient,
+				config: { ...launchConfig, syncProfile: "mirror" },
+				fetchNpmPackage: async () => {
+					throw new Error("npm registry response failed verification");
+				},
+			}),
+			/registry response failed verification/,
+		);
+		assert.equal(created, 0);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("verified npm tarballs are copied, installed locally, and always cleaned", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-npm-local-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: [lockedNpm("example")] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		for (const failure of ["none", "copy", "install", "cleanup"] as const) {
+			const root = await committedRepository();
+			const events: string[] = [];
+			let installedArgument = "";
+			const client = {
+				...launchClient,
+				create: async () => {
+					events.push("create");
+				},
+				copyTo: async (_name: string, source: string, destination: string) => {
+					events.push("copy");
+					assert.deepEqual(await readFile(source), packageTarball);
+					assert.match(destination, /^\/tmp\/pi-dsbx-package-[0-9a-f-]+\.tgz$/);
+					if (failure === "copy") throw new Error("copy failed");
+				},
+				exec: async (_name: string, argv: string[]) => {
+					if (argv[0] === "pi") {
+						events.push("install");
+						installedArgument = argv[2]!;
+						return { stdout: "", stderr: "", code: failure === "install" ? 1 : 0 };
+					}
+					if (argv[0] === "rm") {
+						events.push("cleanup");
+						return { stdout: "", stderr: "", code: failure === "cleanup" ? 1 : 0 };
+					}
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
+			const operation = launch({
+				cwd: root,
+				client,
+				config: { ...launchConfig, syncProfile: "mirror" },
+				onStatus: (status) => events.push(status),
+			});
+			if (failure === "copy" || failure === "cleanup")
+				await assert.rejects(operation, new RegExp(`${failure} failed|staged npm package`));
+			else {
+				const result = await operation;
+				assert.equal(result.agentExitCode, 0);
+				if (failure === "install")
+					assert.ok(result.warnings.some((warning) => /package was skipped/.test(warning)));
+			}
+			assert.ok(events.indexOf("copy") > events.indexOf("create"));
+			assert.ok(events.includes("cleanup"));
+			if (failure !== "copy") {
+				assert.match(installedArgument, /^\/tmp\/pi-dsbx-package-/);
+				assert.notEqual(installedArgument, "npm:example@1.0.0");
+			}
+		}
 	} finally {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
@@ -552,22 +669,21 @@ test("native packages prompt once and install a compiler only after yes", async 
 				execs.some((argv) => rejected.some((source) => argv.includes(source))),
 				false,
 			);
-			assert.deepEqual(statuses.slice(0, 4), [
+			assert.deepEqual(statuses.slice(0, 3), [
 				"checking Docker Sandboxes",
 				"syncing host credentials",
 				"copying host profile",
-				"creating sandbox",
 			]);
+			const lastVerification = statuses.reduce(
+				(last, status, index) =>
+					status.startsWith("verifying npm:") ? index : last,
+				-1,
+			);
+			assert.ok(statuses.indexOf("creating sandbox") > lastVerification);
 			assert.equal(statuses.at(-1), "starting Pi");
 			if (mode === "yes") {
-				assert.deepEqual(events, [
-					"prompt",
-					"create",
-					"exec",
-					"exec",
-					"exec",
-					"attach",
-				]);
+				assert.deepEqual(events.slice(0, 2), ["prompt", "create"]);
+				assert.equal(events.at(-1), "attach");
 				assert.equal(execs[0]?.[0], "root");
 				const compilerCommand = execs[0]?.join(" ") ?? "";
 				assert.match(compilerCommand, /build-essential/);
@@ -581,20 +697,20 @@ test("native packages prompt once and install a compiler only after yes", async 
 					compilerCommand.match(/-o Dir::Etc::sourceparts=-/g)?.length,
 					2,
 				);
-				assert.deepEqual(execs.slice(1), [
-					["agent", "pi", "install", "npm:context-mode@1.0.0"],
-					["agent", "pi", "install", "npm:pi-subagents@1.0.0"],
-				]);
-				assert.deepEqual(statuses, [
-					"checking Docker Sandboxes",
-					"syncing host credentials",
-					"copying host profile",
-					"creating sandbox",
-					"installing compiler",
-					"installing npm:context-mode@1.0.0",
-					"installing npm:pi-subagents@1.0.0",
-					"starting Pi",
-				]);
+				const installs = execs.filter((argv) => argv[1] === "pi");
+				assert.equal(installs.length, 2);
+				assert.ok(
+					installs.every((argv) =>
+						/^\/tmp\/pi-dsbx-package-[0-9a-f-]+\.tgz$/.test(argv[3] ?? ""),
+					),
+				);
+				assert.deepEqual(
+					statuses.filter((status) => status.startsWith("installing npm:")),
+					[
+						"installing npm:context-mode@1.0.0",
+						"installing npm:pi-subagents@1.0.0",
+					],
+				);
 				assert.deepEqual(kitAllow, [
 					"api.github.com",
 					"archive.ubuntu.com",
@@ -606,9 +722,9 @@ test("native packages prompt once and install a compiler only after yes", async 
 					"security.ubuntu.com",
 				]);
 			} else {
-				assert.deepEqual(execs, [
-					["agent", "pi", "install", "npm:pi-subagents@1.0.0"],
-				]);
+				const installs = execs.filter((argv) => argv[1] === "pi");
+				assert.equal(installs.length, 1);
+				assert.match(installs[0]?.[3] ?? "", /^\/tmp\/pi-dsbx-package-/);
 				assert.deepEqual(kitAllow, []);
 				if (mode === "no") assert.ok(events.includes("prompt"));
 				else assert.equal(events.includes("prompt"), false);
@@ -651,6 +767,7 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 	process.env.HOME = home;
 	try {
 		const installs: string[] = [];
+		const statuses: string[] = [];
 		let newNativeSkillCopied = false;
 		const client = {
 			...launchClient,
@@ -677,6 +794,7 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 			cwd: root,
 			client,
 			config: { ...launchConfig, syncProfile: "mirror" },
+			onStatus: (status) => statuses.push(status),
 			confirmNativePackages: async (packages) => {
 				assert.deepEqual(packages, [
 					"npm:context-mode@1.0.0",
@@ -695,10 +813,15 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 				return true;
 			},
 		});
-		assert.deepEqual(installs, [
-			"npm:pi-hermes-memory@1.0.0",
-			"npm:context-mode@1.0.0",
-		]);
+		assert.equal(installs.length, 2);
+		assert.ok(installs.every((value) => value.startsWith("/tmp/pi-dsbx-package-")));
+		assert.deepEqual(
+			statuses.filter((status) => status.startsWith("installing npm:")),
+			[
+				"installing npm:pi-hermes-memory@1.0.0",
+				"installing npm:context-mode@1.0.0",
+			],
+		);
 		assert.equal(newNativeSkillCopied, true);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -753,7 +876,9 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 			let skillsPresent = false;
 			const delivered: string[] = [];
 			const execs: string[][] = [];
+			const statuses: string[] = [];
 			const packageExecUsers: Array<string | undefined> = [];
+			let npmInstallIndex = 0;
 			const client = {
 				...launchClient,
 				validateKit: async (directory: string) => {
@@ -817,10 +942,11 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 					if (argv.includes("install")) {
 						packageExecUsers.push(options?.user);
 						const packageSpec = argv.at(-1)!;
+						const npmTarball = packageSpec.startsWith("/tmp/pi-dsbx-package-");
 						if (
 							packageSpec ===
 								lockedGit("git:github.com/example/failing-package") ||
-							packageSpec === "npm:context-mode@1.0.0"
+							(failure === "package" && npmTarball && npmInstallIndex++ === 0)
 						)
 							return { stdout: "", stderr: "npm ERR secret-value", code: 1 };
 						const settings = JSON.parse(
@@ -841,30 +967,41 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 				client,
 				config: { ...launchConfig, syncProfile: "mirror" },
 				confirmNativePackages: async () => true,
+				onStatus: (status) => statuses.push(status),
 				onWarning: (warning) => delivered.push(warning),
 			});
 			assert.equal(result.agentExitCode, 0);
 			assert.equal(skillsPresent, true);
-			assert.deepEqual(
-				attachedSettings?.packages,
-				failure === "compiler"
-					? ["npm:pi-subagents@1.0.0"]
-					: ["npm:pi-hermes-memory@1.0.0", "npm:pi-subagents@1.0.0"],
+			assert.equal(attachedSettings?.packages?.length, failure === "compiler" ? 1 : 2);
+			assert.ok(
+				attachedSettings?.packages?.every((value) =>
+					value.startsWith("/tmp/pi-dsbx-package-"),
+				),
+			);
+			const packageInstalls = execs
+				.filter((argv) => argv[0] === "pi" && argv[1] === "install")
+				.map((argv) => argv[2]!);
+			assert.equal(packageInstalls.length, failure === "compiler" ? 2 : 4);
+			assert.equal(
+				packageInstalls.filter((value) => value.startsWith("npm:")).length,
+				0,
 			);
 			assert.deepEqual(
-				execs
-					.filter((argv) => argv[0] === "pi" && argv[1] === "install")
-					.map((argv) => argv[2]),
+				statuses.filter(
+					(status) =>
+						status.startsWith("installing npm:") ||
+						status.startsWith("installing git:"),
+				),
 				failure === "compiler"
 					? [
-							lockedGit("git:github.com/example/failing-package"),
-							"npm:pi-subagents@1.0.0",
+							`installing ${lockedGit("git:github.com/example/failing-package")}`,
+							"installing npm:pi-subagents@1.0.0",
 						]
 					: [
-							"npm:context-mode@1.0.0",
-							lockedGit("git:github.com/example/failing-package"),
-							"npm:pi-hermes-memory@1.0.0",
-							"npm:pi-subagents@1.0.0",
+							"installing npm:context-mode@1.0.0",
+							`installing ${lockedGit("git:github.com/example/failing-package")}`,
+							"installing npm:pi-hermes-memory@1.0.0",
+							"installing npm:pi-subagents@1.0.0",
 						],
 			);
 			assert.deepEqual(
@@ -1370,7 +1507,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 	}
 });
 
-test("malformed or ineligible OAuth tokens retain unmatched warnings", async () => {
+test("oauth-copy rejects explicitly requested providers without copyable tokens", async () => {
 	const root = await committedRepository();
 	const home = await mkdtemp(
 		join(tmpdir(), "pi-dsbx-launch-oauth-ineligible-"),
@@ -1394,10 +1531,14 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 								},
 				}),
 			);
-			const result = await launch({
+			let created = false;
+			const operation = launch({
 				cwd: root,
 				client: {
 					...launchClient,
+					create: async () => {
+						created = true;
+					},
 					copyTo: async () => undefined,
 					exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 				} as unknown as SbxClient,
@@ -1434,16 +1575,67 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 				confirmOAuthCopy: async () => true,
 				yes: true,
 			});
-			assert.equal(
-				result.warnings.includes(
-					"Host provider openai-codex has no sandbox credential service",
-				),
-				scenario === "malformed",
-			);
+			if (scenario === "malformed") {
+				await assert.rejects(
+					operation,
+					/No copyable OAuth credential.*sign in on the host/i,
+				);
+				assert.equal(created, false);
+			} else {
+				const result = await operation;
+				assert.equal(result.agentExitCode, 0);
+			}
 		}
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+	}
+});
+
+test("oauth-copy asks for consent again for every sandbox", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-oauth-repeat-home-"));
+	const agent = join(home, ".pi", "agent");
+	await mkdir(agent, { recursive: true });
+	await writeFile(
+		join(agent, "auth.json"),
+		JSON.stringify({
+			"openai-codex": {
+				type: "oauth",
+				access: "host-oauth-access",
+				refresh: "host-oauth-refresh",
+			},
+		}),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	const questions: string[] = [];
+	try {
+		for (let index = 0; index < 2; index++) {
+			const root = await committedRepository();
+			await launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					copyTo: async () => undefined,
+					exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+				} as unknown as SbxClient,
+				config: {
+					...launchConfig,
+					auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+				},
+				yes: true,
+				confirmOAuthCopy: async (question) => {
+					questions.push(question);
+					return true;
+				},
+			});
+		}
+		assert.equal(questions.length, 2);
+		assert.notEqual(questions[0], questions[1]);
+		assert.ok(questions.every((question) => /VM-readable.*persist/i.test(question)));
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 	}
 });
 

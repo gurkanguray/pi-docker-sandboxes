@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
 import {
 	access,
@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
 	createPersonalizationSnapshot,
+	fetchVerifiedNpmPackage,
 	hashTree,
 	MAX_RESOURCE_FILE_BYTES,
 	resolvePackageLocks,
@@ -30,9 +31,11 @@ import {
 	scanResourceContent,
 	syncOptions,
 } from "../src/personalization.ts";
+import { CommandTimeoutError } from "../src/sbx/supervisor.ts";
 
 const exec = promisify(execFile);
-const packageIntegrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+const packageTarball = Buffer.from("verified npm tarball fixture");
+const packageIntegrity = `sha512-${createHash("sha512").update(packageTarball).digest("base64")}`;
 const packageCommit = "a".repeat(40);
 const lockedNpm = (name: string) => ({
 	source: `npm:${name}@1.0.0`,
@@ -117,6 +120,95 @@ test("model metadata is a strict allowlist for arbitrary opaque properties", () 
 	}
 });
 
+test("npm lock receipts reject conflicting duplicates", () => {
+	const source = "npm:example@1.2.3";
+	assert.throws(
+		() =>
+			resolvePackageLocks([
+				{ source, integrity: packageIntegrity },
+				{
+					source,
+					integrity: `sha512-${Buffer.alloc(64, 9).toString("base64")}`,
+				},
+			]),
+		/conflicting integrity receipts/,
+	);
+});
+
+test("npm fetch binds declared SRI to downloaded tarball bytes", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-npm-fetch-"));
+	const lock = { ...lockedNpm("example"), kind: "npm" as const };
+	let policy: { timeoutMs: number; killGraceMs: number } | undefined;
+	let invocation: { command: string; args: readonly string[] } | undefined;
+	const run = async (
+		command: string,
+		args: readonly string[],
+		options: { policy: { timeoutMs: number; killGraceMs: number } },
+	) => {
+		policy = options.policy;
+		invocation = { command, args };
+		await writeFile(join(root, "example.tgz"), packageTarball);
+		return {
+			stdout: Buffer.from(JSON.stringify([{ filename: "example.tgz" }])),
+			stderr: Buffer.alloc(0),
+			code: 0,
+		};
+	};
+	assert.equal(await fetchVerifiedNpmPackage(lock, root, run), join(root, "example.tgz"));
+	assert.deepEqual(invocation, {
+		command: "npm",
+		args: [
+			"pack",
+			"example@1.0.0",
+			"--pack-destination",
+			root,
+			"--json",
+			"--ignore-scripts",
+		],
+	});
+	assert.ok(policy && policy.timeoutMs > 0 && policy.timeoutMs <= 120_000);
+	assert.ok(policy && policy.killGraceMs > 0);
+	await rm(root, { recursive: true, force: true });
+});
+
+test("npm fetch rejects wrong digest, registry failure, malformed response, and timeout", async () => {
+	for (const failure of ["digest", "registry", "response", "timeout"] as const) {
+		const root = await mkdtemp(join(tmpdir(), `pi-dsbx-npm-${failure}-`));
+		const run = async () => {
+			if (failure === "timeout") throw new CommandTimeoutError("npm", 10);
+			if (failure === "registry")
+				return { stdout: Buffer.alloc(0), stderr: Buffer.from("registry refused"), code: 1 };
+			await writeFile(join(root, "example.tgz"), packageTarball);
+			return {
+				stdout: Buffer.from(
+					failure === "response"
+						? "not-json"
+						: JSON.stringify([{ filename: "example.tgz" }]),
+				),
+				stderr: Buffer.alloc(0),
+				code: 0,
+			};
+		};
+		const lock =
+			failure === "digest"
+				? {
+						source: "npm:example@1.0.0",
+						kind: "npm" as const,
+						integrity: `sha512-${Buffer.alloc(64, 9).toString("base64")}`,
+					}
+				: { ...lockedNpm("example"), kind: "npm" as const };
+		await assert.rejects(
+			fetchVerifiedNpmPackage(lock, root, run),
+			failure === "digest"
+				? /integrity/i
+				: failure === "timeout"
+					? /timed out/i
+					: /npm package fetch/i,
+		);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("package mirroring accepts only immutable receipt-bearing specs", () => {
 	const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
 	const commit = "a".repeat(40);
@@ -151,6 +243,89 @@ test("package mirroring accepts only immutable receipt-bearing specs", () => {
 		() => resolvePackageLocks([{ source: "npm:name@1.2.3" }]),
 		/sha512 integrity/i,
 	);
+});
+
+test("dynamic provider and override keys reject unsafe object names and Unicode", () => {
+	const unsafe = [
+		"__proto__",
+		"prototype",
+		"constructor",
+		"white space",
+		"line\nbreak",
+		"provider\0id",
+		"provider💥",
+	];
+	for (const key of unsafe) {
+		assert.throws(
+			() =>
+				sanitizeModels({
+					providers: Object.fromEntries([[key, { models: [{ id: "safe" }] }]]),
+				}),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+		assert.throws(
+			() =>
+				sanitizeModels({
+					providers: {
+						safe: {
+							modelOverrides: Object.fromEntries([[key, { name: "safe" }]]),
+						},
+					},
+				}),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+		assert.throws(
+			() => sanitizeModels(Object.fromEntries([[key, { models: [] }]]), "store"),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+	}
+});
+
+test("model URLs accept only canonical public HTTPS destinations", () => {
+	const accepted = sanitizeModels({
+		providers: {
+			safe: { baseUrl: "HTTPS://API.Example.COM:443/v1/../v2" },
+		},
+	});
+	assert.equal(
+		(accepted.value.providers as any).safe.baseUrl,
+		"https://api.example.com/v2",
+	);
+	for (const baseUrl of [
+		"http://api.example.com/v1",
+		"https://user:password@api.example.com/v1",
+		"https://api.example.com/%0aheader",
+		"https://api.example.com\\@evil.example/v1",
+		"https://127.0.0.1/v1",
+		"https://0x7f.1/v1",
+		"https://localhost/v1",
+		"https://service.internal/v1",
+		" https://api.example.com/v1",
+		"https://api.example.com/v1\n",
+		"ftp://api.example.com/v1",
+	]) {
+		const result = sanitizeModels({ providers: { unsafe: { baseUrl } } });
+		assert.equal((result.value.providers as any).unsafe.baseUrl, undefined, baseUrl);
+	}
+});
+
+test("cost tiers are bounded and never recurse into nested tiers", () => {
+	let nested: Record<string, unknown> = { input: 1 };
+	for (let depth = 0; depth < 20_000; depth++) nested = { tiers: [nested] };
+	const result = sanitizeModels({
+		providers: {
+			safe: {
+				models: [{ id: "safe", cost: { input: 1, tiers: [nested] } }],
+			},
+		},
+	});
+	assert.deepEqual((result.value.providers as any).safe.models[0].cost, {
+		input: 1,
+		tiers: [{}],
+	});
 });
 
 test("npm and git package specs cross the platform boundary", () => {

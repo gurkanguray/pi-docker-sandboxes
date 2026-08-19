@@ -21,10 +21,12 @@ import {
 	resolve,
 	sep,
 } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { SyncOptions, SyncProfile } from "./config.ts";
 import { scanSecretCategories } from "./errors.ts";
 import { isCopyEligibleOAuthEntry } from "./host-auth.ts";
+import { superviseCommand } from "./sbx/supervisor.ts";
 
 const SAFE_SETTINGS = new Set([
 	"theme",
@@ -222,6 +224,81 @@ export interface ImmutablePackageLock {
 	commit?: string;
 }
 
+export type NpmPackCommand = (
+	command: string,
+	args: readonly string[],
+	options: {
+		policy: { timeoutMs: number; killGraceMs: number };
+		maxBuffer?: number;
+	},
+) => Promise<{ stdout: Buffer; stderr: Buffer; code: number }>;
+
+export async function fetchVerifiedNpmPackage(
+	lock: ImmutablePackageLock,
+	destination: string,
+	run: NpmPackCommand = superviseCommand,
+): Promise<string> {
+	const parsed = NPM_PACKAGE.exec(lock.source);
+	if (lock.kind !== "npm" || !parsed || !lock.integrity)
+		throw new TypeError("exact npm lock with sha512 integrity required");
+	const result = await run(
+		"npm",
+		[
+			"pack",
+			`${parsed[1]}@${parsed[2]}`,
+			"--pack-destination",
+			destination,
+			"--json",
+			"--ignore-scripts",
+		],
+		{
+			policy: { timeoutMs: 120_000, killGraceMs: 5_000 },
+			maxBuffer: 1024 * 1024,
+		},
+	);
+	if (result.code !== 0) throw new Error("npm package fetch failed");
+	let filename: unknown;
+	try {
+		filename = (JSON.parse(result.stdout.toString("utf8")) as unknown[])[0];
+		filename = plainObject(filename) ? filename.filename : undefined;
+	} catch {
+		throw new Error("npm package fetch returned an invalid response");
+	}
+	if (
+		typeof filename !== "string" ||
+		basename(filename) !== filename ||
+		!filename.endsWith(".tgz")
+	)
+		throw new Error("npm package fetch returned an invalid response");
+	const path = join(destination, filename);
+	const [root, resolved, before] = await Promise.all([
+		realpath(destination),
+		realpath(path),
+		lstat(path),
+	]);
+	if (
+		resolved !== join(root, filename) ||
+		!before.isFile() ||
+		before.isSymbolicLink() ||
+		before.nlink !== 1 ||
+		before.size > 64 * 1024 * 1024
+	)
+		throw new Error("npm package fetch returned an unsafe artifact");
+	const bytes = await readFile(path);
+	const after = await lstat(path);
+	if (
+		after.dev !== before.dev ||
+		after.ino !== before.ino ||
+		after.size !== before.size
+	)
+		throw new Error("npm package artifact changed during verification");
+	const declared = Buffer.from(lock.integrity.slice("sha512-".length), "base64");
+	const actual = createHash("sha512").update(bytes).digest();
+	if (declared.length !== actual.length || !timingSafeEqual(declared, actual))
+		throw new Error("npm package integrity verification failed");
+	return path;
+}
+
 export function resolvePackageLocks(
 	value: unknown,
 ): Sanitized<ImmutablePackageLock[]> {
@@ -258,6 +335,11 @@ export function resolvePackageLocks(
 			if (typeof integrity !== "string" || !NPM_INTEGRITY.test(integrity))
 				throw new TypeError(
 					`settings.packages[${index}]: exact npm package requires sha512 integrity`,
+				);
+			const existing = locks.get(source);
+			if (existing?.integrity && existing.integrity !== integrity)
+				throw new TypeError(
+					`settings.packages[${index}]: conflicting integrity receipts`,
 				);
 			locks.set(source, { source, kind: "npm", integrity });
 			continue;
@@ -481,6 +563,20 @@ export type SanitizedModelMetadata = Record<string, unknown>;
 
 const MODEL_STRING_KEYS = new Set(["id", "name", "api"]);
 const MODEL_NUMBER_KEYS = new Set(["contextWindow", "maxTokens"]);
+const MODEL_ENTRY_KEYS = new Set([
+	...MODEL_STRING_KEYS,
+	...MODEL_NUMBER_KEYS,
+	"reasoning",
+	"baseUrl",
+	"input",
+	"thinkingLevelMap",
+	"cost",
+]);
+const PROVIDER_KEYS = new Set([
+	...MODEL_ENTRY_KEYS,
+	"models",
+	"modelOverrides",
+]);
 const THINKING_LEVEL_KEYS = new Set([
 	"off",
 	"minimal",
@@ -498,17 +594,53 @@ const COST_KEYS = new Set([
 	"inputTokensAbove",
 ]);
 
+const DANGEROUS_METADATA_KEYS = new Set([
+	"__proto__",
+	"prototype",
+	"constructor",
+]);
+const DYNAMIC_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
+
+function validateDynamicMetadataKey(key: string): string {
+	if (
+		DANGEROUS_METADATA_KEYS.has(key) ||
+		!DYNAMIC_METADATA_KEY.test(key)
+	)
+		throw new TypeError("unsafe dynamic model metadata key");
+	return key;
+}
+
 function safeMetadataUrl(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		/[^\x21-\x7e]/.test(value) ||
+		value.includes("\\") ||
+		/%(?:0[0-9a-f]|1[0-9a-f]|20|7f)/i.test(value)
+	)
+		return undefined;
 	try {
 		const url = new URL(value);
-		return (url.protocol === "https:" || url.protocol === "http:") &&
-			!url.username &&
-			!url.password &&
-			!url.search &&
-			!url.hash
-			? value
-			: undefined;
+		const hostname = url.hostname.replace(/^\[|\]$/g, "");
+		const labels = hostname.split(".");
+		if (
+			url.protocol !== "https:" ||
+			url.username ||
+			url.password ||
+			url.search ||
+			url.hash ||
+			url.port ||
+			isIP(hostname) !== 0 ||
+			labels.length < 2 ||
+			labels.some(
+				(label) =>
+					label.startsWith("xn--") ||
+					!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label),
+			) ||
+			/\.(?:internal|local|localhost)$/i.test(hostname)
+		)
+			return undefined;
+		return url.href;
 	} catch {
 		return undefined;
 	}
@@ -520,16 +652,22 @@ function finiteNumber(value: unknown): number | undefined {
 		: undefined;
 }
 
-function sanitizeCost(value: unknown): Record<string, unknown> | undefined {
+function sanitizeCostTier(value: unknown): Record<string, unknown> | undefined {
 	if (!plainObject(value)) return undefined;
 	const output: Record<string, unknown> = {};
 	for (const key of COST_KEYS) {
 		const number = finiteNumber(value[key]);
 		if (number !== undefined) output[key] = number;
 	}
+	return output;
+}
+
+function sanitizeCost(value: unknown): Record<string, unknown> | undefined {
+	const output = sanitizeCostTier(value);
+	if (!output || !plainObject(value)) return output;
 	if (Array.isArray(value.tiers))
 		output.tiers = value.tiers.flatMap((tier) => {
-			const sanitized = sanitizeCost(tier);
+			const sanitized = sanitizeCostTier(tier);
 			return sanitized ? [sanitized] : [];
 		});
 	return output;
@@ -569,6 +707,38 @@ function sanitizeModelEntry(
 	return output;
 }
 
+function modelEntryHasUnsupportedMetadata(value: unknown): boolean {
+	if (!plainObject(value)) return true;
+	if (Object.keys(value).some((key) => !MODEL_ENTRY_KEYS.has(key))) return true;
+	if (!plainObject(value.cost)) return value.cost !== undefined;
+	if (Object.keys(value.cost).some((key) => key !== "tiers" && !COST_KEYS.has(key)))
+		return true;
+	return (
+		Array.isArray(value.cost.tiers) &&
+		value.cost.tiers.some(
+			(tier) =>
+				!plainObject(tier) ||
+				Object.keys(tier).some((key) => !COST_KEYS.has(key)),
+		)
+	);
+}
+
+function providerHasUnsupportedMetadata(value: unknown): boolean {
+	if (!plainObject(value)) return true;
+	if (Object.keys(value).some((key) => !PROVIDER_KEYS.has(key))) return true;
+	if (
+		Array.isArray(value.models) &&
+		value.models.some((model) => modelEntryHasUnsupportedMetadata(model))
+	)
+		return true;
+	return (
+		plainObject(value.modelOverrides) &&
+		Object.values(value.modelOverrides).some((override) =>
+			modelEntryHasUnsupportedMetadata(override),
+		)
+	);
+}
+
 function sanitizeProvider(value: unknown): Record<string, unknown> | undefined {
 	if (!plainObject(value)) return undefined;
 	const output = sanitizeModelEntry(value)!;
@@ -580,6 +750,7 @@ function sanitizeProvider(value: unknown): Record<string, unknown> | undefined {
 	if (plainObject(value.modelOverrides)) {
 		const overrides: Record<string, unknown> = {};
 		for (const [id, override] of Object.entries(value.modelOverrides)) {
+			validateDynamicMetadataKey(id);
 			const sanitized = sanitizeModelEntry(override);
 			if (sanitized) overrides[id] = sanitized;
 		}
@@ -600,14 +771,17 @@ export function sanitizeModels(
 		if (plainObject(value.providers)) {
 			const providers: Record<string, unknown> = {};
 			for (const [id, provider] of Object.entries(value.providers)) {
+				validateDynamicMetadataKey(id);
+				if (providerHasUnsupportedMetadata(provider)) dropped = true;
 				const sanitized = sanitizeProvider(provider);
 				if (sanitized) providers[id] = sanitized;
 			}
 			output.providers = providers;
 		}
-		dropped = Object.keys(value).some((key) => key !== "providers");
+		dropped ||= Object.keys(value).some((key) => key !== "providers");
 	} else {
 		for (const [id, provider] of Object.entries(value)) {
+			validateDynamicMetadataKey(id);
 			if (!plainObject(provider)) {
 				dropped = true;
 				continue;
@@ -615,11 +789,18 @@ export function sanitizeModels(
 			const sanitized: Record<string, unknown> = {};
 			const checkedAt = finiteNumber(provider.checkedAt);
 			if (checkedAt !== undefined) sanitized.checkedAt = checkedAt;
-			if (Array.isArray(provider.models))
+			if (Array.isArray(provider.models)) {
+				if (
+					provider.models.some((model) =>
+						modelEntryHasUnsupportedMetadata(model),
+					)
+				)
+					dropped = true;
 				sanitized.models = provider.models.flatMap((model) => {
 					const entry = sanitizeModelEntry(model);
 					return entry && typeof entry.id === "string" ? [entry] : [];
 				});
+			}
 			output[id] = sanitized;
 			if (
 				Object.keys(provider).some(
@@ -629,9 +810,6 @@ export function sanitizeModels(
 				dropped = true;
 		}
 	}
-	const serializedInput = JSON.stringify(value);
-	const serializedOutput = JSON.stringify(output);
-	if (serializedInput !== serializedOutput) dropped = true;
 	return {
 		value: output,
 		warnings: dropped

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rename, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -28,8 +28,10 @@ import { withSandboxLease } from "./lease.ts";
 import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import {
 	createPersonalizationSnapshot,
+	fetchVerifiedNpmPackage,
 	listNativePackageSpecs,
 	syncOptions,
+	type ImmutablePackageLock,
 	type ResourceManifestEntry,
 } from "./personalization.ts";
 import {
@@ -155,6 +157,11 @@ export interface LaunchOptions {
 	printApiKey?: (id: string) => Promise<string | undefined>;
 	/** @internal Test-only host OAuth-provider listing. */
 	listHostOAuthProviders?: (ids: readonly string[]) => Promise<Set<string>>;
+	/** @internal Test-only exact npm artifact fetch. */
+	fetchNpmPackage?: (
+		lock: ImmutablePackageLock,
+		destination: string,
+	) => Promise<string>;
 	/** @internal Test-only host provider listing. */
 	listHostProviders?: () => Promise<string[]>;
 	/** @internal Deterministic process-crash hook. */
@@ -619,6 +626,13 @@ async function launchWithLease(context: {
 				hostProviderIds,
 			)
 		: new Set<string>();
+	if (oauthCopyRequested) {
+		const missing = hostProviderIds.filter((id) => !oauthHostIds.has(id));
+		if (missing.length > 0)
+			throw new Error(
+				`No copyable OAuth credential found for ${missing.join(", ")}; sign in on the host or choose proxy mode`,
+			);
+	}
 	const mapped = classifyHostProviders(
 		hostProviderIds,
 		capabilities.credentialServices,
@@ -833,6 +847,29 @@ async function launchWithLease(context: {
 					consentedNativePackages.has(packageSpec),
 				)
 			: [];
+		const nativePackagesToInstallSet = new Set(nativePackagesToInstall);
+		const verifiedNpmPackages = new Map<string, string>();
+		if (!existing) {
+			let npmIndex = 0;
+			for (const lock of snapshot.packageLocks) {
+				if (
+					lock.kind !== "npm" ||
+					(snapshot.nativePackages.includes(lock.source) &&
+						!nativePackagesToInstallSet.has(lock.source))
+				)
+					continue;
+				const destination = join(temp, `npm-package-${npmIndex++}`);
+				await mkdir(destination, { mode: 0o700 });
+				options.onStatus?.(`verifying ${lock.source}`);
+				verifiedNpmPackages.set(
+					lock.source,
+					await (options.fetchNpmPackage ?? fetchVerifiedNpmPackage)(
+						lock,
+						destination,
+					),
+				);
+			}
+		}
 		if (
 			snapshot.manifest.length > 0 &&
 			config.syncProfile !== "mirror" &&
@@ -987,7 +1024,6 @@ async function launchWithLease(context: {
 					options.onWarning?.(warning);
 				}
 			}
-			const nativePackagesToInstallSet = new Set(nativePackagesToInstall);
 			for (const packageSpec of snapshot.packageSpecs) {
 				const native = snapshot.nativePackages.includes(packageSpec);
 				if (
@@ -998,17 +1034,54 @@ async function launchWithLease(context: {
 				primaryOperation = `install package ${packageSpec}`;
 				options.onStatus?.(`installing ${packageSpec}`);
 				let installed = false;
-				try {
-					installed =
-						(
-							await client.exec(name, ["pi", "install", packageSpec], {
-								user: "agent",
-							})
-						).code === 0;
-				} catch (cause) {
-					if (interrupted(cause) || !(cause instanceof SbxCommandError))
-						throw cause;
-					installed = false;
+				const verifiedNpm = verifiedNpmPackages.get(packageSpec);
+				if (verifiedNpm) {
+					const staged = `/tmp/pi-dsbx-package-${randomUUID()}.tgz`;
+					let packageError: unknown;
+					try {
+						await client.copyTo(name, verifiedNpm, staged);
+						const owned = await client.exec(
+							name,
+							["chown", "agent:agent", staged],
+							{ user: "root" },
+						);
+						if (owned.code !== 0)
+							throw new Error("Could not secure staged npm package ownership");
+						installed =
+							(
+								await client.exec(name, ["pi", "install", staged], {
+									user: "agent",
+								})
+							).code === 0;
+					} catch (cause) {
+						if (interrupted(cause) || !(cause instanceof SbxCommandError))
+							packageError = cause;
+						else installed = false;
+					}
+					try {
+						const removed = await client.exec(name, ["rm", "-f", "--", staged], {
+							user: "root",
+						});
+						if (removed.code !== 0)
+							throw new Error("Could not remove staged npm package");
+					} catch (cause) {
+						if (interrupted(cause)) throw cause;
+						throw new Error("Could not remove staged npm package", { cause });
+					}
+					if (packageError) throw packageError;
+				} else {
+					try {
+						installed =
+							(
+								await client.exec(name, ["pi", "install", packageSpec], {
+									user: "agent",
+								})
+							).code === 0;
+					} catch (cause) {
+						if (interrupted(cause) || !(cause instanceof SbxCommandError))
+							throw cause;
+						installed = false;
+					}
 				}
 				if (!installed) {
 					const warning = native
