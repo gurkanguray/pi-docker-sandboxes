@@ -7,10 +7,28 @@ on:
         required: true
         type: choice
         options: [standard, docker]
+  pull_request:
+    paths:
+      - .github/workflows/runtime-image.yml
+      - docker/runtime.Dockerfile
+      - docker/runtime-lock.json
+      - docker/runtime-package.json
+      - docker/runtime-package-lock.json
+      - scripts/finalize-runtime-receipt.mjs
+      - scripts/runtime-build-args.mjs
+      - scripts/runtime-lock.mjs
+      - scripts/runtime-platform-evidence.mjs
+      - scripts/verify-runtime-environment.mjs
+      - scripts/verify-runtime-image.mjs
+      - test/runtime-image.test.ts
+      - test/runtime-publication.test.ts
+      - test/runtime-workflow.test.ts
 permissions:
   contents: read
 concurrency:
-  group: runtime-image-${{ github.sha }}-${{ inputs.variant }}
+  group: >-
+    runtime-image-${{ github.event_name }}-${{
+    github.event.pull_request.number || github.sha }}
   cancel-in-progress: false
 jobs:
   source:
@@ -19,6 +37,7 @@ jobs:
       contents: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      variant: ${{ steps.source.outputs.variant }}
       run_identity: ${{ steps.source.outputs.run_identity }}
       artifact: ${{ steps.source.outputs.artifact }}
       buildx_version: ${{ steps.lock.outputs.buildx_version }}
@@ -37,18 +56,39 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - id: source
         name: Bind source commit
         env:
-          VARIANT: ${{ inputs.variant }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SOURCE_SHA: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.sha || github.sha }}
+          VARIANT: ${{ github.event.inputs.variant || 'standard' }}
         run: |
           set -euo pipefail
           git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          case "$EVENT_NAME" in
+            pull_request)
+              test "$SOURCE_SHA" = "$PR_HEAD_SHA"
+              test "$VARIANT" = "standard"
+              test "$(git merge-base "$SOURCE_SHA" refs/remotes/origin/main)" = "$(git rev-parse refs/remotes/origin/main)"
+              ;;
+            workflow_dispatch)
+              test "$SOURCE_SHA" = "$GITHUB_SHA"
+              test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+              case "$VARIANT" in standard|docker) ;; *) exit 1 ;; esac
+              ;;
+            *) exit 1 ;;
+          esac
           {
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$SOURCE_SHA"
+            echo "variant=$VARIANT"
             echo "run_identity=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             echo "artifact=$VARIANT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >> "$GITHUB_OUTPUT"
@@ -81,11 +121,12 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: docker
+          file: docker/runtime.Dockerfile
           platforms: linux/amd64,linux/arm64
-          target: ${{ inputs.variant }}
+          target: ${{ needs.source.outputs.variant }}
           push: false
           no-cache: true
-          provenance: false
+          provenance: mode=max
           build-args: |
             SOURCE_SHA=${{ needs.source.outputs.sha }}
             STANDARD_BASE=${{ needs.source.outputs.standard_base }}
@@ -101,7 +142,7 @@ jobs:
       - name: Verify both exact platform manifests under QEMU
         env:
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          VARIANT: ${{ inputs.variant }}
+          VARIANT: ${{ needs.source.outputs.variant }}
         run: |
           cd "$RUNNER_TEMP"
           node "$GITHUB_WORKSPACE/scripts/verify-runtime-image.mjs" \
@@ -141,65 +182,88 @@ jobs:
           path: runtime
       - name: Extract exact OCI archive
         run: mkdir runtime/oci && tar -xf runtime/runtime.oci.tar -C runtime/oci
+      - name: Select exact verified platform manifest
+        env:
+          ARCH: ${{ matrix.arch }}
+          SKOPEO_IMAGE: ${{ needs.source.outputs.skopeo_image }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ needs.source.outputs.variant }}
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/platform
+          node scripts/runtime-platform-evidence.mjs select \
+            runtime/runtime-image-receipt.json runtime/oci "$ARCH" \
+            runtime/platform/selector "$SOURCE_SHA" "$VARIANT"
+          archive="runtime-$VARIANT-$ARCH.docker.tar"
+          docker run --rm --volume "$PWD/runtime:/work" \
+            "$SKOPEO_IMAGE" copy "oci:/work/platform/selector" \
+            "docker-archive:/work/platform/$archive"
+      - name: Inspect and verify exported platform archive
+        env:
+          ARCH: ${{ matrix.arch }}
+          SKOPEO_IMAGE: ${{ needs.source.outputs.skopeo_image }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ needs.source.outputs.variant }}
+        run: |
+          set -euo pipefail
+          archive="runtime-$VARIANT-$ARCH.docker.tar"
+          image="docker-archive:/work/platform/$archive"
+          mkdir runtime/platform/exported
+          tar -xf "runtime/platform/$archive" -C runtime/platform/exported
+          docker run --rm --volume "$PWD/runtime:/work:ro" \
+            "$SKOPEO_IMAGE" inspect --raw "$image" \
+            > runtime/platform/raw.json
+          docker run --rm --volume "$PWD/runtime:/work:ro" \
+            "$SKOPEO_IMAGE" inspect --config "$image" \
+            > runtime/platform/config.json
+          docker run --rm --volume "$PWD/runtime:/work:ro" \
+            "$SKOPEO_IMAGE" inspect "$image" \
+            > runtime/platform/inspect.json
+          node scripts/runtime-platform-evidence.mjs verify-export \
+            runtime/runtime-image-receipt.json "$ARCH" \
+            runtime/platform/raw.json runtime/platform/config.json \
+            runtime/platform/inspect.json runtime/platform/exported \
+            "$archive" "$SOURCE_SHA" "$VARIANT" \
+            runtime/platform/platform-inspection.json
       - id: scan
         name: Scan exact platform manifest
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          input: runtime/oci
+          input: >-
+            runtime/platform/runtime-${{ needs.source.outputs.variant }}-${{
+            matrix.arch }}.docker.tar
           format: sarif
-          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
+          output: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
           ignore-unfixed: false
-          trivyignores: .trivyignore.yaml
           exit-code: "1"
-          additional-args: --platform linux/${{ matrix.arch }}
       - name: Generate exact platform CycloneDX SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          input: runtime/oci
+          input: >-
+            runtime/platform/runtime-${{ needs.source.outputs.variant }}-${{
+            matrix.arch }}.docker.tar
           format: cyclonedx
-          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
-          additional-args: --platform linux/${{ matrix.arch }}
+          output: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.cdx.json
       - name: Bind platform evidence identities
         if: always() && steps.scan.outcome != 'cancelled'
         env:
           ARCH: ${{ matrix.arch }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-          VARIANT: ${{ inputs.variant }}
+          VARIANT: ${{ needs.source.outputs.variant }}
         run: |
-          node --input-type=module <<'NODE'
-          import { createHash } from "node:crypto";
-          import { readFile, writeFile } from "node:fs/promises";
-          const receipt = JSON.parse(
-            await readFile("runtime/runtime-image-receipt.json"),
-          );
-          const platform = `linux/${process.env.ARCH}`;
-          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
-              receipt.variant !== process.env.VARIANT ||
-              !receipt.platformDigests[platform]) process.exit(1);
-          const evidence = {
-            variant: receipt.variant,
-            sourceSha: receipt.sourceSha,
-            indexDigest: receipt.indexDigest,
-            platform,
-            platformDigest: receipt.platformDigests[platform],
-          };
-          const files = [["scan", "sarif"], ["sbom", "cdx.json"]];
-          for (const [kind, suffix] of files) {
-            const name =
-              `runtime-${receipt.variant}-${process.env.ARCH}.${suffix}`;
-            const bytes = await readFile(name);
-            const value = createHash("sha256").update(bytes).digest("hex");
-            evidence[kind] = { name, sha256: `sha256:${value}` };
-          }
-          const output =
-            `runtime-${receipt.variant}-${process.env.ARCH}.evidence.json`;
-          await writeFile(output, `${JSON.stringify(evidence, null, 2)}\n`);
-          NODE
+          node scripts/runtime-platform-evidence.mjs bind \
+            runtime/runtime-image-receipt.json \
+            runtime/platform/platform-inspection.json \
+            "runtime-$VARIANT-$ARCH.sarif" \
+            "runtime-$VARIANT-$ARCH.cdx.json" "$ARCH" "$SOURCE_SHA" \
+            "$VARIANT" "runtime-$VARIANT-$ARCH.evidence.json"
       - name: Enforce scan result after evidence generation
         if: steps.scan.outcome == 'failure'
         run: exit 1
@@ -208,22 +272,24 @@ jobs:
         uses: >-
           github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
         with:
-          sarif_file: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
-          category: runtime-${{ inputs.variant }}-${{ matrix.arch }}
+          sarif_file: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
+          category: >-
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: >-
             security-${{ matrix.arch }}-${{ needs.source.outputs.artifact }}
           path: |
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
-            runtime-${{ inputs.variant }}-${{ matrix.arch }}.evidence.json
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.sarif
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.cdx.json
+            runtime-${{ needs.source.outputs.variant }}-${{ matrix.arch }}.evidence.json
           if-no-files-found: error
           retention-days: 90
 
   receipt:
-    if: inputs.variant == 'standard'
+    if: needs.source.outputs.variant == 'standard'
     needs: [source, build, security]
     runs-on: ubuntu-latest
     permissions:
@@ -253,9 +319,20 @@ jobs:
           path: runtime
           if-no-files-found: error
           retention-days: 90
+      - name: Upload approval receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: receipt-standard-${{ needs.source.outputs.run_identity }}
+          path: |
+            runtime/runtime-image-receipt.json
+            runtime/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish:
-    if: inputs.variant == 'standard'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      needs.source.outputs.variant == 'standard'
     needs: [source, receipt]
     runs-on: ubuntu-latest
     environment:
@@ -304,12 +381,13 @@ jobs:
           export SUBJECT
           candidate="$SUBJECT:candidate-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker run --rm --volume "$PWD/runtime:/work:ro" \
-            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
-            copy --all "oci-archive:/work/runtime.oci.tar" \
-            "docker://$candidate"
+            --volume "$HOME/.docker/config.json:/tmp/auth.json:ro" \
+            "$SKOPEO_IMAGE" copy --authfile /tmp/auth.json --all \
+            "oci-archive:/work/runtime.oci.tar" "docker://$candidate"
           docker run --rm \
-            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
-            inspect --raw "docker://$candidate" \
+            --volume "$HOME/.docker/config.json:/tmp/auth.json:ro" \
+            "$SKOPEO_IMAGE" inspect --authfile /tmp/auth.json --raw \
+            "docker://$candidate" \
             > runtime/published-index.json
           digest="$(sha256sum runtime/published-index.json | cut -d' ' -f1)"
           DIGEST="sha256:$digest"

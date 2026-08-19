@@ -159,7 +159,7 @@ test("loads a strict lock fixture", async () => {
 	assert.deepEqual(await loadImageLock(path), validLock);
 });
 
-test("checked-in lock is production v2 and explicitly unpublished", async () => {
+test("checked-in lock selects the verified production standard runtime", async () => {
 	const lock = await loadImageLock();
 	assert.equal(packageJson.version, "1.0.0");
 	assert.equal(packageLock.packages[""]?.version, "1.0.0");
@@ -167,7 +167,9 @@ test("checked-in lock is production v2 and explicitly unpublished", async () => 
 	assert.equal(lock.runtimeSchema, 1);
 	assert.equal(lock.piVersion, "0.84.1");
 	assert.deepEqual(lock.images.standard, {
-		status: "unpublished",
+		status: "published",
+		reference:
+			"ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b",
 		platforms: ["linux/amd64", "linux/arm64"],
 		privileged: false,
 	});

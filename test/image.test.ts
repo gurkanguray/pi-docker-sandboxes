@@ -11,7 +11,7 @@ import {
 test("local production runtime builds fail closed before invoking tools", async () => {
 	await assert.rejects(
 		buildLocalImage(),
-		/production runtime image standard is unpublished/,
+		/local production runtime image builds are not supported/,
 	);
 });
 

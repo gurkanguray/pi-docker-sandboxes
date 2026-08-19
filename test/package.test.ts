@@ -242,7 +242,7 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 		const { stdout: dockerfile } = await exec("tar", [
 			"-xOf",
 			join(directory, stdout.trim()),
-			"package/docker/Dockerfile",
+			"package/docker/runtime.Dockerfile",
 		]);
 		assert.doesNotMatch(dockerfile, /pi-docker-sandboxes\.tgz/);
 		assert.doesNotMatch(dockerfile, /node_modules\/pi-docker-sandboxes/);

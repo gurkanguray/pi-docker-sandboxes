@@ -38,11 +38,11 @@ const publishedLock: RuntimeImageLock = {
 	},
 };
 
-test("runtime image resolution fails closed while source variants are unpublished", async () => {
-	await assert.rejects(
-		resolveKitImage(mergeConfig()),
-		/production runtime image standard is unpublished/,
-	);
+test("checked-in runtime image selects standard and rejects Docker", async () => {
+	assert.deepEqual(await resolveKitImage(mergeConfig()), {
+		image:
+			"ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b",
+	});
 	await assert.rejects(
 		resolveKitImage(mergeConfig({ sandbox: { dockerEngine: true } })),
 		/private Docker engine is unavailable in production 1\.0/,

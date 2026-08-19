@@ -11,6 +11,56 @@ import { loadRuntimeLock } from "./runtime-lock.mjs";
 const imageIndexMediaType = "application/vnd.oci.image.index.v1+json";
 const imageManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
 const inTotoMediaType = "application/vnd.in-toto+json";
+const buildKitBuildType =
+	"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md";
+const standardStrippedBinaries = [
+	"/usr/bin/docker",
+	"/usr/libexec/docker/cli-plugins/docker-compose",
+	"/usr/bin/pebble",
+	"/usr/local/bin/clipboard-bridge",
+	"/usr/libexec/docker/cli-plugins/docker-buildx",
+];
+const isObject = (value) =>
+	value !== null && typeof value === "object" && !Array.isArray(value);
+
+function isResolvedDependency(dependency) {
+	if (
+		!isObject(dependency) ||
+		typeof dependency.uri !== "string" ||
+		dependency.uri.trim().length === 0 ||
+		!isObject(dependency.digest)
+	)
+		return false;
+	const digests = Object.entries(dependency.digest);
+	return (
+		digests.length > 0 &&
+		digests.every(
+			([algorithm, digest]) =>
+				algorithm.length > 0 &&
+				typeof digest === "string" &&
+				/^(?:[0-9a-f]{2})+$/.test(digest) &&
+				(algorithm !== "sha256" || digest.length === 64),
+		)
+	);
+}
+
+function parseUtcRfc3339(value) {
+	if (typeof value !== "string") return null;
+	const match =
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(
+			value,
+		);
+	if (!match || !Number.isFinite(Date.parse(value))) return null;
+	const wholeSecond = `${value.slice(0, 19)}Z`;
+	const milliseconds = Date.parse(wholeSecond);
+	if (
+		!Number.isFinite(milliseconds) ||
+		new Date(milliseconds).toISOString().slice(0, 19) !== value.slice(0, 19)
+	)
+		return null;
+	const fraction = (match[7] ?? "").padEnd(9, "0");
+	return BigInt(milliseconds) * 1_000_000n + BigInt(fraction || "0");
+}
 
 function parseArgs(argv) {
 	const values = { receipt: "runtime-image-receipt.json" };
@@ -71,6 +121,8 @@ export function validateAttestationManifest(
 	manifest,
 	statements,
 	platformDescriptors,
+	sourceSha,
+	variant,
 ) {
 	const reference = descriptor.annotations?.["vnd.docker.reference.digest"];
 	const subject = manifest.subject;
@@ -96,21 +148,87 @@ export function validateAttestationManifest(
 	for (const statement of statements) {
 		if (
 			statement?._type !== "https://in-toto.io/Statement/v1" ||
-			typeof statement.predicateType !== "string" ||
-			!statement.predicateType
+			statement.predicateType !== "https://slsa.dev/provenance/v1" ||
+			!Array.isArray(statement.subject)
 		)
 			throw new Error("malformed in-toto attestation statement");
-		if (!Array.isArray(statement.subject) || statement.subject.length === 0)
-			throw new Error("attestation requires a nonempty in-toto subject array");
+		if (statement.subject.length > 1)
+			throw new Error("in-toto subject does not match its platform manifest");
 		for (const statementSubject of statement.subject) {
 			const digest = statementSubject.digest?.sha256;
 			if (
 				!/^[0-9a-f]{64}$/.test(digest ?? "") ||
-				!platformDescriptors.has(`sha256:${digest}`)
+				`sha256:${digest}` !== platform.digest
 			)
-				throw new Error("in-toto subject does not match a platform manifest");
+				throw new Error("in-toto subject does not match its platform manifest");
 		}
+
+		const predicate = statement.predicate;
+		const build = predicate?.buildDefinition;
+		const external = build?.externalParameters;
+		const args = external?.request?.args;
+		const runDetails = predicate?.runDetails;
+		const metadata = runDetails?.metadata;
+		const startedOn = parseUtcRfc3339(metadata?.startedOn);
+		const finishedOn = parseUtcRfc3339(metadata?.finishedOn);
+		if (
+			!isObject(predicate) ||
+			!isObject(build) ||
+			build.buildType !== buildKitBuildType ||
+			!Array.isArray(build.resolvedDependencies) ||
+			build.resolvedDependencies.length === 0 ||
+			!build.resolvedDependencies.every(isResolvedDependency) ||
+			!isObject(external) ||
+			!isObject(external.configSource) ||
+			external.configSource.path !== "runtime.Dockerfile" ||
+			!isObject(external.request) ||
+			!isObject(args) ||
+			args.target !== variant ||
+			args["build-arg:SOURCE_SHA"] !== sourceSha ||
+			!isObject(runDetails) ||
+			!isObject(runDetails.builder) ||
+			typeof runDetails.builder.id !== "string" ||
+			!isObject(metadata) ||
+			typeof metadata.invocationId !== "string" ||
+			metadata.invocationId.length === 0 ||
+			startedOn === null ||
+			finishedOn === null ||
+			finishedOn < startedOn
+		)
+			throw new Error("malformed BuildKit SLSA v1 provenance predicate");
 	}
+}
+
+export function validateAttestationCoverage(references, platformDescriptors) {
+	if (
+		references.length !== platformDescriptors.size ||
+		new Set(references).size !== platformDescriptors.size ||
+		references.some((reference) => !platformDescriptors.has(reference))
+	)
+		throw new Error(
+			"exactly one attestation manifest is required per verified platform",
+		);
+}
+
+export function validatePlatformDescriptors(descriptors, expectedPlatforms) {
+	const expected = new Set(expectedPlatforms);
+	const byPlatform = new Map();
+	const digests = new Set();
+	for (const descriptor of descriptors) {
+		const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
+		if (!expected.has(platform)) continue;
+		if (byPlatform.has(platform))
+			throw new Error(`duplicate OCI manifest for ${platform}`);
+		if (digests.has(descriptor.digest))
+			throw new Error(
+				`duplicate OCI platform manifest digest: ${descriptor.digest}`,
+			);
+		byPlatform.set(platform, descriptor);
+		digests.add(descriptor.digest);
+	}
+	if (byPlatform.size !== expected.size)
+		throw new Error("archive does not contain the locked runtime platforms");
+	return [...byPlatform.values()];
 }
 
 async function archiveIdentity(path) {
@@ -145,13 +263,15 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 			indexDigest = descriptor.digest;
 		}
 		const platformDigests = {};
+		const platformConfigDigests = {};
 		const platformDescriptors = new Map();
 		let labels;
-		for (const descriptor of index.manifests ?? []) {
-			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
-			if (!expectedPlatforms.includes(platform)) continue;
-			if (platformDigests[platform])
-				throw new Error(`duplicate OCI manifest for ${platform}`);
+		const requiredDescriptors = validatePlatformDescriptors(
+			index.manifests ?? [],
+			expectedPlatforms,
+		);
+		for (const descriptor of requiredDescriptors) {
+			const platform = `${descriptor.platform.os}/${descriptor.platform.architecture}`;
 			const { value: manifest } = await readDescriptor(
 				layout,
 				descriptor,
@@ -172,6 +292,12 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				"io.pi-docker-sandboxes.runtime-schema": String(lock.runtimeSchema),
 				"io.pi-docker-sandboxes.pi-version": lock.piVersion,
 				"io.pi-docker-sandboxes.variant": variant,
+				...(variant === "standard"
+					? {
+							"io.pi-docker-sandboxes.stripped-optional-binaries":
+								standardStrippedBinaries.join(","),
+						}
+					: {}),
 			};
 			for (const [name, value] of Object.entries(expectedLabels))
 				if (currentLabels[name] !== value)
@@ -180,13 +306,10 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				throw new Error(`${platform} final user is not agent`);
 			labels ??= currentLabels;
 			platformDigests[platform] = descriptor.digest;
+			platformConfigDigests[platform] = manifest.config.digest;
 			platformDescriptors.set(descriptor.digest, descriptor);
 		}
-		if (
-			Object.keys(platformDigests).sort().join() !==
-			[...expectedPlatforms].sort().join()
-		)
-			throw new Error("archive does not contain the locked runtime platforms");
+		const attestationReferences = [];
 		for (const descriptor of index.manifests ?? []) {
 			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
 			if (expectedPlatforms.includes(platform)) continue;
@@ -210,9 +333,15 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				manifest,
 				statements,
 				platformDescriptors,
+				sourceSha,
+				variant,
+			);
+			attestationReferences.push(
+				descriptor.annotations["vnd.docker.reference.digest"],
 			);
 		}
-		return { indexDigest, platformDigests, labels };
+		validateAttestationCoverage(attestationReferences, platformDescriptors);
+		return { indexDigest, platformDigests, platformConfigDigests, labels };
 	} finally {
 		await rm(layout, { recursive: true, force: true });
 	}
@@ -240,6 +369,12 @@ async function smokeArchive(archive, variant, lock) {
 				`oci-archive:/work/${basename(absoluteArchive)}`,
 				`docker-daemon:${tag}`,
 			]);
+			const strippedBinaryChecks =
+				variant === "standard"
+					? standardStrippedBinaries
+							.map((path) => `test ! -e ${path}`)
+							.join(" && ")
+					: "";
 			await run("docker", [
 				"run",
 				"--rm",
@@ -248,7 +383,7 @@ async function smokeArchive(archive, variant, lock) {
 				tag,
 				"sh",
 				"-lc",
-				`test "$(pi --version)" = "${lock.piVersion}" && test "$(fd --version)" = "fd ${lock.tools.fd.version}" && rg --version && git --version && test "$(id -u)" = 1000${variant === "standard" ? " && test ! -e /usr/libexec/docker/cli-plugins/docker-buildx" : ""}`,
+				`test "$(pi --version)" = "${lock.piVersion}" && test "$(fd --version)" = "fd ${lock.tools.fd.version}" && rg --version && git --version && test "$(id -u)" = 1000${strippedBinaryChecks ? ` && ${strippedBinaryChecks}` : ""}`,
 			]);
 		} finally {
 			await run("docker", ["image", "rm", "--force", tag]).catch(() => {});

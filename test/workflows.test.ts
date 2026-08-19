@@ -312,11 +312,14 @@ test("release workflows are valid npm-only gates", async () => {
 	);
 	const runtime = parsed.get("runtime-image.yml")!;
 	assert.ok(runtime, "runtime-image.yml");
-	assert.deepEqual(Object.keys(runtime.on ?? {}), ["workflow_dispatch"]);
+	assert.deepEqual(Object.keys(runtime.on ?? {}), [
+		"workflow_dispatch",
+		"pull_request",
+	]);
 	assert.deepEqual(runtime.permissions, { contents: "read" });
 	assert.match(runtimeText, /platforms: linux\/amd64,linux\/arm64/);
 	assert.match(runtimeText, /no-cache: true/);
-	assert.match(runtimeText, /target: \$\{\{ inputs\.variant \}\}/);
+	assert.match(runtimeText, /target: \$\{\{ needs\.source\.outputs\.variant \}\}/);
 	assert.match(runtimeText, /options: \[standard, docker\]/);
 	assert.doesNotMatch(runtimeText, /matrix\.variant/);
 	assert.match(runtimeText, /verify-runtime-image\.mjs/);
@@ -340,13 +343,13 @@ test("release workflows are valid npm-only gates", async () => {
 	);
 	assert.doesNotMatch(
 		runtimeText,
-		/pull_request:|pi-docker-sandboxes\.tgz|PACKAGE_VERSION|flag:\s*["']wx["']/,
+		/pi-docker-sandboxes\.tgz|PACKAGE_VERSION|flag:\s*["']wx["']/,
 	);
 	const runtimeSecuritySteps = runtime.jobs.security.steps ?? [];
 	for (const step of runtimeSecuritySteps.filter((candidate) =>
 		candidate.uses?.startsWith("aquasecurity/trivy-action@"),
 	))
-		assert.equal(step.with?.input, "runtime/oci");
+		assert.match(String(step.with?.input), /runtime-.*matrix\.arch.*\.docker\.tar/);
 	const runtimeLock = JSON.parse(
 		await readFile(
 			new URL("../docker/runtime-lock.json", import.meta.url),
@@ -398,8 +401,14 @@ test("release workflows are valid npm-only gates", async () => {
 		});
 	}
 	const publishRuntime = runtime.jobs.publish;
-	assert.equal(runtime.jobs.receipt.if, "inputs.variant == 'standard'");
-	assert.equal(publishRuntime.if, "inputs.variant == 'standard'");
+	assert.equal(
+		runtime.jobs.receipt.if,
+		"needs.source.outputs.variant == 'standard'",
+	);
+	assert.equal(
+		publishRuntime.if,
+		"github.event_name == 'workflow_dispatch' && needs.source.outputs.variant == 'standard'",
+	);
 	assert.equal(publishRuntime.environment?.name, "release-runtime");
 	assert.deepEqual(publishRuntime.permissions, {
 		contents: "read",

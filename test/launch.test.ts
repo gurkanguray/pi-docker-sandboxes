@@ -123,11 +123,14 @@ const launchConfig = {
 	export: { onExit: "never" as const },
 };
 
-test("production launch fails closed before sandbox mutation while images are unpublished", async () => {
+test("production launch resolves the published runtime before SBX preflight", async () => {
 	const root = await committedRepository();
 	let created = false;
 	const client = {
 		...launchClient,
+		capabilities: async () => {
+			throw new Error("capability probe reached");
+		},
 		create: async () => {
 			created = true;
 		},
@@ -137,33 +140,12 @@ test("production launch fails closed before sandbox mutation while images are un
 		(error: unknown) => {
 			assert.equal(
 				(error as { detail?: string }).detail,
-				"production runtime image standard is unpublished",
+				"capability probe reached",
 			);
 			return true;
 		},
 	);
 	assert.equal(created, false);
-});
-
-test("unpublished runtime leaves an approved unborn repository unborn", async () => {
-	const root = await unbornRepository();
-	await assert.rejects(
-		productionLaunch({
-			cwd: root,
-			client: launchClient,
-			config: launchConfig,
-			yes: true,
-		}),
-		(error: unknown) => {
-			assert.equal(
-				(error as { detail?: string }).detail,
-				"production runtime image standard is unpublished",
-			);
-			return true;
-		},
-	);
-	await assert.rejects(git(root, "rev-parse", "--verify", "HEAD"));
-	assert.equal(await git(root, "status", "--porcelain=v1"), "");
 });
 
 test("host certification rejection precedes repository inspection", async () => {

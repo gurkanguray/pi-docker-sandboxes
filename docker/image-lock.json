@@ -4,7 +4,8 @@
   "piVersion": "0.84.1",
   "images": {
     "standard": {
-      "status": "unpublished",
+      "status": "published",
+      "reference": "ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b",
       "platforms": ["linux/amd64", "linux/arm64"],
       "privileged": false
     },

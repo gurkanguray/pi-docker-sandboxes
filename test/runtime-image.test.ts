@@ -6,7 +6,7 @@ const root = new URL("../", import.meta.url);
 
 test("runtime source is locked, controller-independent, and multi-platform", async () => {
 	const [dockerfile, pkg, packageLock, runtimeLock] = await Promise.all([
-		readFile(new URL("docker/Dockerfile", root), "utf8"),
+		readFile(new URL("docker/runtime.Dockerfile", root), "utf8"),
 		readFile(new URL("docker/runtime-package.json", root), "utf8").then(
 			JSON.parse,
 		),
@@ -44,13 +44,27 @@ test("runtime source is locked, controller-independent, and multi-platform", asy
 	assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
 	assert.match(dockerfile, /runtime-package-lock\.json/);
 	assert.match(dockerfile, /sha256sum --check/);
-	assert.match(
-		dockerfile,
-		/rm \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	const standardStage = dockerfile.slice(
+		dockerfile.indexOf("FROM ${STANDARD_BASE} AS standard"),
+		dockerfile.indexOf("FROM ${DOCKER_BASE} AS docker"),
 	);
+	const dockerStage = dockerfile.slice(
+		dockerfile.indexOf("FROM ${DOCKER_BASE} AS docker"),
+	);
+	for (const binary of [
+		"/usr/bin/docker",
+		"/usr/libexec/docker/cli-plugins/docker-compose",
+		"/usr/bin/pebble",
+		"/usr/local/bin/clipboard-bridge",
+		"/usr/libexec/docker/cli-plugins/docker-buildx",
+	]) {
+		assert.ok(standardStage.includes(binary), `${binary} must be stripped`);
+		assert.match(standardStage, new RegExp(`test ! -e ${binary}`));
+		assert.ok(!dockerStage.includes(binary), `${binary} removal is standard-only`);
+	}
 	assert.match(
-		dockerfile,
-		/test ! -e \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+		standardStage,
+		/io\.pi-docker-sandboxes\.stripped-optional-binaries/,
 	);
 	assert.match(dockerfile, /USER agent\s*$/m);
 	assert.match(dockerfile, /io\.pi-docker-sandboxes\.runtime-schema/);
@@ -82,9 +96,16 @@ test("runtime archive verifier binds both platform manifests and smoke tests", a
 	assert.match(verifier, /fd --version/);
 	assert.match(verifier, /rg --version/);
 	assert.match(verifier, /git --version/);
-	assert.match(
-		verifier,
-		/test ! -e \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
-	);
+	for (const binary of [
+		"/usr/bin/docker",
+		"/usr/libexec/docker/cli-plugins/docker-compose",
+		"/usr/bin/pebble",
+		"/usr/local/bin/clipboard-bridge",
+		"/usr/libexec/docker/cli-plugins/docker-buildx",
+	]) {
+		assert.ok(verifier.includes(binary), `${binary} must be verified absent`);
+	}
+	assert.match(verifier, /for \(const platform of lock\.platforms\)/);
+	assert.match(verifier, /stripped-optional-binaries/);
 	assert.match(verifier, /runtime-image-receipt\.json/);
 });

@@ -11,8 +11,15 @@ import { loadRuntimeLock, runtimeBuildArgs } from "../scripts/runtime-lock.mjs";
 // @ts-expect-error executable script module has no declaration file
 import { verifyRuntimeEnvironment } from "../scripts/verify-runtime-environment.mjs";
 // @ts-expect-error executable script module has no declaration file
+import { validatePlatformEvidenceDocuments } from "../scripts/runtime-platform-evidence.mjs";
+// @ts-expect-error executable script module has no declaration file
 const verifierModule = await import("../scripts/verify-runtime-image.mjs");
-const { readDescriptor, validateAttestationManifest } = verifierModule;
+const {
+	readDescriptor,
+	validateAttestationCoverage,
+	validateAttestationManifest,
+	validatePlatformDescriptors,
+} = verifierModule;
 
 const sha = (value: string) =>
 	`sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -31,7 +38,7 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 		/^tonistiigi\/binfmt:qemu-v\d+\.\d+\.\d+(?:-\d+)?@sha256:[0-9a-f]{64}$/,
 	);
 	assert.doesNotMatch(lock.build.qemu, /:latest(?:@|$)/);
-	const dockerfile = await readFile("docker/Dockerfile", "utf8");
+	const dockerfile = await readFile("docker/runtime.Dockerfile", "utf8");
 	assert.equal(
 		dockerfile.split("\n")[0],
 		`# syntax=${lock.build.dockerfileFrontend}`,
@@ -57,9 +64,7 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 test("runtime lock rejects omitted and mutable QEMU pins", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "runtime-qemu-lock-"));
 	try {
-		const source = JSON.parse(
-			await readFile("docker/runtime-lock.json", "utf8"),
-		);
+		const source = JSON.parse(await readFile("docker/runtime-lock.json", "utf8"));
 		for (const qemu of [
 			undefined,
 			`tonistiigi/binfmt:latest@sha256:${"a".repeat(64)}`,
@@ -88,10 +93,7 @@ test("release-runtime protection fails closed", () => {
 	assert.equal(verifyRuntimeEnvironment(environment, policies), true);
 	assert.throws(
 		() =>
-			verifyRuntimeEnvironment(
-				{ ...environment, protection_rules: [] },
-				policies,
-			),
+			verifyRuntimeEnvironment({ ...environment, protection_rules: [] }, policies),
 		/reviewer/,
 	);
 	assert.throws(
@@ -147,7 +149,8 @@ test("OCI descriptor digest, size, and media type fail closed", async () => {
 	}
 });
 
-test("attestations bind descriptor, manifest, and statement subjects", () => {
+test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
+	const sourceSha = "c".repeat(40);
 	const platform = {
 		digest: digestA,
 		size: 42,
@@ -169,16 +172,60 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 	const statement = {
 		_type: "https://in-toto.io/Statement/v1",
 		predicateType: "https://slsa.dev/provenance/v1",
-		subject: [{ digest: { sha256: digestA.slice(7) } }],
+		subject: [] as unknown[],
+		predicate: {
+			buildDefinition: {
+				buildType:
+					"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+				resolvedDependencies: [
+					{
+						uri: "pkg:docker/docker/dockerfile@1.7",
+						digest: { sha256: "d".repeat(64) },
+					},
+				],
+				externalParameters: {
+					configSource: { path: "runtime.Dockerfile" },
+					request: {
+						args: {
+							"build-arg:SOURCE_SHA": sourceSha,
+							target: "standard",
+						},
+					},
+				},
+			},
+			runDetails: {
+				builder: { id: "" },
+				metadata: {
+					invocationId: "buildkit-invocation",
+					startedOn: "2026-08-19T05:28:26.371221794Z",
+					finishedOn: "2026-08-19T05:28:42.505743325Z",
+				},
+			},
+		},
 	};
-	assert.doesNotThrow(() =>
+	const validate = (candidate: unknown = statement) =>
 		validateAttestationManifest(
 			descriptor,
 			manifest,
-			[statement],
+			[candidate],
 			new Map([[digestA, platform]]),
-		),
+			sourceSha,
+			"standard",
+		);
+
+	assert.doesNotThrow(() => validate());
+	assert.doesNotThrow(() => validate({ ...statement, subject: [] }));
+	assert.doesNotThrow(() =>
+		validate({
+			...statement,
+			subject: [{ digest: { sha256: digestA.slice(7) } }],
+		}),
 	);
+	const alternateDigest: any = structuredClone(statement);
+	alternateDigest.predicate.buildDefinition.resolvedDependencies[0].digest = {
+		sha512: "e".repeat(128),
+	};
+	assert.doesNotThrow(() => validate(alternateDigest));
 	assert.throws(
 		() =>
 			validateAttestationManifest(
@@ -186,47 +233,183 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 				{ ...manifest, subject: { ...platform, digest: digestB } },
 				[statement],
 				new Map([[digestA, platform]]),
+				sourceSha,
+				"standard",
 			),
 		/subject/,
 	);
-	assert.throws(
-		() =>
-			validateAttestationManifest(
-				descriptor,
-				manifest,
-				[{ ...statement, _type: "bad" }],
-				new Map([[digestA, platform]]),
-			),
-		/malformed/,
+
+	const wrongSource = structuredClone(statement);
+	wrongSource.predicate.buildDefinition.externalParameters.request.args[
+		"build-arg:SOURCE_SHA"
+	] = "e".repeat(40);
+	const wrongVariant = structuredClone(statement);
+	wrongVariant.predicate.buildDefinition.externalParameters.request.args.target =
+		"docker";
+	const missingDependency = structuredClone(statement);
+	missingDependency.predicate.buildDefinition.resolvedDependencies = [];
+	const invalidDependencies = [
+		null,
+		[],
+		{},
+		{ uri: "", digest: { sha256: "d".repeat(64) } },
+		{ uri: " ", digest: { sha256: "d".repeat(64) } },
+		{ uri: "pkg:test", digest: null },
+		{ uri: "pkg:test", digest: [] },
+		{ uri: "pkg:test", digest: {} },
+		{ uri: "pkg:test", digest: { sha256: "D".repeat(64) } },
+		{ uri: "pkg:test", digest: { sha256: "d".repeat(63) } },
+		{ uri: "pkg:test", digest: { sha512: "not-hex" } },
+		{
+			uri: "pkg:test",
+			digest: { sha256: "d".repeat(64), sha512: "not-hex" },
+		},
+	];
+	const invalidTimestamps = [
+		["", "2026-08-19T05:28:42Z"],
+		["2026-08-19 05:28:26Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26+00:00", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26z", "2026-08-19T05:28:42Z"],
+		["2026-02-30T05:28:26Z", "2026-03-02T05:28:42Z"],
+		["2026-08-19T05:28:26.1234567890Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:43Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26.000000009Z", "2026-08-19T05:28:26.000000001Z"],
+	];
+	const cases: Array<[string, unknown]> = [
+		["missing predicate", { ...statement, predicate: undefined }],
+		[
+			"missing build definition",
+			{
+				...statement,
+				predicate: { ...statement.predicate, buildDefinition: undefined },
+			},
+		],
+		[
+			"missing run details",
+			{
+				...statement,
+				predicate: { ...statement.predicate, runDetails: undefined },
+			},
+		],
+		["wrong source", wrongSource],
+		["wrong variant", wrongVariant],
+		["missing dependency", missingDependency],
+		...invalidDependencies.map((dependency, index) => {
+			const candidate: any = structuredClone(statement);
+			candidate.predicate.buildDefinition.resolvedDependencies = [dependency];
+			return [`invalid dependency ${index}`, candidate] as [string, unknown];
+		}),
+		...invalidTimestamps.map(([startedOn, finishedOn], index) => {
+			const candidate = structuredClone(statement);
+			candidate.predicate.runDetails.metadata.startedOn = startedOn;
+			candidate.predicate.runDetails.metadata.finishedOn = finishedOn;
+			return [`invalid timestamps ${index}`, candidate] as [string, unknown];
+		}),
+	];
+	for (const [name, candidate] of cases)
+		assert.throws(() => validate(candidate), /provenance/, name);
+
+	for (const invalidStatement of [
+		{ ...statement, _type: "bad" },
+		{ ...statement, predicateType: "https://slsa.dev/provenance/v0.2" },
+		{ ...statement, subject: undefined },
+		{
+			...statement,
+			subject: [{ digest: { sha256: digestB.slice(7) } }],
+		},
+	])
+		assert.throws(() => validate(invalidStatement), /attestation|subject/);
+});
+
+test("required platform manifests have distinct digests", () => {
+	const descriptors = [
+		{ platform: { os: "linux", architecture: "amd64" }, digest: digestA },
+		{ platform: { os: "linux", architecture: "arm64" }, digest: digestB },
+	];
+	assert.deepEqual(
+		validatePlatformDescriptors(descriptors, ["linux/amd64", "linux/arm64"]),
+		descriptors,
 	);
-	for (const subject of [undefined, []])
-		assert.throws(
-			() =>
-				validateAttestationManifest(
-					descriptor,
-					manifest,
-					[{ ...statement, subject }],
-					new Map([[digestA, platform]]),
-				),
-			/nonempty in-toto subject/,
-		);
 	assert.throws(
 		() =>
-			validateAttestationManifest(
-				descriptor,
-				manifest,
-				[
-					{
-						...statement,
-						subject: [
-							...statement.subject,
-							{ digest: { sha256: digestB.slice(7) } },
-						],
-					},
-				],
-				new Map([[digestA, platform]]),
+			validatePlatformDescriptors(
+				[descriptors[0], { ...descriptors[1], digest: digestA }],
+				["linux/amd64", "linux/arm64"],
 			),
-		/in-toto subject/,
+		/duplicate OCI platform manifest digest/,
+	);
+});
+
+test("exactly one attestation manifest targets each required platform", () => {
+	const platforms = new Map([
+		[digestA, { digest: digestA }],
+		[digestB, { digest: digestB }],
+	]);
+	assert.doesNotThrow(() =>
+		validateAttestationCoverage([digestA, digestB], platforms),
+	);
+	for (const [name, references] of [
+		["no targets", []],
+		["missing target", [digestA]],
+		["duplicate target", [digestA, digestA]],
+		["unexpected target", [digestA, digestB, `sha256:${"f".repeat(64)}`]],
+	] as Array<[string, string[]]>)
+		assert.throws(
+			() => validateAttestationCoverage(references, platforms),
+			/exactly one attestation manifest/,
+			name,
+		);
+});
+
+test("platform evidence rejects amd64 reused for arm64", () => {
+	const archiveName = "runtime-standard-arm64.docker.tar";
+	const sarif = {
+		version: "2.1.0",
+		runs: [
+			{
+				properties: { imageID: digestA, imageName: `/workspace/${archiveName}` },
+			},
+		],
+	};
+	const sbom = {
+		metadata: {
+			component: {
+				type: "container",
+				name: `/workspace/${archiveName}`,
+				properties: [
+					{ name: "aquasecurity:trivy:ImageID", value: digestA },
+				],
+			},
+		},
+	};
+	assert.throws(
+		() =>
+			validatePlatformEvidenceDocuments({
+				sarif,
+				sbom,
+				archiveName,
+				platform: "linux/arm64",
+				manifestDigest: digestB,
+				configDigest: digestB,
+			}),
+		/Trivy SARIF config identity mismatch/,
+	);
+	const bound = validatePlatformEvidenceDocuments({
+		sarif: structuredClone(sarif),
+		sbom: structuredClone(sbom),
+		archiveName,
+		platform: "linux/arm64",
+		manifestDigest: digestB,
+		configDigest: digestA,
+	});
+	assert.equal(bound.sarif.runs[0].properties.platform, "linux/arm64");
+	assert.deepEqual(
+		bound.sbom.metadata.component.properties.slice(-3),
+		[
+			{ name: "io.pi-docker-sandboxes.platform", value: "linux/arm64" },
+			{ name: "io.pi-docker-sandboxes.manifest-digest", value: digestB },
+			{ name: "io.pi-docker-sandboxes.config-digest", value: digestA },
+		],
 	);
 });
 
@@ -247,19 +430,20 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			},
 			indexDigest: digestA,
 			platformDigests: { "linux/amd64": digestA, "linux/arm64": digestB },
+			platformConfigDigests: {
+				"linux/amd64": digestA,
+				"linux/arm64": digestB,
+			},
 		};
 		await writeFile(receiptPath, JSON.stringify(receipt));
-		for (const [arch, platformDigest] of [
+		for (const [arch, manifestDigest] of [
 			["amd64", digestA],
 			["arm64", digestB],
 		]) {
 			const scan = `scan-${arch}`;
 			const sbom = `sbom-${arch}`;
 			await writeFile(join(directory, `runtime-standard-${arch}.sarif`), scan);
-			await writeFile(
-				join(directory, `runtime-standard-${arch}.cdx.json`),
-				sbom,
-			);
+			await writeFile(join(directory, `runtime-standard-${arch}.cdx.json`), sbom);
 			await writeFile(
 				join(directory, `runtime-standard-${arch}.evidence.json`),
 				JSON.stringify({
@@ -267,7 +451,11 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 					sourceSha: receipt.sourceSha,
 					indexDigest: digestA,
 					platform: `linux/${arch}`,
-					platformDigest,
+					manifestDigest,
+					configDigest:
+						receipt.platformConfigDigests[
+							arch === "amd64" ? "linux/amd64" : "linux/arm64"
+						],
 					scan: { name: `runtime-standard-${arch}.sarif`, sha256: sha(scan) },
 					sbom: {
 						name: `runtime-standard-${arch}.cdx.json`,
@@ -283,6 +471,26 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			sourceSha: receipt.sourceSha,
 			variant: "standard",
 		});
+		const armEvidencePath = join(
+			directory,
+			"runtime-standard-arm64.evidence.json",
+		);
+		const armEvidence = JSON.parse(await readFile(armEvidencePath, "utf8"));
+		await writeFile(
+			armEvidencePath,
+			JSON.stringify({ ...armEvidence, configDigest: digestA }),
+		);
+		await assert.rejects(
+			finalizeRuntimeReceipt({
+				receiptPath,
+				archivePath,
+				evidenceDirectory: directory,
+				sourceSha: receipt.sourceSha,
+				variant: "standard",
+			}),
+			/platform evidence identity mismatch/,
+		);
+		await writeFile(armEvidencePath, JSON.stringify(armEvidence));
 		await writeFile(archivePath, "tampered-archive");
 		await assert.rejects(
 			finalizeRuntimeReceipt({
@@ -295,10 +503,7 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			/receipt identity/,
 		);
 		await writeFile(archivePath, archiveBytes);
-		await writeFile(
-			join(directory, "runtime-standard-amd64.sarif"),
-			"tampered",
-		);
+		await writeFile(join(directory, "runtime-standard-amd64.sarif"), "tampered");
 		await writeFile(
 			join(directory, "runtime-standard-amd64.cdx.json"),
 			"sbom-amd64",
