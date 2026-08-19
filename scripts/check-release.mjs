@@ -145,7 +145,8 @@ try {
 	if (!satisfiesVersionRange(imageLock.piVersion, piRange))
 		fail(`Image lock Pi ${imageLock.piVersion} must satisfy ${piRange}`);
 	if (
-		!compatibility.includes("| Host Pi peer range |") ||
+		(!compatibility.includes("| Host Pi |") &&
+			!compatibility.includes("| Host Pi peer range |")) ||
 		!compatibility.includes(piRange)
 	)
 		fail(`COMPATIBILITY Pi range must match ${piRange}`);
