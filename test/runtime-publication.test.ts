@@ -12,7 +12,11 @@ import { loadRuntimeLock, runtimeBuildArgs } from "../scripts/runtime-lock.mjs";
 import { verifyRuntimeEnvironment } from "../scripts/verify-runtime-environment.mjs";
 // @ts-expect-error executable script module has no declaration file
 const verifierModule = await import("../scripts/verify-runtime-image.mjs");
-const { readDescriptor, validateAttestationManifest } = verifierModule;
+const {
+	readDescriptor,
+	validateAttestationCoverage,
+	validateAttestationManifest,
+} = verifierModule;
 
 const sha = (value: string) =>
 	`sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -142,7 +146,8 @@ test("OCI descriptor digest, size, and media type fail closed", async () => {
 	}
 });
 
-test("attestations bind descriptor, manifest, and statement subjects", () => {
+test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
+	const sourceSha = "c".repeat(40);
 	const platform = {
 		digest: digestA,
 		size: 42,
@@ -164,15 +169,54 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 	const statement = {
 		_type: "https://in-toto.io/Statement/v1",
 		predicateType: "https://slsa.dev/provenance/v1",
-		subject: [{ digest: { sha256: digestA.slice(7) } }],
+		subject: [] as unknown[],
+		predicate: {
+			buildDefinition: {
+				buildType:
+					"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+				resolvedDependencies: [
+					{
+						uri: "pkg:docker/docker/dockerfile@1.7",
+						digest: { sha256: "d".repeat(64) },
+					},
+				],
+				externalParameters: {
+					configSource: { path: "runtime.Dockerfile" },
+					request: {
+						args: {
+							"build-arg:SOURCE_SHA": sourceSha,
+							target: "standard",
+						},
+					},
+				},
+			},
+			runDetails: {
+				builder: { id: "" },
+				metadata: {
+					invocationId: "buildkit-invocation",
+					startedOn: "2026-08-19T05:28:26.371221794Z",
+					finishedOn: "2026-08-19T05:28:42.505743325Z",
+				},
+			},
+		},
 	};
-	assert.doesNotThrow(() =>
+	const validate = (candidate: unknown = statement) =>
 		validateAttestationManifest(
 			descriptor,
 			manifest,
-			[statement],
+			[candidate],
 			new Map([[digestA, platform]]),
-		),
+			sourceSha,
+			"standard",
+		);
+
+	assert.doesNotThrow(() => validate());
+	assert.doesNotThrow(() => validate({ ...statement, subject: [] }));
+	assert.doesNotThrow(() =>
+		validate({
+			...statement,
+			subject: [{ digest: { sha256: digestA.slice(7) } }],
+		}),
 	);
 	assert.throws(
 		() =>
@@ -181,56 +225,74 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 				{ ...manifest, subject: { ...platform, digest: digestB } },
 				[statement],
 				new Map([[digestA, platform]]),
+				sourceSha,
+				"standard",
 			),
 		/subject/,
 	);
+
+	const wrongSource = structuredClone(statement);
+	wrongSource.predicate.buildDefinition.externalParameters.request.args[
+		"build-arg:SOURCE_SHA"
+	] = "e".repeat(40);
+	const wrongVariant = structuredClone(statement);
+	wrongVariant.predicate.buildDefinition.externalParameters.request.args.target =
+		"docker";
+	const missingDependency = structuredClone(statement);
+	missingDependency.predicate.buildDefinition.resolvedDependencies = [];
+	const cases: Array<[string, unknown]> = [
+		["missing predicate", { ...statement, predicate: undefined }],
+		[
+			"missing build definition",
+			{
+				...statement,
+				predicate: { ...statement.predicate, buildDefinition: undefined },
+			},
+		],
+		[
+			"missing run details",
+			{
+				...statement,
+				predicate: { ...statement.predicate, runDetails: undefined },
+			},
+		],
+		["wrong source", wrongSource],
+		["wrong variant", wrongVariant],
+		["missing dependency", missingDependency],
+	];
+	for (const [name, candidate] of cases)
+		assert.throws(() => validate(candidate), /provenance/, name);
+
 	for (const invalidStatement of [
 		{ ...statement, _type: "bad" },
 		{ ...statement, predicateType: "https://slsa.dev/provenance/v0.2" },
+		{ ...statement, subject: undefined },
+		{
+			...statement,
+			subject: [{ digest: { sha256: digestB.slice(7) } }],
+		},
+	])
+		assert.throws(() => validate(invalidStatement), /attestation|subject/);
+});
+
+test("exactly one attestation manifest is required per platform", () => {
+	const platforms = new Map([
+		[digestA, { digest: digestA }],
+		[digestB, { digest: digestB }],
+	]);
+	assert.doesNotThrow(() =>
+		validateAttestationCoverage([digestA, digestB], platforms),
+	);
+	for (const references of [
+		[],
+		[digestA],
+		[digestA, digestA],
+		[digestA, digestB, `sha256:${"f".repeat(64)}`],
 	])
 		assert.throws(
-			() =>
-				validateAttestationManifest(
-					descriptor,
-					manifest,
-					[invalidStatement],
-					new Map([[digestA, platform]]),
-				),
-			/malformed/,
+			() => validateAttestationCoverage(references, platforms),
+			/exactly one attestation manifest/,
 		);
-	assert.throws(
-		() =>
-			validateAttestationManifest(
-				descriptor,
-				manifest,
-				[{ ...statement, subject: undefined }],
-				new Map([[digestA, platform]]),
-			),
-		/malformed in-toto subject/,
-	);
-	assert.doesNotThrow(() =>
-		validateAttestationManifest(
-			descriptor,
-			manifest,
-			[{ ...statement, subject: [] }],
-			new Map([[digestA, platform]]),
-		),
-	);
-	assert.throws(
-		() =>
-			validateAttestationManifest(
-				descriptor,
-				manifest,
-				[
-					{
-						...statement,
-						subject: [...statement.subject, { digest: { sha256: digestB.slice(7) } }],
-					},
-				],
-				new Map([[digestA, platform]]),
-			),
-		/in-toto subject/,
-	);
 });
 
 test("final receipt rejects incomplete, mismatched, and tampered evidence", async () => {

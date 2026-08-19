@@ -11,6 +11,10 @@ import { loadRuntimeLock } from "./runtime-lock.mjs";
 const imageIndexMediaType = "application/vnd.oci.image.index.v1+json";
 const imageManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
 const inTotoMediaType = "application/vnd.in-toto+json";
+const buildKitBuildType =
+	"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md";
+const isObject = (value) =>
+	value !== null && typeof value === "object" && !Array.isArray(value);
 
 function parseArgs(argv) {
 	const values = { receipt: "runtime-image-receipt.json" };
@@ -71,6 +75,8 @@ export function validateAttestationManifest(
 	manifest,
 	statements,
 	platformDescriptors,
+	sourceSha,
+	variant,
 ) {
 	const reference = descriptor.annotations?.["vnd.docker.reference.digest"];
 	const subject = manifest.subject;
@@ -96,11 +102,12 @@ export function validateAttestationManifest(
 	for (const statement of statements) {
 		if (
 			statement?._type !== "https://in-toto.io/Statement/v1" ||
-			statement.predicateType !== "https://slsa.dev/provenance/v1"
+			statement.predicateType !== "https://slsa.dev/provenance/v1" ||
+			!Array.isArray(statement.subject)
 		)
 			throw new Error("malformed in-toto attestation statement");
-		if (!Array.isArray(statement.subject))
-			throw new Error("malformed in-toto subject array");
+		if (statement.subject.length > 1)
+			throw new Error("in-toto subject does not match its platform manifest");
 		for (const statementSubject of statement.subject) {
 			const digest = statementSubject.digest?.sha256;
 			if (
@@ -109,7 +116,53 @@ export function validateAttestationManifest(
 			)
 				throw new Error("in-toto subject does not match its platform manifest");
 		}
+
+		const predicate = statement.predicate;
+		const build = predicate?.buildDefinition;
+		const external = build?.externalParameters;
+		const args = external?.request?.args;
+		const runDetails = predicate?.runDetails;
+		const metadata = runDetails?.metadata;
+		const startedOn = Date.parse(metadata?.startedOn);
+		const finishedOn = Date.parse(metadata?.finishedOn);
+		if (
+			!isObject(predicate) ||
+			!isObject(build) ||
+			build.buildType !== buildKitBuildType ||
+			!Array.isArray(build.resolvedDependencies) ||
+			build.resolvedDependencies.length === 0 ||
+			!isObject(external) ||
+			!isObject(external.configSource) ||
+			external.configSource.path !== "runtime.Dockerfile" ||
+			!isObject(external.request) ||
+			!isObject(args) ||
+			args.target !== variant ||
+			args["build-arg:SOURCE_SHA"] !== sourceSha ||
+			!isObject(runDetails) ||
+			!isObject(runDetails.builder) ||
+			typeof runDetails.builder.id !== "string" ||
+			!isObject(metadata) ||
+			typeof metadata.invocationId !== "string" ||
+			metadata.invocationId.length === 0 ||
+			typeof metadata.startedOn !== "string" ||
+			typeof metadata.finishedOn !== "string" ||
+			!Number.isFinite(startedOn) ||
+			!Number.isFinite(finishedOn) ||
+			finishedOn < startedOn
+		)
+			throw new Error("malformed BuildKit SLSA v1 provenance predicate");
 	}
+}
+
+export function validateAttestationCoverage(references, platformDescriptors) {
+	if (
+		references.length !== platformDescriptors.size ||
+		new Set(references).size !== platformDescriptors.size ||
+		references.some((reference) => !platformDescriptors.has(reference))
+	)
+		throw new Error(
+			"exactly one attestation manifest is required per verified platform",
+		);
 }
 
 async function archiveIdentity(path) {
@@ -186,6 +239,7 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 			[...expectedPlatforms].sort().join()
 		)
 			throw new Error("archive does not contain the locked runtime platforms");
+		const attestationReferences = [];
 		for (const descriptor of index.manifests ?? []) {
 			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
 			if (expectedPlatforms.includes(platform)) continue;
@@ -209,8 +263,14 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				manifest,
 				statements,
 				platformDescriptors,
+				sourceSha,
+				variant,
+			);
+			attestationReferences.push(
+				descriptor.annotations["vnd.docker.reference.digest"],
 			);
 		}
+		validateAttestationCoverage(attestationReferences, platformDescriptors);
 		return { indexDigest, platformDigests, labels };
 	} finally {
 		await rm(layout, { recursive: true, force: true });

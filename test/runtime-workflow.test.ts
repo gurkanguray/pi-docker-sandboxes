@@ -71,7 +71,7 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 	assert.ok(sourceRun, "source binding step is required");
 	for (const check of [
 		'git fetch --force origin "refs/heads/main:refs/remotes/origin/main"',
-		'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main',
+		'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"',
 		'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
 	])
 		assert.ok(sourceRun.includes(check), `source binding must enforce: ${check}`);
@@ -194,6 +194,18 @@ test("runtime workflow policy rejects security and publication weakening", async
 			"shallow source checkout",
 			(value) => {
 				value.jobs.source.steps![0]!.with!["fetch-depth"] = 1;
+			},
+		],
+		[
+			"source SHA may be an ancestor of main",
+			(value) => {
+				const source = value.jobs.source.steps?.find(
+					(step) => step.id === "source",
+				);
+				source!.run = source!.run!.replace(
+					'test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"',
+					'git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main',
+				);
 			},
 		],
 		[
