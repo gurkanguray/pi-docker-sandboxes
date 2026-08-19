@@ -54,7 +54,16 @@ COPY --from=runtime /opt/pi-runtime /opt/pi-runtime
 COPY --from=runtime /usr/local/bin/fd /usr/local/bin/fd
 RUN set -eux; \
     : "${SOURCE_SHA:?}" "${PI_VERSION:?}" "${RUNTIME_VERSION:?}"; \
-    rm /usr/libexec/docker/cli-plugins/docker-buildx; \
+    rm \
+      /usr/bin/docker \
+      /usr/libexec/docker/cli-plugins/docker-compose \
+      /usr/bin/pebble \
+      /usr/local/bin/clipboard-bridge \
+      /usr/libexec/docker/cli-plugins/docker-buildx; \
+    test ! -e /usr/bin/docker; \
+    test ! -e /usr/libexec/docker/cli-plugins/docker-compose; \
+    test ! -e /usr/bin/pebble; \
+    test ! -e /usr/local/bin/clipboard-bridge; \
     test ! -e /usr/libexec/docker/cli-plugins/docker-buildx; \
     ln -s /opt/pi-runtime/node_modules/.bin/pi /usr/local/bin/pi
 LABEL org.opencontainers.image.source="https://github.com/gurkanguray/pi-docker-sandboxes" \
@@ -63,7 +72,8 @@ LABEL org.opencontainers.image.source="https://github.com/gurkanguray/pi-docker-
       org.opencontainers.image.base.name="${STANDARD_BASE}" \
       io.pi-docker-sandboxes.runtime-schema="1" \
       io.pi-docker-sandboxes.pi-version="${PI_VERSION}" \
-      io.pi-docker-sandboxes.variant="standard"
+      io.pi-docker-sandboxes.variant="standard" \
+      io.pi-docker-sandboxes.stripped-optional-binaries="/usr/bin/docker,/usr/libexec/docker/cli-plugins/docker-compose,/usr/bin/pebble,/usr/local/bin/clipboard-bridge,/usr/libexec/docker/cli-plugins/docker-buildx"
 USER agent
 
 FROM ${DOCKER_BASE} AS docker

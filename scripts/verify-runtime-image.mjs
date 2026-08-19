@@ -13,6 +13,13 @@ const imageManifestMediaType = "application/vnd.oci.image.manifest.v1+json";
 const inTotoMediaType = "application/vnd.in-toto+json";
 const buildKitBuildType =
 	"https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md";
+const standardStrippedBinaries = [
+	"/usr/bin/docker",
+	"/usr/libexec/docker/cli-plugins/docker-compose",
+	"/usr/bin/pebble",
+	"/usr/local/bin/clipboard-bridge",
+	"/usr/libexec/docker/cli-plugins/docker-buildx",
+];
 const isObject = (value) =>
 	value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -284,6 +291,12 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				"io.pi-docker-sandboxes.runtime-schema": String(lock.runtimeSchema),
 				"io.pi-docker-sandboxes.pi-version": lock.piVersion,
 				"io.pi-docker-sandboxes.variant": variant,
+				...(variant === "standard"
+					? {
+							"io.pi-docker-sandboxes.stripped-optional-binaries":
+								standardStrippedBinaries.join(","),
+						}
+					: {}),
 			};
 			for (const [name, value] of Object.entries(expectedLabels))
 				if (currentLabels[name] !== value)
@@ -354,6 +367,12 @@ async function smokeArchive(archive, variant, lock) {
 				`oci-archive:/work/${basename(absoluteArchive)}`,
 				`docker-daemon:${tag}`,
 			]);
+			const strippedBinaryChecks =
+				variant === "standard"
+					? standardStrippedBinaries
+							.map((path) => `test ! -e ${path}`)
+							.join(" && ")
+					: "";
 			await run("docker", [
 				"run",
 				"--rm",
@@ -362,7 +381,7 @@ async function smokeArchive(archive, variant, lock) {
 				tag,
 				"sh",
 				"-lc",
-				`test "$(pi --version)" = "${lock.piVersion}" && test "$(fd --version)" = "fd ${lock.tools.fd.version}" && rg --version && git --version && test "$(id -u)" = 1000${variant === "standard" ? " && test ! -e /usr/libexec/docker/cli-plugins/docker-buildx" : ""}`,
+				`test "$(pi --version)" = "${lock.piVersion}" && test "$(fd --version)" = "fd ${lock.tools.fd.version}" && rg --version && git --version && test "$(id -u)" = 1000${strippedBinaryChecks ? ` && ${strippedBinaryChecks}` : ""}`,
 			]);
 		} finally {
 			await run("docker", ["image", "rm", "--force", tag]).catch(() => {});
