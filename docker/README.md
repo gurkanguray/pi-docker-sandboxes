@@ -1,13 +1,13 @@
-# Sandbox runtime image
+# Production runtime image
 
-The local fallback and release image use the same `Dockerfile` and `image-lock.json`. The standard image is exactly `linux/arm64`; image verification rejects other platforms. Credentials and host personalization are never copied.
+Users run the locked public standard OCI index; they do not create a replacement runtime during installation.
 
-From a source checkout, `npm run image:build` builds and verifies the image. After the public release, installed-package users run:
+`ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b`
 
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx image build
-```
+This non-privileged index contains `linux/amd64` and `linux/arm64`. The controller selects the matching manifest and verifies the immutable digest. The private Docker Engine is disabled in 1.0.0 because the production controller does not authorize a privileged runtime variant.
 
-`BASE_IMAGE` has no Dockerfile default; `image-lock.json` is the only base. The build installs the locked `fd-find`, `ripgrep`, and Git revisions, then leaves `agent` (UID 1000) as the final user.
+The standard runtime is separate from the npm controller. It contains the locked Pi runtime and required tools; the controller injects its sandbox-only extension through Kit files. This removes any package/image digest cycle.
 
-Local launch uses a content-addressed tag `docker.io/pi-docker-sandboxes/pi:local-<64-hex-Docker-ID>`, never a raw Docker ID. Registry publication is deferred during Early Access. Do not publish a local fallback build.
+The release workflow binds the exact index digest to per-platform CycloneDX SBOMs, zero HIGH/CRITICAL raw scans, a runtime receipt, and GitHub OIDC provenance. The npm release then runs its exact tarball and this exact digest on macOS arm64, Ubuntu amd64 KVM, and Ubuntu arm64 KVM before publication approval.
+
+`runtime.Dockerfile`, `runtime-lock.json`, and the locked Docker-owned template digest are maintainer inputs. Runtime publication is two-phase: publish and verify an immutable index first, then review the controller lock update. Floating tags, custom substitutions, and installation-time runtime creation are outside the supported product path.

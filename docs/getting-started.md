@@ -1,67 +1,64 @@
 # Getting started
 
-::: warning Availability
-`0.1.0` is not yet published. Public installation opens when [release issue #8](https://github.com/gurkanguray/pi-docker-sandboxes/issues/8) is complete.
-:::
-
 ## Requirements
 
 | Component | Requirement |
 | --- | --- |
-| Host | macOS 14+ on Apple silicon or Ubuntu 24.04+ on amd64/ARM64 |
+| Host | macOS 14+ on Apple Silicon; Ubuntu 24.04+ on amd64 or arm64 with KVM |
 | Pi | `>=0.84.1 <0.85.0` |
 | Node.js | `>=22.19.0 <25` |
-| Docker | 29+ validated |
+| Docker | 29+ |
 | Docker Sandboxes | 0.38.x |
-| Standard image | `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` (`linux/amd64`, `linux/arm64`) |
 
-macOS 26.5.2 on Apple silicon is the validated candidate host, with Pi 0.84.1, Node.js 24.12.0, and Docker Sandboxes 0.38.0. Ubuntu amd64/ARM64 hardware validation remains blocked until the required hosted runners are available. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md) for details.
+The standard non-privileged runtime is the public multiarch index `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` for `linux/amd64` and `linux/arm64`. See [Compatibility](https://github.com/gurkanguray/pi-docker-sandboxes/blob/main/COMPATIBILITY.md) before using another host.
 
-Run from a Git repository. If the repository has no commits:
+Run from a Git repository with at least one commit. For a new repository:
 
-```bash
+```sh
 git init
 git commit --allow-empty --only -m "Initial commit"
 ```
 
-## Install after release
+## Install
 
-```bash
-pi install npm:pi-docker-sandboxes@0.1.0
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx doctor
+Verify the exact version from your configured registry. Continue only when this check prints `1.0.0`; a registry without that release returns nonzero.
+
+```sh
+npm view pi-docker-sandboxes@1.0.0 version
+pi install npm:pi-docker-sandboxes@1.0.0
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx doctor --json
 ```
 
-Fix any reported error before continuing.
+Review the redacted JSON and fix every failed check before launch. The signed release evidence records the package integrity, immutable runtime digest, scans, SBOMs, GitHub OIDC provenance, and hardware receipts.
 
 ## Run
 
-```bash
+```sh
 pi --docker-sandbox
 ```
 
-Eligible host credentials sync by default. Add `--docker-sandbox-no-host-auth` to disable this. Sandbox-local `/login` is unsupported.
+The default is hardened networking, authentication mode `none`, no model metadata, no packages or other host resources, managed session backups, and a disabled private Docker Engine. Configure authentication or resource import explicitly; `--docker-sandbox-no-host-auth` forces no host authentication for one launch.
 
-Pass normal Pi options as usual:
+Pass Pi arguments normally:
 
-```bash
+```sh
 pi --docker-sandbox --model PROVIDER/MODEL
 ```
 
 ## Keep your work
 
-Accept the exit prompt to export changed work to `.git/pi-docker-sandbox/patches/`. If you decline, the sandbox is retained so you can export later:
+On exit, accept export to create a binary patch under `.git/pi-docker-sandbox/patches/`. Declining preserves changed or uninspectable work in the sandbox.
 
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx export
+```sh
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx export --name NAME
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx apply PATCH --name NAME --yes
 ```
 
-Apply the reviewed patch:
+Review the patch before `apply`. The host checkout must still match the recorded repository, worktree, base commit, and clean-tree checks. Never destroy the sandbox until the patch is applied and verified.
 
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx apply PATCH --yes
-```
+## Upgrade
 
-Clean sandboxes are removed by default. Changed or uninspectable sandboxes are preserved without explicit discard authority.
+Install a newer exact 1.x version, then run `pi-dsbx doctor --json` before resuming a sandbox. Compatible state is backed up and migrated after daemon/image reconciliation. An unknown state version, runtime mismatch, or image drift fails closed: export work with the old compatible package when possible, then recreate.
 
 ## Next steps
 

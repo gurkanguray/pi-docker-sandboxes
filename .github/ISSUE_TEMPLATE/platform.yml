@@ -1,5 +1,5 @@
 name: Platform report
-description: Share behavior from a Docker Sandboxes and Pi host platform.
+description: Share sanitized behavior from a Docker Sandboxes and Pi host.
 title: "[Platform]: "
 labels:
   - bug
@@ -7,24 +7,33 @@ body:
   - type: markdown
     attributes:
       value: |
-        macOS 14+ on Apple Silicon and Ubuntu 24.04+ on amd64 or ARM64 are
-        documented package hosts. Reports from other Docker Sandboxes and Pi
-        hosts are also welcome. The standard image supports `linux/amd64` and
-        `linux/arm64`; Windows process-group execution is a known package
-        limitation. A report does not establish or
-        guarantee a roadmap commitment. Do not include credentials, private
-        source, environment dumps, or other sensitive data.
+        Production support covers macOS 14+ on Apple Silicon.
+        Ubuntu 24.04+ supports amd64 and arm64 with KVM.
+        Windows 11 x64 is the next package milestone; it is not certified.
+        Reports from other upstream-capable hosts are welcome; a report does
+        not establish support or guarantee a roadmap commitment. Do not include
+        credentials, private source, environment dumps, sessions, or patches.
   - type: input
     id: platform
     attributes:
-      label: Platform and version
-      description: Give concise OS and architecture versions only.
+      label: Host platform, version, and architecture
+      description: >-
+        For Ubuntu, also state whether the user can access `/dev/kvm`.
     validations:
       required: true
   - type: input
     id: versions
     attributes:
-      label: Package, Pi, Node.js, and `sbx` versions
+      label: Package, Pi, Node.js, Docker, and `sbx` versions
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Reviewed JSON diagnostics
+      description: >-
+        Paste redacted `pi-dsbx doctor --json` output. Remove private paths and
+        project metadata.
     validations:
       required: true
   - type: textarea
@@ -37,8 +46,13 @@ body:
   - type: checkboxes
     id: acknowledgement
     attributes:
-      label: Roadmap acknowledgement
+      label: Safety and roadmap acknowledgement
       options:
         - label: >-
-            I understand this report does not guarantee a roadmap commitment.
+            I reviewed this report and removed credentials, private source,
+            sessions, patches, and environment dumps.
+          required: true
+        - label: >-
+            I understand this report does not establish support or guarantee a
+            roadmap commitment.
           required: true

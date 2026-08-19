@@ -1,34 +1,43 @@
 # Uninstall
 
-Export work you want to keep before removing a sandbox.
+Export and verify wanted work before removing any sandbox or backup.
 
 ## 1. Export wanted work
 
-```bash
+```sh
 sbx ls
 sbx exec NAME git status --porcelain=v1
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx export --name NAME
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx export --name NAME
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx sessions list --name NAME
 ```
 
-Review the patch in `.git/pi-docker-sandbox/patches/`.
+Review patches under `.git/pi-docker-sandbox/patches/` and restore any managed session you still need.
 
 ## 2. Remove sandboxes
 
-Remove a clean sandbox:
+For a confirmed clean sandbox:
 
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx destroy --name NAME --yes
+```sh
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx destroy --name NAME --yes
 ```
 
-Changed or uninspectable work is preserved. To lose that work intentionally:
+Changed or uninspectable work is preserved. The next command can permanently lose unexported work and is explicit data-loss authority:
 
-```bash
-npm exec --package=pi-docker-sandboxes@0.1.0 -- pi-dsbx destroy --name NAME --discard-changes
+```sh
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx destroy --name NAME --discard-changes
+```
+
+Do not run it until exports are applied and verified. Repeat for every sandbox.
+
+A session backup is independent of sandbox removal. After successful restore and verification, delete one backup permanently with:
+
+```sh
+npm exec --package=pi-docker-sandboxes@1.0.0 -- pi-dsbx sessions delete BACKUP --name NAME --yes
 ```
 
 ## 3. Remove the package
 
-```bash
+```sh
 pi remove npm:pi-docker-sandboxes
 ```
 
@@ -36,13 +45,12 @@ Add Pi's `--local` option if the package was installed for one project.
 
 ## 4. Optional cleanup
 
-List the package image before removing its exact reference:
+After every related sandbox is gone, remove the exact cached runtime only if no other project uses it:
 
-```bash
-docker image ls docker.io/pi-docker-sandboxes/pi
-docker image rm docker.io/pi-docker-sandboxes/pi:0.1.0
+```sh
+docker image rm ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b
 ```
 
-Configuration and state are safe to remove only after every related sandbox is gone: `~/.pi/agent/docker-sandboxes.json`, `.pi/docker-sandboxes.json`, and `.git/pi-docker-sandbox/state/`.
+Configuration lives at `~/.pi/agent/docker-sandboxes.json` and `.pi/docker-sandboxes.json`. Lifecycle state and leases live under `.git/pi-docker-sandbox/`; managed backups live under `~/.pi/agent/docker-sandboxes/sessions/`. Remove these only after confirming their patches, sandboxes, and sessions are no longer needed.
 
-Exported patches live at `.git/pi-docker-sandbox/patches/`; keep patches until their changes are applied and verified.
+Keep exported patches until their changes are applied and verified.

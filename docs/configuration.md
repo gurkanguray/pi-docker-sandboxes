@@ -1,15 +1,15 @@
 # Configuration
 
-## Locations
+## Locations and trust
 
 | Scope | Path | Rule |
 | --- | --- | --- |
 | Global | `~/.pi/agent/docker-sandboxes.json` | Always read. |
-| Project | `.pi/docker-sandboxes.json` | Read after Pi trusts the project. `pi-dsbx run` also requires `--trust-project-config`. |
+| Project | `.pi/docker-sandboxes.json` | Pi must trust the project; `pi-dsbx run` also requires `--trust-project-config`. |
 
-Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, not in configuration.
+Unknown fields and invalid values fail closed. Do not put credentials in either file.
 
-## Defaults
+## Production defaults
 
 ```json
 {
@@ -27,23 +27,14 @@ Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, no
     "extensions": false,
     "sessions": "managed"
   },
-  "auth": {
-    "mode": "none",
-    "providers": []
-  },
+  "auth": { "mode": "none", "providers": [] },
   "retention": {
     "maxCount": 10,
     "maxAgeDays": 30,
     "maxBytes": 1073741824
   },
-  "sandbox": {
-    "keep": false,
-    "dockerEngine": false
-  },
-  "network": {
-    "allow": [],
-    "deny": []
-  },
+  "sandbox": { "keep": false, "dockerEngine": false },
+  "network": { "allow": [], "deny": [] },
   "export": {
     "onExit": "prompt",
     "directory": ".git/pi-docker-sandbox/patches"
@@ -51,56 +42,50 @@ Unknown fields are rejected. Store API keys with `sbx secret set <provider>`, no
 }
 ```
 
+Authentication mode `none` is the default. Model metadata and every package/resource category default to `false`. The standard image is non-privileged, and the private Docker Engine is disabled; setting `sandbox.dockerEngine` to `true` is rejected in production 1.0.
+
 ## Fields
 
-| Field | Values | Purpose |
+| Field | Values | Effect |
 | --- | --- | --- |
 | `version` | `2` | Configuration schema. |
-| `enabled` | boolean | Enable sandbox re-execution. |
-| `profile` | `development`, `hardened` | Network and security policy. |
-| `syncProfile` | `custom`, `clean`, `mirror` | Select a built-in or custom sync policy. |
-| `sync.settings`, `sync.models` | boolean | Copy sanitized settings or model metadata. |
-| `sync.packages`, `sync.skills`, `sync.prompts`, `sync.themes`, `sync.extensions` | boolean | Copy each opted-in Pi resource. |
-| `sync.sessions` | `managed`, `sandbox` | Select session storage behavior. |
-| `auth.mode` | `none`, `proxy`, `oauth-copy` | Select the explicit credential policy. |
-| `auth.providers` | provider IDs | Request explicit providers when auth is enabled. |
-| `retention.maxCount` | non-negative integer | Maximum retained managed-session backups; the latest valid backup is always preserved. |
-| `retention.maxAgeDays` | non-negative integer | Maximum age for non-latest managed-session backups. |
-| `retention.maxBytes` | non-negative integer | Maximum aggregate bytes for non-latest managed-session backups. |
+| `enabled` | boolean | Enable Pi host re-execution. |
+| `profile` | `hardened`, `development` | Select network policy; `hardened` is the default. |
+| `syncProfile` | `custom`, `clean`, `mirror` | Select resource/session policy. |
+| `sync.settings`, `sync.models` | boolean | Copy allowlisted, sanitized metadata when opted in. |
+| `sync.packages`, `sync.skills`, `sync.prompts`, `sync.themes`, `sync.extensions` | boolean | Copy each opted-in resource under path, content, and immutability checks. |
+| `sync.sessions` | `managed`, `sandbox` | Back sessions up on the host or leave them in the sandbox. |
+| `auth.mode` | `none`, `proxy`, `oauth-copy` | Select explicit credential handling. |
+| `auth.providers` | provider IDs | Required explicit provider allowlist for `proxy` or `oauth-copy`. |
+| `retention.maxCount` | non-negative integer | Maximum managed backups; newest valid backup is retained. |
+| `retention.maxAgeDays` | non-negative integer | Age ceiling for backups other than the newest. |
+| `retention.maxBytes` | non-negative integer | Byte ceiling for backups other than the newest. |
 | `sandbox.name` | name | Reuse a named sandbox. |
-| `sandbox.keep` | boolean | Keep the sandbox after exit. |
-| `sandbox.dockerEngine` | boolean | Request the private Docker Engine variant. Production 1.0 rejects it until a verified image is published. |
-| `network.allow`, `network.deny` | domains | Extend the profile's network rules. |
-| `export.onExit` | `prompt`, `always`, `never` | Handle changed work on exit. |
-| `export.directory` | path | Store exported patches. Parent traversal is rejected. |
+| `sandbox.keep` | boolean | Preserve the sandbox after exit. |
+| `sandbox.dockerEngine` | `false` | Private Docker request; `true` is unavailable in 1.0.0. |
+| `network.allow`, `network.deny` | domains | Extend the selected profile with validated domains. |
+| `export.onExit` | `prompt`, `always`, `never` | Select export behavior. `never` preserves changed work. |
+| `export.directory` | relative path | Patch directory; parent traversal is rejected. |
 
 ## Profiles
 
-| Option | Behavior |
-| --- | --- |
-| `development` | Allows network access to common package, GitHub, and model-provider destinations. |
-| `hardened` | Allows no additional network destinations. |
-| `clean` | Copies nothing from the host; sessions stay in the sandbox. |
-| `custom` | Copies sanitized settings and models by default; each resource is configurable. |
-| `mirror` | Copies eligible settings, models, packages, skills, prompts, themes, and extensions. |
+- `hardened` adds no network destinations. `development` adds common package, GitHub, and model-provider destinations.
+- `clean` copies no resources and leaves sessions in the sandbox.
+- `custom` uses each explicit `sync` value; the defaults copy no resources and manage sessions.
+- `mirror` opts into eligible settings, model metadata, packages, skills, prompts, themes, and extensions. It does not bypass sanitization, immutable package locks, native-package confirmation, or trust checks.
 
-Audited provider IDs: `anthropic`, `google`, `openai`, `openrouter`, `xai`.
+## Authentication
 
-## Common choices
+`proxy` requests only the named providers through Docker's secret mechanism. `oauth-copy` copies allowlisted OAuth material into the sandbox.
 
-Use command-line overrides for one launch:
+::: danger OAuth custody
+`oauth-copy` exposes copied OAuth material to code inside the sandbox. It requires interactive confirmation; use `proxy` when available and never commit credentials.
+:::
 
-```bash
-pi --docker-sandbox --docker-sandbox-sync clean
-pi --docker-sandbox --docker-sandbox-sync mirror
-pi --docker-sandbox --docker-sandbox-profile hardened
-pi --docker-sandbox --docker-sandbox-keep
-```
+Audited provider IDs are `anthropic`, `google`, `openai`, `openrouter`, and `xai`. Provider access and resource import do not silently grant package, GitHub, or Docker network access.
 
-To disable the exit prompt, set `export.onExit` to `never`. Changed work remains preserved.
+## Runtime image
 
-## Images
+The standard image is `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` for `linux/amd64` and `linux/arm64`. Configuration does not replace this locked runtime.
 
-The standard verified image is `ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b` for `linux/amd64` and `linux/arm64`. Custom images must use an immutable SHA-256 digest, but supplying one does not establish a supported cross-architecture path.
-
-See the [CLI reference](cli-reference.md) for all overrides.
+See the [CLI reference](cli-reference.md) for one-launch overrides.

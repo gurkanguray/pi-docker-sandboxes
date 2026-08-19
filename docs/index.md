@@ -2,7 +2,7 @@
 layout: home
 
 hero:
-  name: Pi Docker Sandboxes
+  name: Pi Docker Sandboxes 1.0.0
   text: Run Pi in an isolated workspace
   tagline: Review changes before they reach your project.
   actions:
@@ -14,10 +14,10 @@ hero:
       link: https://github.com/gurkanguray/pi-docker-sandboxes
 
 features:
-  - title: Isolated by default
-    details: Pi runs inside a Docker Sandboxes microVM.
-  - title: Private workspace
-    details: Each sandbox works from its own Git clone.
-  - title: Review every change
-    details: Export a patch before updating the host project.
+  - title: Secure defaults
+    details: Hardened, no-auth, non-privileged isolation without host-source writes.
+  - title: Recoverable lifecycle
+    details: Durable state, leases, patches, diagnostics, and retained sessions protect work.
+  - title: Verified runtime
+    details: An immutable public multiarch image is bound to release provenance.
 ---

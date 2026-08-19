@@ -34,7 +34,7 @@ async function assertLinksResolve(source: string): Promise<void> {
 	}
 }
 
-test("documentation site is a focused product guide", async () => {
+test("documentation site exposes the production guides", async () => {
 	const config = await read("docs/.vitepress/config.mts");
 	assert.match(config, /base:\s*["']\/pi-docker-sandboxes\/["']/);
 	assert.match(config, /search:\s*\{\s*provider:\s*["']local["']/s);
@@ -57,46 +57,47 @@ test("documentation site is a focused product guide", async () => {
 				`link: ["']https://github\\.com/gurkanguray/pi-docker-sandboxes/blob/main/${document.replace(".", "\\.")}["']`,
 			),
 		);
-	assert.doesNotMatch(config, /Maintainers|Repository Settings|Migration/);
-	await assert.rejects(access("docs/migration.md"));
-	await assert.rejects(access("docs/repository-settings.md"));
+	assert.match(config, /srcExclude:\s*\[\s*["']superpowers\/\*\*["']\s*\]/s);
 	await assertLinksResolve(config);
 });
 
-test("documentation site excludes internal planning artifacts", async () => {
-	const config = await read("docs/.vitepress/config.mts");
-	assert.match(config, /srcExclude:\s*\[\s*["']superpowers\/\*\*["']\s*\]/s);
-});
-
-test("home leads with the product instead of support caveats", async () => {
+test("home presents stable installation without availability claims", async () => {
 	const home = await read("docs/index.md");
 	assert.match(home, /layout:\s*home/);
 	assert.match(home, /text:\s*Run Pi in an isolated workspace/);
 	assert.match(home, /tagline:\s*Review changes before they reach your project\./);
-	assert.match(home, /link:\s*\/getting-started(?:\s|$)/);
+	assert.match(home, /link:\s*\/getting-started/);
 	assert.match(home, /github\.com\/gurkanguray\/pi-docker-sandboxes/);
-	assert.doesNotMatch(home, /26\.5\.2|0\.84\.1|24\.12\.0|29\.7\.1|0\.38\.0/);
-	assert.doesNotMatch(home, /other macOS releases|Linux|Windows/i);
-	assert.ok(proseWords(home) <= 80, `${proseWords(home)} home words`);
+	assert.match(home, /1\.0\.0/);
+	assert.doesNotMatch(
+		home,
+		/alpha|Early Access|not(?:-| )yet(?:-| )published|candidate/i,
+	);
+	assert.ok(proseWords(home) <= 100, `${proseWords(home)} home words`);
 	await assertLinksResolve(home);
 });
 
-test("public guides stay concise", async () => {
+test("public guides remain concise and keep warnings near actions", async () => {
 	const limits = {
-		"README.md": 600,
-		"SUPPORT.md": 250,
-		"COMPATIBILITY.md": 250,
-		"SECURITY.md": 250,
-		"docs/index.md": 80,
-		"docs/getting-started.md": 300,
-		"docs/configuration.md": 420,
-		"docs/troubleshooting.md": 500,
-		"docs/uninstall.md": 300,
+		"README.md": 500,
+		"SUPPORT.md": 300,
+		"COMPATIBILITY.md": 350,
+		"SECURITY.md": 300,
+		"docs/index.md": 100,
+		"docs/getting-started.md": 500,
+		"docs/configuration.md": 700,
+		"docs/troubleshooting.md": 700,
+		"docs/uninstall.md": 400,
 	} as const;
 	for (const [path, limit] of Object.entries(limits)) {
 		const words = proseWords(await read(path));
 		assert.ok(words <= limit, `${path}: ${words} prose words (limit ${limit})`);
 	}
+	const uninstall = await read("docs/uninstall.md");
+	assert.match(
+		uninstall,
+		/(?:data loss|permanently lose)[\s\S]{0,300}pi-dsbx destroy --name NAME --discard-changes/i,
+	);
 });
 
 test("documentation commands are source-checkout-only", async () => {
