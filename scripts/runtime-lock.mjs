@@ -15,12 +15,21 @@ export async function loadRuntimeLock(path) {
 		...lock.bases,
 		dockerfileFrontend: lock.build?.dockerfileFrontend,
 		buildkitDriver: lock.build?.buildkitDriver,
+		qemu: lock.build?.qemu,
 		skopeo: lock.build?.skopeo,
 	}))
 		if (!digestReference.test(reference))
 			throw new Error(`runtime lock ${name} must be digest-pinned`);
 	if (!/^v\d+\.\d+\.\d+$/.test(lock.build?.buildxVersion))
 		throw new Error("runtime lock buildxVersion is invalid");
+	if (
+		!/^tonistiigi\/binfmt:qemu-v\d+\.\d+\.\d+(?:-\d+)?@sha256:[0-9a-f]{64}$/.test(
+			lock.build?.qemu,
+		)
+	)
+		throw new Error(
+			"runtime lock qemu image must use a stable digest-pinned tag",
+		);
 	for (const arch of ["amd64", "arm64"]) {
 		const artifact = lock.tools?.fd?.artifacts?.[arch];
 		if (!artifact?.name || !/^[0-9a-f]{64}$/.test(artifact.sha256))

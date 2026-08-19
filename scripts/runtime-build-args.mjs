@@ -12,6 +12,7 @@ export async function main(argv) {
 			console.log(`${name.toLowerCase()}=${value}`);
 		console.log(`buildx_version=${lock.build.buildxVersion}`);
 		console.log(`buildkit_driver=${lock.build.buildkitDriver}`);
+		console.log(`qemu_image=${lock.build.qemu}`);
 		console.log(`skopeo_image=${lock.build.skopeo}`);
 		return;
 	}

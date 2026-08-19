@@ -57,7 +57,13 @@ export async function readDescriptor(layout, descriptor, mediaType) {
 		throw new Error(`OCI blob size mismatch: ${descriptor.digest}`);
 	if (sha256(bytes) !== descriptor.digest)
 		throw new Error(`OCI blob digest mismatch: ${descriptor.digest}`);
-	return { bytes, value: JSON.parse(bytes) };
+	try {
+		return { bytes, value: JSON.parse(bytes) };
+	} catch (error) {
+		throw new Error(`OCI blob is not valid JSON: ${descriptor.digest}`, {
+			cause: error,
+		});
+	}
 }
 
 export function validateAttestationManifest(
@@ -94,9 +100,16 @@ export function validateAttestationManifest(
 			!statement.predicateType
 		)
 			throw new Error("malformed in-toto attestation statement");
-		for (const statementSubject of statement.subject ?? [])
-			if (statementSubject.digest?.sha256 !== platform.digest.slice(7))
-				throw new Error("in-toto subject does not match platform manifest");
+		if (!Array.isArray(statement.subject) || statement.subject.length === 0)
+			throw new Error("attestation requires a nonempty in-toto subject array");
+		for (const statementSubject of statement.subject) {
+			const digest = statementSubject.digest?.sha256;
+			if (
+				!/^[0-9a-f]{64}$/.test(digest ?? "") ||
+				!platformDescriptors.has(`sha256:${digest}`)
+			)
+				throw new Error("in-toto subject does not match a platform manifest");
+		}
 	}
 }
 

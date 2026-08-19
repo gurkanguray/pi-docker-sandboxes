@@ -347,6 +347,56 @@ test("release workflows are valid npm-only gates", async () => {
 		candidate.uses?.startsWith("aquasecurity/trivy-action@"),
 	))
 		assert.equal(step.with?.input, "runtime/oci");
+	const runtimeLock = JSON.parse(
+		await readFile(
+			new URL("../docker/runtime-lock.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const runtimeQemu = runtime.jobs.build.steps?.find((step) =>
+		step.uses?.startsWith("docker/setup-qemu-action@"),
+	);
+	const securityQemu = parsed
+		.get("security.yml")!
+		.jobs.image.steps?.find((step) =>
+			step.uses?.startsWith("docker/setup-qemu-action@"),
+		);
+	assert.match(
+		runtimeLock.build.qemu,
+		/:qemu-v\d+\.\d+\.\d+.*@sha256:[0-9a-f]{64}$/,
+	);
+	assert.doesNotMatch(runtimeLock.build.qemu, /:latest(?:@|$)/);
+	assert.equal(
+		(runtime.on?.workflow_dispatch as { inputs?: unknown } | undefined)
+			?.inputs === undefined,
+		false,
+	);
+	assert.ok(runtimeQemu, "runtime-image.yml setup-qemu step");
+	assert.ok(securityQemu, "security.yml setup-qemu step");
+	assert.equal(
+		runtimeQemu.with?.image,
+		"${{ needs.source.outputs.qemu_image }}",
+	);
+	assert.equal(
+		securityQemu.with?.image,
+		"${{ steps.runtime-lock.outputs.qemu_image }}",
+	);
+	assert.match(
+		runtimeText,
+		/qemu_image: \$\{\{ steps\.lock\.outputs\.qemu_image \}\}/,
+	);
+	for (const name of ["build", "receipt", "publish"]) {
+		const first = runtime.jobs[name]!.steps?.[0];
+		assert.equal(
+			first?.uses,
+			"actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+			`${name} must checkout before invoking repository scripts`,
+		);
+		assert.deepEqual(first?.with, {
+			ref: "${{ needs.source.outputs.sha }}",
+			"persist-credentials": false,
+		});
+	}
 	const publishRuntime = runtime.jobs.publish;
 	assert.equal(runtime.jobs.receipt.if, "inputs.variant == 'standard'");
 	assert.equal(publishRuntime.if, "inputs.variant == 'standard'");

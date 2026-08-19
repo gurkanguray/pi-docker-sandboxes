@@ -85,6 +85,7 @@ jobs:
           --tag "v$(node -p 'require("./package.json").version')"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
+          image: ${{ steps.runtime-lock.outputs.qemu_image }}
           platforms: arm64
       - name: Set up Docker Buildx
         uses: >-

@@ -26,6 +26,11 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 	assert.equal(args.STANDARD_BASE, lock.bases.standard);
 	assert.match(lock.build.dockerfileFrontend, /@sha256:[0-9a-f]{64}$/);
 	assert.match(lock.build.buildkitDriver, /:v?\d+\.\d+\.\d+@sha256:/);
+	assert.match(
+		lock.build.qemu,
+		/^tonistiigi\/binfmt:qemu-v\d+\.\d+\.\d+(?:-\d+)?@sha256:[0-9a-f]{64}$/,
+	);
+	assert.doesNotMatch(lock.build.qemu, /:latest(?:@|$)/);
 	const dockerfile = await readFile("docker/Dockerfile", "utf8");
 	assert.equal(
 		dockerfile.split("\n")[0],
@@ -47,6 +52,31 @@ test("runtime lock is authoritative and every registry tarball has integrity", a
 	>)
 		if (pkg.resolved?.startsWith("https://registry.npmjs.org/"))
 			assert.match(pkg.integrity ?? "", /^sha512-/, path);
+});
+
+test("runtime lock rejects omitted and mutable QEMU pins", async () => {
+	const directory = await mkdtemp(join(tmpdir(), "runtime-qemu-lock-"));
+	try {
+		const source = JSON.parse(
+			await readFile("docker/runtime-lock.json", "utf8"),
+		);
+		for (const qemu of [
+			undefined,
+			`tonistiigi/binfmt:latest@sha256:${"a".repeat(64)}`,
+		]) {
+			const path = join(directory, `lock-${qemu ? "mutable" : "missing"}.json`);
+			const lock = structuredClone(source);
+			if (qemu) lock.build.qemu = qemu;
+			else delete lock.build.qemu;
+			await writeFile(path, JSON.stringify(lock));
+			await assert.rejects(
+				loadRuntimeLock(path),
+				/stable digest-pinned tag|must be digest-pinned/,
+			);
+		}
+	} finally {
+		await rm(directory, { recursive: true, force: true });
+	}
 });
 
 test("release-runtime protection fails closed", () => {
@@ -168,6 +198,35 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 				new Map([[digestA, platform]]),
 			),
 		/malformed/,
+	);
+	for (const subject of [undefined, []])
+		assert.throws(
+			() =>
+				validateAttestationManifest(
+					descriptor,
+					manifest,
+					[{ ...statement, subject }],
+					new Map([[digestA, platform]]),
+				),
+			/nonempty in-toto subject/,
+		);
+	assert.throws(
+		() =>
+			validateAttestationManifest(
+				descriptor,
+				manifest,
+				[
+					{
+						...statement,
+						subject: [
+							...statement.subject,
+							{ digest: { sha256: digestB.slice(7) } },
+						],
+					},
+				],
+				new Map([[digestA, platform]]),
+			),
+		/in-toto subject/,
 	);
 });
 

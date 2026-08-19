@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: runtime-image-${{ github.sha }}-${{ inputs.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+  group: runtime-image-${{ github.sha }}-${{ inputs.variant }}
   cancel-in-progress: false
 jobs:
   source:
@@ -23,6 +23,7 @@ jobs:
       artifact: ${{ steps.source.outputs.artifact }}
       buildx_version: ${{ steps.lock.outputs.buildx_version }}
       buildkit_driver: ${{ steps.lock.outputs.buildkit_driver }}
+      qemu_image: ${{ steps.lock.outputs.qemu_image }}
       skopeo_image: ${{ steps.lock.outputs.skopeo_image }}
       standard_base: ${{ steps.lock.outputs.standard_base }}
       docker_base: ${{ steps.lock.outputs.docker_base }}
@@ -66,8 +67,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
+          image: ${{ needs.source.outputs.qemu_image }}
           platforms: amd64,arm64
       - uses: >-
           docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
@@ -130,6 +133,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -225,6 +229,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: runtime-standard-${{ needs.source.outputs.run_identity }}
@@ -259,6 +267,10 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: candidate-standard-${{ needs.source.outputs.run_identity }}
