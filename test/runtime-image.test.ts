@@ -68,6 +68,7 @@ test("runtime archive verifier binds both platform manifests and smoke tests", a
 	);
 	assert.match(verifier, /loadRuntimeLock/);
 	assert.match(verifier, /archiveIdentity/);
+	assert.match(verifier, /name: "runtime\.oci\.tar"/);
 	assert.match(verifier, /indexDigest/);
 	assert.match(verifier, /platformDigests/);
 	assert.match(verifier, /OCI blob size mismatch/);

@@ -104,7 +104,7 @@ async function archiveIdentity(path) {
 	const hash = createHash("sha256");
 	for await (const chunk of createReadStream(path)) hash.update(chunk);
 	return {
-		name: basename(path),
+		name: "runtime.oci.tar",
 		sha256: `sha256:${hash.digest("hex")}`,
 		size: (await stat(path)).size,
 	};
