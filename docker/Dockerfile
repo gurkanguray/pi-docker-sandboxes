@@ -36,7 +36,10 @@ ARG SOURCE_SHA=unknown
 USER root
 COPY --from=runtime /opt/pi-runtime /opt/pi-runtime
 COPY --from=runtime /usr/local/bin/fd /usr/local/bin/fd
-RUN ln -s /opt/pi-runtime/node_modules/.bin/pi /usr/local/bin/pi
+RUN set -eux; \
+    rm /usr/libexec/docker/cli-plugins/docker-buildx; \
+    test ! -e /usr/libexec/docker/cli-plugins/docker-buildx; \
+    ln -s /opt/pi-runtime/node_modules/.bin/pi /usr/local/bin/pi
 LABEL org.opencontainers.image.source="https://github.com/gurkanguray/pi-docker-sandboxes" \
       org.opencontainers.image.revision="${SOURCE_SHA}" \
       org.opencontainers.image.version="runtime-1" \

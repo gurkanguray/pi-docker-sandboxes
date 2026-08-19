@@ -46,6 +46,14 @@ test("runtime source is locked, controller-independent, and multi-platform", asy
 	assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
 	assert.match(dockerfile, /runtime-package-lock\.json/);
 	assert.match(dockerfile, /sha256sum --check/);
+	assert.match(
+		dockerfile,
+		/rm \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	);
+	assert.match(
+		dockerfile,
+		/test ! -e \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	);
 	assert.match(dockerfile, /USER agent\s*$/m);
 	assert.match(dockerfile, /io\.pi-docker-sandboxes\.runtime-schema/);
 	assert.match(dockerfile, /io\.pi-docker-sandboxes\.variant/);
@@ -73,5 +81,9 @@ test("runtime archive verifier binds both platform manifests and smoke tests", a
 	assert.match(verifier, /fd --version/);
 	assert.match(verifier, /rg --version/);
 	assert.match(verifier, /git --version/);
+	assert.match(
+		verifier,
+		/test ! -e \/usr\/libexec\/docker\/cli-plugins\/docker-buildx/,
+	);
 	assert.match(verifier, /runtime-image-receipt\.json/);
 });

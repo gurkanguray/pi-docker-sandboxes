@@ -128,7 +128,9 @@ async function inspectArchive(archive, variant, sourceSha) {
 			);
 		for (const reference of attestationReferences)
 			if (!Object.values(platformDigests).includes(reference))
-				throw new Error(`attestation references unknown manifest: ${reference}`);
+				throw new Error(
+					`attestation references unknown manifest: ${reference}`,
+				);
 		return { indexDigest, platformDigests, labels };
 	} finally {
 		await rm(layout, { recursive: true, force: true });
@@ -166,7 +168,11 @@ async function smokeArchive(archive, variant) {
 				tag,
 				"sh",
 				"-lc",
-				'test "$(pi --version)" = "0.84.1" && test "$(fd --version)" = "fd 10.3.0" && rg --version && git --version && test "$(id -u)" = 1000',
+				`test "$(pi --version)" = "0.84.1" && test "$(fd --version)" = "fd 10.3.0" && rg --version && git --version && test "$(id -u)" = 1000${
+					variant === "standard"
+						? " && test ! -e /usr/libexec/docker/cli-plugins/docker-buildx"
+						: ""
+				}`,
 			]);
 		} finally {
 			await run("docker", ["image", "rm", "--force", tag]).catch(() => {});
