@@ -238,6 +238,17 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 			verifyIndex < pushIndex,
 		"environment verification must precede publication",
 	);
+	const pushRun = stepNamed(
+		publish,
+		"Push unique candidate and bind registry digest",
+	).run ?? "";
+	assert.match(
+		pushRun,
+		/\$HOME\/\.docker\/config\.json:\/tmp\/auth\.json:ro/,
+	);
+	assert.equal(pushRun.match(/--authfile \/tmp\/auth\.json/g)?.length, 2);
+	assert.doesNotMatch(pushRun, /\$HOME\/\.docker:\/root\/\.docker/);
+
 	const environmentRun = publish.steps?.[verifyIndex]?.run ?? "";
 	for (const check of [
 		'gh api "$endpoint"',
