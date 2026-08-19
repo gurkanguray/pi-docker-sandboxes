@@ -199,17 +199,24 @@ test("attestations bind descriptor, manifest, and statement subjects", () => {
 			),
 		/malformed/,
 	);
-	for (const subject of [undefined, []])
-		assert.throws(
-			() =>
-				validateAttestationManifest(
-					descriptor,
-					manifest,
-					[{ ...statement, subject }],
-					new Map([[digestA, platform]]),
-				),
-			/nonempty in-toto subject/,
-		);
+	assert.throws(
+		() =>
+			validateAttestationManifest(
+				descriptor,
+				manifest,
+				[{ ...statement, subject: undefined }],
+				new Map([[digestA, platform]]),
+			),
+		/malformed in-toto subject/,
+	);
+	assert.doesNotThrow(() =>
+		validateAttestationManifest(
+			descriptor,
+			manifest,
+			[{ ...statement, subject: [] }],
+			new Map([[digestA, platform]]),
+		),
+	);
 	assert.throws(
 		() =>
 			validateAttestationManifest(

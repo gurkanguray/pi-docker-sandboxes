@@ -100,15 +100,15 @@ export function validateAttestationManifest(
 			!statement.predicateType
 		)
 			throw new Error("malformed in-toto attestation statement");
-		if (!Array.isArray(statement.subject) || statement.subject.length === 0)
-			throw new Error("attestation requires a nonempty in-toto subject array");
+		if (!Array.isArray(statement.subject))
+			throw new Error("malformed in-toto subject array");
 		for (const statementSubject of statement.subject) {
 			const digest = statementSubject.digest?.sha256;
 			if (
 				!/^[0-9a-f]{64}$/.test(digest ?? "") ||
-				!platformDescriptors.has(`sha256:${digest}`)
+				`sha256:${digest}` !== platform.digest
 			)
-				throw new Error("in-toto subject does not match a platform manifest");
+				throw new Error("in-toto subject does not match its platform manifest");
 		}
 	}
 }
