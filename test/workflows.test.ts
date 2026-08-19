@@ -615,7 +615,7 @@ test("release workflows are valid npm-only gates", async () => {
 	);
 	assert.match(e2eTest, /\/docker-sandbox doctor/);
 	assert.match(e2eTest, /PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT/);
-	assert.match(e2eTest, /importControllerModule\(installedPackageRoot/);
+	assert.match(e2eTest, /importControllerModule\(\s*installedPackageRoot/);
 	assert.doesNotMatch(e2eTest, /^import .*from "\.\.\/src\//m);
 	assert.match(e2eTest, /PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT/);
 	assert.match(e2eTest, /imageLock\.piVersion, "0\.84\.1"/);
