@@ -34,7 +34,8 @@ export async function finalizeRuntimeReceipt({
 		receipt.sourceSha !== sourceSha ||
 		archive.name !== "runtime.oci.tar" ||
 		JSON.stringify(receipt.archive) !== JSON.stringify(archive) ||
-		Object.keys(receipt.platformDigests ?? {}).length !== 2
+		Object.keys(receipt.platformDigests ?? {}).length !== 2 ||
+		Object.keys(receipt.platformConfigDigests ?? {}).length !== 2
 	)
 		throw new Error("runtime receipt identity is invalid");
 	const evidenceNames = (await readdir(evidenceDirectory))
@@ -53,7 +54,9 @@ export async function finalizeRuntimeReceipt({
 			evidence.variant !== variant ||
 			evidence.sourceSha !== sourceSha ||
 			evidence.indexDigest !== receipt.indexDigest ||
-			evidence.platformDigest !== receipt.platformDigests[evidence.platform] ||
+			evidence.manifestDigest !== receipt.platformDigests[evidence.platform] ||
+			evidence.configDigest !==
+				receipt.platformConfigDigests[evidence.platform] ||
 			seen.has(evidence.platform)
 		)
 			throw new Error(`platform evidence identity mismatch: ${name}`);

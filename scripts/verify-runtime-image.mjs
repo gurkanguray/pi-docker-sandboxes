@@ -263,6 +263,7 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 			indexDigest = descriptor.digest;
 		}
 		const platformDigests = {};
+		const platformConfigDigests = {};
 		const platformDescriptors = new Map();
 		let labels;
 		const requiredDescriptors = validatePlatformDescriptors(
@@ -305,6 +306,7 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 				throw new Error(`${platform} final user is not agent`);
 			labels ??= currentLabels;
 			platformDigests[platform] = descriptor.digest;
+			platformConfigDigests[platform] = manifest.config.digest;
 			platformDescriptors.set(descriptor.digest, descriptor);
 		}
 		const attestationReferences = [];
@@ -339,7 +341,7 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 			);
 		}
 		validateAttestationCoverage(attestationReferences, platformDescriptors);
-		return { indexDigest, platformDigests, labels };
+		return { indexDigest, platformDigests, platformConfigDigests, labels };
 	} finally {
 		await rm(layout, { recursive: true, force: true });
 	}

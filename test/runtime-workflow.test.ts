@@ -43,6 +43,7 @@ const pullRequestPaths = [
 	"scripts/finalize-runtime-receipt.mjs",
 	"scripts/runtime-build-args.mjs",
 	"scripts/runtime-lock.mjs",
+	"scripts/runtime-platform-evidence.mjs",
 	"scripts/verify-runtime-environment.mjs",
 	"scripts/verify-runtime-image.mjs",
 	"test/runtime-image.test.ts",
@@ -147,10 +148,42 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 	assert.equal(buildStep.with?.provenance, "mode=max");
 	assert.equal(buildStep.with?.push, false);
 
+	const select = stepNamed(security, "Select exact verified platform manifest");
+	assert.equal(select.env?.SKOPEO_IMAGE, "${{ needs.source.outputs.skopeo_image }}");
+	assert.match(select.run ?? "", /runtime-platform-evidence\.mjs select/);
+	assert.match(select.run ?? "", /runtime-image-receipt\.json/);
+	assert.match(select.run ?? "", /\"\$ARCH\"/);
+	assert.match(select.run ?? "", /docker run --rm/);
+	assert.match(select.run ?? "", /\"\$SKOPEO_IMAGE\" copy/);
+	assert.match(select.run ?? "", /oci:\/work\/platform\/selector/);
+	assert.match(
+		select.run ?? "",
+		/docker-archive:\/work\/platform\/\$archive/,
+	);
+	assert.doesNotMatch(select.run ?? "", /--override-(?:arch|os)/);
+	const inspect = stepNamed(security, "Inspect and verify exported platform archive");
+	assert.match(inspect.run ?? "", /\"\$SKOPEO_IMAGE\" inspect/);
+	assert.match(inspect.run ?? "", /--raw/);
+	assert.match(inspect.run ?? "", /--config/);
+	assert.match(inspect.run ?? "", /runtime-platform-evidence\.mjs verify-export/);
+
 	const scan = stepNamed(security, "Scan exact platform manifest");
+	assert.equal(
+		scan.with?.input,
+		`runtime/platform/runtime-${sourceVariant}-${"${{ matrix.arch }}"}.docker.tar`,
+	);
 	assert.equal(scan.with?.severity, "HIGH,CRITICAL");
 	assert.equal(scan.with?.["ignore-unfixed"], false);
 	assert.equal(scan.with?.["exit-code"], "1");
+	assert.equal(scan.with?.["additional-args"], undefined);
+	const sbom = stepNamed(security, "Generate exact platform CycloneDX SBOM");
+	assert.equal(
+		sbom.with?.input,
+		`runtime/platform/runtime-${sourceVariant}-${"${{ matrix.arch }}"}.docker.tar`,
+	);
+	assert.equal(sbom.with?.["additional-args"], undefined);
+	const bind = stepNamed(security, "Bind platform evidence identities");
+	assert.match(bind.run ?? "", /runtime-platform-evidence\.mjs bind/);
 	for (const job of Object.values(workflow.jobs))
 		for (const step of job.steps ?? []) {
 			for (const key of Object.keys(step.with ?? {}))
@@ -228,6 +261,18 @@ test("runtime workflow policy rejects security and publication weakening", async
 					value.jobs.build,
 					"Build exact multi-platform archive without cache",
 				).with!.provenance;
+			},
+		],
+		[
+			"arm64 selector reuses amd64",
+			(value) => {
+				stepNamed(
+					value.jobs.security,
+					"Select exact verified platform manifest",
+				).run = stepNamed(
+					value.jobs.security,
+					"Select exact verified platform manifest",
+				).run!.replace('"$ARCH"', '"amd64"');
 			},
 		],
 		[

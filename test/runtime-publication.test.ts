@@ -11,6 +11,8 @@ import { loadRuntimeLock, runtimeBuildArgs } from "../scripts/runtime-lock.mjs";
 // @ts-expect-error executable script module has no declaration file
 import { verifyRuntimeEnvironment } from "../scripts/verify-runtime-environment.mjs";
 // @ts-expect-error executable script module has no declaration file
+import { validatePlatformEvidenceDocuments } from "../scripts/runtime-platform-evidence.mjs";
+// @ts-expect-error executable script module has no declaration file
 const verifierModule = await import("../scripts/verify-runtime-image.mjs");
 const {
 	readDescriptor,
@@ -359,6 +361,58 @@ test("exactly one attestation manifest targets each required platform", () => {
 		);
 });
 
+test("platform evidence rejects amd64 reused for arm64", () => {
+	const archiveName = "runtime-standard-arm64.docker.tar";
+	const sarif = {
+		version: "2.1.0",
+		runs: [
+			{
+				properties: { imageID: digestA, imageName: `/workspace/${archiveName}` },
+			},
+		],
+	};
+	const sbom = {
+		metadata: {
+			component: {
+				type: "container",
+				name: `/workspace/${archiveName}`,
+				properties: [
+					{ name: "aquasecurity:trivy:ImageID", value: digestA },
+				],
+			},
+		},
+	};
+	assert.throws(
+		() =>
+			validatePlatformEvidenceDocuments({
+				sarif,
+				sbom,
+				archiveName,
+				platform: "linux/arm64",
+				manifestDigest: digestB,
+				configDigest: digestB,
+			}),
+		/Trivy SARIF config identity mismatch/,
+	);
+	const bound = validatePlatformEvidenceDocuments({
+		sarif: structuredClone(sarif),
+		sbom: structuredClone(sbom),
+		archiveName,
+		platform: "linux/arm64",
+		manifestDigest: digestB,
+		configDigest: digestA,
+	});
+	assert.equal(bound.sarif.runs[0].properties.platform, "linux/arm64");
+	assert.deepEqual(
+		bound.sbom.metadata.component.properties.slice(-3),
+		[
+			{ name: "io.pi-docker-sandboxes.platform", value: "linux/arm64" },
+			{ name: "io.pi-docker-sandboxes.manifest-digest", value: digestB },
+			{ name: "io.pi-docker-sandboxes.config-digest", value: digestA },
+		],
+	);
+});
+
 test("final receipt rejects incomplete, mismatched, and tampered evidence", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "runtime-evidence-"));
 	try {
@@ -376,9 +430,13 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			},
 			indexDigest: digestA,
 			platformDigests: { "linux/amd64": digestA, "linux/arm64": digestB },
+			platformConfigDigests: {
+				"linux/amd64": digestA,
+				"linux/arm64": digestB,
+			},
 		};
 		await writeFile(receiptPath, JSON.stringify(receipt));
-		for (const [arch, platformDigest] of [
+		for (const [arch, manifestDigest] of [
 			["amd64", digestA],
 			["arm64", digestB],
 		]) {
@@ -393,7 +451,11 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 					sourceSha: receipt.sourceSha,
 					indexDigest: digestA,
 					platform: `linux/${arch}`,
-					platformDigest,
+					manifestDigest,
+					configDigest:
+						receipt.platformConfigDigests[
+							arch === "amd64" ? "linux/amd64" : "linux/arm64"
+						],
 					scan: { name: `runtime-standard-${arch}.sarif`, sha256: sha(scan) },
 					sbom: {
 						name: `runtime-standard-${arch}.cdx.json`,
@@ -409,6 +471,26 @@ test("final receipt rejects incomplete, mismatched, and tampered evidence", asyn
 			sourceSha: receipt.sourceSha,
 			variant: "standard",
 		});
+		const armEvidencePath = join(
+			directory,
+			"runtime-standard-arm64.evidence.json",
+		);
+		const armEvidence = JSON.parse(await readFile(armEvidencePath, "utf8"));
+		await writeFile(
+			armEvidencePath,
+			JSON.stringify({ ...armEvidence, configDigest: digestA }),
+		);
+		await assert.rejects(
+			finalizeRuntimeReceipt({
+				receiptPath,
+				archivePath,
+				evidenceDirectory: directory,
+				sourceSha: receipt.sourceSha,
+				variant: "standard",
+			}),
+			/platform evidence identity mismatch/,
+		);
+		await writeFile(armEvidencePath, JSON.stringify(armEvidence));
 		await writeFile(archivePath, "tampered-archive");
 		await assert.rejects(
 			finalizeRuntimeReceipt({
