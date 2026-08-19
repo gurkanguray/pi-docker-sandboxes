@@ -181,7 +181,8 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 				owned
 					.filter(
 						(process) =>
-							process.processGroup === processGroup && pids.includes(process.pid),
+							process.processGroup === processGroup &&
+							pids.includes(process.pid),
 					)
 					.map((process) => process.pid)
 					.sort((left, right) => left - right),
