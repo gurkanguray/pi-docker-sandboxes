@@ -366,9 +366,15 @@ jobs:
             imageDigest: expected.IMAGE_DIGEST,
             runtimeReference: expected.RUNTIME_REFERENCE,
             runtimeReceipt,
-            scanRef: "production-runtime/raw-sarif",
-            sbomRef: "production-runtime/cyclonedx",
-            provenanceRef: "production-runtime/runtime-provenance.json",
+            runtimeScanAssets: [
+              "runtime-standard-amd64.sarif",
+              "runtime-standard-arm64.sarif",
+            ],
+            runtimeSbomAssets: [
+              "runtime-standard-amd64.cdx.json",
+              "runtime-standard-arm64.cdx.json",
+            ],
+            runtimeProvenanceAsset: "runtime-provenance.json",
             freshInstallReceipt,
             e2eReceipt,
             e2eReceipts,

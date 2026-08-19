@@ -100,6 +100,14 @@ jobs:
           const npmProvenance = JSON.parse(await readFile(
             "release-assets/npm-provenance/verified-provenance.json",
           ));
+          const expectedRuntimeScanAssets = [
+            "runtime-standard-amd64.sarif",
+            "runtime-standard-arm64.sarif",
+          ];
+          const expectedRuntimeSbomAssets = [
+            "runtime-standard-amd64.cdx.json",
+            "runtime-standard-arm64.cdx.json",
+          ];
           if (candidate.releaseRunId !== Number(process.env.GITHUB_RUN_ID))
             throw new Error(
               "GitHub Release resume is limited to retries of the " +
@@ -120,11 +128,24 @@ jobs:
               npmProvenance.version !== candidate.version ||
               npmProvenance.integrity !== candidate.tarballIntegrity ||
               npmProvenance.sourceSha !== candidate.sourceSha ||
+              JSON.stringify(candidate.runtimeScanAssets) !==
+                JSON.stringify(expectedRuntimeScanAssets) ||
+              JSON.stringify(candidate.runtimeSbomAssets) !==
+                JSON.stringify(expectedRuntimeSbomAssets) ||
+              candidate.runtimeProvenanceAsset !==
+                "runtime-provenance.json" ||
               !install.cleanup?.packageRemoved ||
               !install.cleanup?.packageRecordRemoved ||
               !install.cleanup?.prefixRemoved ||
               !install.cleanup?.piHomeRemoved)
             throw new Error("release evidence is incomplete");
+          await Promise.all([
+            ...candidate.runtimeScanAssets,
+            ...candidate.runtimeSbomAssets,
+          ].map((name) => readFile(`release-assets/runtime/evidence/${name}`)));
+          await readFile(
+            `release-assets/runtime/${candidate.runtimeProvenanceAsset}`,
+          );
           await writeFile("release-assets/release-provenance.json",
             `${JSON.stringify({
               releaseRunId: candidate.releaseRunId,
@@ -133,7 +154,9 @@ jobs:
               packageIntegrity: candidate.tarballIntegrity,
               runtimeReference: candidate.runtimeReference,
               packageProvenance: "verified-provenance.json",
-              runtimeProvenance: "runtime-provenance.json",
+              runtimeScanAssets: candidate.runtimeScanAssets,
+              runtimeSbomAssets: candidate.runtimeSbomAssets,
+              runtimeProvenance: candidate.runtimeProvenanceAsset,
             }, null, 2)}\n`);
           NODE
           declare -A release_asset_names=()

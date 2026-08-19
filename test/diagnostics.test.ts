@@ -115,7 +115,10 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 test("doctor is observational and preserves abandoned host staging", async () => {
 	const cwd = await repository();
 	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-agent-"));
-	const staging = await createOwnedHostStaging(tmpdir(), {
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-diagnostics-tmp-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = parent;
+	const staging = await createOwnedHostStaging(parent, {
 		pid: 2_147_483_647,
 	});
 	try {
@@ -136,7 +139,9 @@ test("doctor is observational and preserves abandoned host staging", async () =>
 		});
 		await access(staging);
 	} finally {
-		await rm(staging, { recursive: true, force: true });
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		await rm(parent, { recursive: true, force: true });
 	}
 });
 
@@ -419,20 +424,33 @@ test("Linux host-addressable Docker storage contributes low disk warning", async
 	);
 });
 
-test("status receipt is observational and skips doctor probes", async () => {
+test("status receipt is observational and skips probes and cleanup", async () => {
 	const cwd = await repository();
 	const commands: string[] = [];
-	const receipt = await buildStatusReceipt({
-		cwd,
-		client: client(),
-		runCommand: async (command) => {
-			commands.push(command);
-			throw new Error("status must not probe commands");
-		},
-		certifyPlatform: async () => {
-			throw new Error("status must not certify host");
-		},
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-status-tmp-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = parent;
+	const staging = await createOwnedHostStaging(parent, {
+		pid: 2_147_483_647,
 	});
-	assert.equal(receipt.kind, "pi-dsbx.status");
+	try {
+		const receipt = await buildStatusReceipt({
+			cwd,
+			client: client(),
+			runCommand: async (command) => {
+				commands.push(command);
+				throw new Error("status must not probe commands");
+			},
+			certifyPlatform: async () => {
+				throw new Error("status must not certify host");
+			},
+		});
+		assert.equal(receipt.kind, "pi-dsbx.status");
+		await access(staging);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		await rm(parent, { recursive: true, force: true });
+	}
 	assert.deepEqual(commands, []);
 });

@@ -6,6 +6,7 @@ import {
 	mkdtemp,
 	readFile,
 	realpath,
+	rm,
 	symlink,
 	writeFile,
 	access,
@@ -30,6 +31,7 @@ import {
 } from "../src/lease.ts";
 import { sessionBackupRoot } from "../src/sessions.ts";
 import {
+	createOwnedHostStaging,
 	inspectRepository,
 	loadSandboxState,
 	sandboxName,
@@ -81,18 +83,31 @@ test("all mutating commands certify the host before mutation", async () => {
 	}
 });
 
-test("observational session listing remains available on uncertified hosts", async (t) => {
+test("observational session listing remains available without cleanup", async (t) => {
 	let certifications = 0;
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-sessions-tmp-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = parent;
+	const staging = await createOwnedHostStaging(parent, {
+		pid: 2_147_483_647,
+	});
 	t.mock.method(console, "log", () => undefined);
-	assert.equal(
-		await main(["sessions", "list", "--name", "fixture"], {
-			certifyHost: async () => {
-				certifications++;
-				throw new Error("unsupported host fixture");
-			},
-		}),
-		0,
-	);
+	try {
+		assert.equal(
+			await main(["sessions", "list", "--name", "fixture"], {
+				certifyHost: async () => {
+					certifications++;
+					throw new Error("unsupported host fixture");
+				},
+			}),
+			0,
+		);
+		await access(staging);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		await rm(parent, { recursive: true, force: true });
+	}
 	assert.equal(certifications, 0);
 });
 

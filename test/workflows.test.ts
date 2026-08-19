@@ -332,6 +332,17 @@ test("release workflows are valid npm-only gates", async () => {
 			receiptRun.includes(check),
 			`${check} must bind candidate version evidence`,
 		);
+	for (const reference of [
+		"runtimeScanAssets",
+		"runtimeSbomAssets",
+		"runtimeProvenanceAsset",
+		"runtime-standard-amd64.sarif",
+		"runtime-standard-arm64.cdx.json",
+	])
+		assert.ok(
+			receiptRun.includes(reference),
+			`${reference} must name exact runtime release assets`,
+		);
 
 	const publication = release.jobs["verify-publication"];
 	assert.deepEqual(publication.needs, [
@@ -391,7 +402,15 @@ test("release workflows are valid npm-only gates", async () => {
 	);
 	assert.match(
 		releaseAssembly ?? "",
-		/runtimeProvenance:\s*"runtime-provenance\.json"/,
+		/runtimeProvenance:\s*candidate\.runtimeProvenanceAsset/,
+	);
+	assert.match(
+		releaseAssembly ?? "",
+		/runtimeScanAssets:\s*candidate\.runtimeScanAssets/,
+	);
+	assert.match(
+		releaseAssembly ?? "",
+		/runtimeSbomAssets:\s*candidate\.runtimeSbomAssets/,
 	);
 	assert.match(releaseAssembly ?? "", /name="\$\{asset##\*\/\}"/);
 	assert.match(releaseAssembly ?? "", /printf '%s  %s\\n'/);

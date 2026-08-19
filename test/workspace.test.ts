@@ -103,6 +103,34 @@ const gitInput: GitInputRunner = (cwd, args, stdin) =>
 		child.stdin?.end(stdin);
 	});
 
+test("repository inspection disables Git optional locks", async () => {
+	const root = await repository();
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-git-wrapper-"));
+	const log = join(directory, "optional-locks.log");
+	const wrapper = join(directory, "git");
+	const realGit = (await exec("which", ["git"], { encoding: "utf8" })).stdout.trim();
+	await writeFile(
+		wrapper,
+		`#!/bin/sh\nprintf '%s\\n' "\${GIT_OPTIONAL_LOCKS-unset}" >> "$GIT_ENV_LOG"\nexec "$REAL_GIT" "$@"\n`,
+	);
+	await chmod(wrapper, 0o755);
+	const originalPath = process.env.PATH;
+	let observed = "";
+	try {
+		process.env.PATH = `${directory}:${originalPath}`;
+		process.env.GIT_ENV_LOG = log;
+		process.env.REAL_GIT = realGit;
+		await inspectRepository(root);
+		observed = await readFile(log, "utf8");
+	} finally {
+		process.env.PATH = originalPath;
+		delete process.env.GIT_ENV_LOG;
+		delete process.env.REAL_GIT;
+		await rm(directory, { recursive: true, force: true });
+	}
+	assert.ok(observed.trim().split("\n").every((value) => value === "0"));
+});
+
 test("unborn repositories are identified and can receive an explicit empty commit", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-unborn-"));
 	await git(root, "init", "-b", "main");
