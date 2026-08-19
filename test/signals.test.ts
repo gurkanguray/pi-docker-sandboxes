@@ -489,7 +489,9 @@ test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 		wrapper.output,
 	);
 	assert.ok(Number(wrapper.output.match(/process-group:(\d+)/)?.[1]) > 0);
-	assert.ok(Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]) > 0);
+	assert.ok(
+		Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]) > 0,
+	);
 	await wrapper.assertNoOwnedProcesses();
 });
 

@@ -145,9 +145,8 @@ test("Kit enforces runtime modes with restrictive umask and an existing director
 	}
 	assert.equal((await stat(runtimeDirectory)).mode & 0o777, 0o700);
 	assert.equal(
-		(
-			await stat(join(runtimeDirectory, "pi-docker-sandboxes.mjs"))
-		).mode & 0o777,
+		(await stat(join(runtimeDirectory, "pi-docker-sandboxes.mjs"))).mode &
+			0o777,
 		0o600,
 	);
 });
