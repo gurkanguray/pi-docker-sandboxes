@@ -7,7 +7,7 @@
 | Host Pi (latest tested) | 0.84.2 |
 | Host Pi requirement | `>=0.84.1 <0.85.0` |
 | Standard runtime Pi (independent image lock) | `0.84.1` |
-| Node.js | `^22.19.0 || ^24.12.0` |
+| Node.js | `^22.19.0 \|\| ^24.12.0` |
 | Docker | 29+ |
 | Docker Sandboxes | 0.38.x |
 | Runtime schema | 1 |
