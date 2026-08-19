@@ -318,10 +318,13 @@ jobs:
               image_lock_pi_version=""
             fi
           fi
-          if command -v sw_vers >/dev/null 2>&1; then
-            host_version="$(sw_vers -productVersion)"
+          if test "${{ matrix.host-platform }}" = darwin; then
+            host_os_name="$(sw_vers -productName)"
+            host_os_version="$(sw_vers -productVersion)"
           else
-            host_version="$(uname -r)"
+            test -r /etc/os-release
+            host_os_name="$(. /etc/os-release; printf '%s' "$ID")"
+            host_os_version="$(. /etc/os-release; printf '%s' "$VERSION_ID")"
           fi
           set +e
           node scripts/e2e-receipt.mjs \
@@ -336,7 +339,8 @@ jobs:
             --status "$status" \
             --tests-count "$count" \
             --expected-platform "${{ matrix.host-platform }}" \
-            --host-version "$host_version" \
+            --os-name "$host_os_name" \
+            --os-version "$host_os_version" \
             --expected-architecture "${{ matrix.host-arch }}" \
             --require-kvm "${{ matrix.requires-kvm }}" \
             --docker-version "$docker_version" \
@@ -371,7 +375,8 @@ jobs:
             imageDigest: process.env.IMAGE_DIGEST,
             selectedImage: process.env.SELECTED_IMAGE || null,
             platform: process.platform,
-            hostVersion: null,
+            osName: null,
+            osVersion: null,
             architecture: process.arch,
             kvm: {
               required: process.env.KVM_REQUIRED === "true",

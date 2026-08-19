@@ -78,10 +78,14 @@ export interface DiagnosticsOptions {
 }
 
 function shareable(value: string): string {
-	const sanitized = sanitizeDetail(value, 200);
-	if (/^(?:\/|[A-Za-z]:[\\/])/.test(sanitized)) return "[private-path]";
+	let sanitized = sanitizeDetail(value, 200);
+	for (const quotedPath of [
+		/"(?:\/|[A-Za-z]:[\\/]|\\\\)[^"\r\n]*"/g,
+		/'(?:\/|[A-Za-z]:[\\/]|\\\\)[^'\r\n]*'/g,
+	])
+		sanitized = sanitized.replace(quotedPath, "[private-path]");
 	return sanitized.replace(
-		/(^|\s)(?:\/(?:Users|home|tmp|private|var\/folders)\/[^\s,;]+)/g,
+		/(^|[\s([{=:])(?:\/(?!\/)[^\s,;'"<>()[\]{}]*|[A-Za-z]:[\\/][^\s,;'"<>()[\]{}]*|\\\\[^\s,;'"<>()[\]{}]*)/g,
 		"$1[private-path]",
 	);
 }
@@ -109,10 +113,18 @@ function check(
 }
 
 function failure(id: string, cause: unknown): DiagnosticCheck {
+	const message = cause instanceof Error ? cause.message : String(cause);
+	const code =
+		typeof cause === "object" &&
+		cause !== null &&
+		"code" in cause &&
+		typeof cause.code === "string"
+			? cause.code
+			: undefined;
 	return check(
 		id,
 		"fail",
-		cause instanceof Error ? cause.message : String(cause),
+		code && !message.includes(code) ? `${code}: ${message}` : message,
 	);
 }
 
@@ -128,35 +140,74 @@ async function defaultCommand(
 	).stdout.trim();
 }
 
-function versionTuple(value: string): [number, number, number] | undefined {
-	const match = value.match(/v?(\d+)\.(\d+)\.(\d+)/);
-	return match
-		? [Number(match[1]), Number(match[2]), Number(match[3])]
-		: undefined;
+interface ParsedVersion {
+	core: [number, number, number];
+	prerelease?: string[];
+	build?: string;
 }
 
-function compareVersion(
-	left: readonly number[],
-	right: readonly number[],
-): number {
+function parseVersion(value: string): ParsedVersion | undefined {
+	const match = value.match(
+		/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/,
+	);
+	if (!match) return undefined;
+	return {
+		core: [Number(match[1]), Number(match[2]), Number(match[3])],
+		...(match[4] ? { prerelease: match[4].split(".") } : {}),
+		...(match[5] ? { build: match[5] } : {}),
+	};
+}
+
+function compareVersion(left: ParsedVersion, right: ParsedVersion): number {
 	for (let index = 0; index < 3; index++) {
-		const difference = (left[index] ?? 0) - (right[index] ?? 0);
+		const difference = left.core[index]! - right.core[index]!;
 		if (difference) return difference;
+	}
+	if (!left.prerelease) return right.prerelease ? 1 : 0;
+	if (!right.prerelease) return -1;
+	for (
+		let index = 0;
+		index < Math.max(left.prerelease.length, right.prerelease.length);
+		index++
+	) {
+		const leftPart = left.prerelease[index];
+		const rightPart = right.prerelease[index];
+		if (leftPart === undefined) return -1;
+		if (rightPart === undefined) return 1;
+		if (leftPart === rightPart) continue;
+		const leftNumber = /^\d+$/.test(leftPart) ? Number(leftPart) : undefined;
+		const rightNumber = /^\d+$/.test(rightPart) ? Number(rightPart) : undefined;
+		if (leftNumber !== undefined && rightNumber !== undefined)
+			return leftNumber - rightNumber;
+		if (leftNumber !== undefined) return -1;
+		if (rightNumber !== undefined) return 1;
+		return leftPart.localeCompare(rightPart);
 	}
 	return 0;
 }
 
 function supportedVersion(version: string, range: string): boolean {
-	const actual = versionTuple(version);
+	const actual = parseVersion(version);
 	if (!actual) return false;
 	return range.split("||").some((alternative) => {
-		const clauses = [...alternative.matchAll(/(\^|>=|>|<=|<)?\s*(\d+\.\d+\.\d+)/g)];
-		return clauses.length > 0 && clauses.every(([, operator = "", expected]) => {
-			const target = versionTuple(expected!);
-			if (!target) return false;
-			const compared = compareVersion(actual, target);
+		const clauses = [
+			...alternative.matchAll(
+				/(\^|>=|>|<=|<)?\s*(v?\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)/g,
+			),
+		];
+		const targets = clauses.map(([, , expected]) => parseVersion(expected!));
+		if (
+			clauses.length === 0 ||
+			targets.some((target) => !target) ||
+			(actual.prerelease && !targets.some((target) => target?.prerelease)) ||
+			(actual.build && !targets.some((target) => target?.build))
+		)
+			return false;
+		return clauses.every(([, operator = ""], index) => {
+			const target = targets[index]!;
+			const compared = compareVersion(actual, target!);
 			if (operator === "^")
-				return compared >= 0 && actual[0] === target[0];
+				return compared >= 0 && actual.core[0] === target!.core[0];
 			if (operator === ">=") return compared >= 0;
 			if (operator === ">") return compared > 0;
 			if (operator === "<=") return compared <= 0;
@@ -233,8 +284,7 @@ export async function buildDoctorReceipt(
 	);
 
 	try {
-		const version = await runCommand("pi", ["--version"]);
-		const detectedVersion = version.match(/\d+\.\d+\.\d+/)?.[0] ?? version;
+		const detectedVersion = (await runCommand("pi", ["--version"])).trim();
 		const compatible = supportedVersion(detectedVersion, HOST_PI_RANGE);
 		checks.push(
 			check(

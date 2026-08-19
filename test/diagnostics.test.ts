@@ -108,6 +108,75 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 	assert.equal(diagnosticsExitCode(receipt), 0);
 });
 
+test("doctor rejects prerelease Node and Pi versions for stable ranges", async () => {
+	const cwd = await repository();
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		client: client(),
+		platform: "darwin",
+		arch: "arm64",
+		nodeVersion: "v24.12.0-rc.1",
+		certifyPlatform: async () => ({
+			os: "darwin",
+			arch: "arm64",
+			runtimePlatform: "linux/arm64",
+		}),
+		runCommand: async (command, args) =>
+			command === "pi"
+				? "0.84.2-beta"
+				: args[0] === "info"
+					? cwd
+					: "27.0.0",
+	});
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "node")?.level,
+		"fail",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "pi")?.level,
+		"fail",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "pi")?.data?.version,
+		"0.84.2-beta",
+	);
+});
+
+test("doctor redacts POSIX and Windows paths while retaining failure codes", async () => {
+	const cwd = await repository();
+	const secret = "sk-secretvalue123456";
+	const error = new Error(
+		`denied "/home/alice/private file", '/opt/app/data', /workspace/repo/file, C:\\Users\\Alice\\secret.txt, and "\\\\server\\share\\private file" ${secret}`,
+	) as NodeJS.ErrnoException;
+	error.code = "EACCES";
+	const receipt = await buildDoctorReceipt({
+		cwd,
+		client: client(),
+		platform: "darwin",
+		arch: "arm64",
+		nodeVersion: "v24.12.0",
+		certifyPlatform: () => Promise.reject(error),
+		runCommand: async (command, args) =>
+			command === "pi"
+				? IMAGE_LOCK.piVersion
+				: args[0] === "info"
+					? cwd
+					: "27.0.0",
+	});
+	const summary = receipt.checks.find((entry) => entry.id === "host")?.summary;
+	assert.match(summary ?? "", /EACCES: denied/);
+	assert.equal((summary?.match(/\[private-path\]/g) ?? []).length, 5);
+	for (const privateValue of [
+		"/home/alice",
+		"/opt/app",
+		"/workspace/repo",
+		"C:\\Users\\Alice",
+		"server\\share",
+		secret,
+	])
+		assert.equal(JSON.stringify(receipt).includes(privateValue), false);
+});
+
 test("doctor and status use deterministic nonzero reconciliation exits", async () => {
 	const cwd = await repository();
 	const options = {

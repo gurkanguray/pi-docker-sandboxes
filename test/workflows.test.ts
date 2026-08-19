@@ -320,7 +320,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"e2e.kvm?.required !== facts.kvm",
 		"!e2e.kvm?.characterDevice",
 		"!e2e.kvm?.opened",
-		"e2e.hostVersion",
+		"e2e.osName !== facts.osName",
+		"versionAtLeast(e2e.osVersion, facts.minimumOsVersion)",
 		"e2e.dockerVersion",
 		"e2e.sbxVersion",
 	])
@@ -599,7 +600,11 @@ test("release workflows are valid npm-only gates", async () => {
 	)?.run;
 	assert.match(receiptStep ?? "", /RUNTIME_RECEIPT/);
 	assert.match(receiptStep ?? "", /image_lock_pi_version/);
-	assert.doesNotMatch(receiptStep ?? "", /pi --version/);
+	assert.match(receiptStep ?? "", /sw_vers -productName/);
+	assert.match(receiptStep ?? "", /\/etc\/os-release/);
+	assert.match(receiptStep ?? "", /--os-name "\$host_os_name"/);
+	assert.match(receiptStep ?? "", /--os-version "\$host_os_version"/);
+	assert.doesNotMatch(receiptStep ?? "", /uname -r|pi --version/);
 	const e2eTest = await readFile(
 		new URL("../test/e2e.test.ts", import.meta.url),
 		"utf8",

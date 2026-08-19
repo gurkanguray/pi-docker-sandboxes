@@ -272,18 +272,36 @@ jobs:
             "macos-arm64": {
               platform: "darwin",
               architecture: "arm64",
+              osName: "macOS",
+              minimumOsVersion: "14",
               kvm: false,
             },
             "ubuntu-amd64-kvm": {
               platform: "linux",
               architecture: "x64",
+              osName: "ubuntu",
+              minimumOsVersion: "24.04",
               kvm: true,
             },
             "ubuntu-arm64-kvm": {
               platform: "linux",
               architecture: "arm64",
+              osName: "ubuntu",
+              minimumOsVersion: "24.04",
               kvm: true,
             },
+          };
+          const versionAtLeast = (actual, minimum) => {
+            const left = (actual ?? "").match(/^\d+(?:\.\d+)*$/)?.[0]
+              .split(".").map(Number);
+            const right = minimum.split(".").map(Number);
+            if (!left) return false;
+            for (let index = 0;
+              index < Math.max(left.length, right.length); index++) {
+              if ((left[index] ?? 0) !== (right[index] ?? 0))
+                return (left[index] ?? 0) > (right[index] ?? 0);
+            }
+            return true;
           };
           const e2eReceipts = [];
           for (const host of hardware) {
@@ -318,12 +336,12 @@ jobs:
                 return !facts ||
                   e2e.platform !== facts.platform ||
                   e2e.architecture !== facts.architecture ||
+                  e2e.osName !== facts.osName ||
+                  !versionAtLeast(e2e.osVersion, facts.minimumOsVersion) ||
                   e2e.kvm?.required !== facts.kvm ||
                   (facts.kvm &&
                     (!e2e.kvm?.characterDevice || !e2e.kvm?.opened ||
                       e2e.kvm?.openMode !== "r+")) ||
-                  typeof e2e.hostVersion !== "string" ||
-                  !e2e.hostVersion.trim() ||
                   !Number.isSafeInteger(dockerMajor) || dockerMajor < 29 ||
                   !/^0\.38\./.test(e2e.sbxVersion ?? "") ||
                   e2e.sourceSha !== expected.SOURCE_SHA ||

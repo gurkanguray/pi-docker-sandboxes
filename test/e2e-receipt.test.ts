@@ -56,6 +56,8 @@ async function runReceipt(
 	fixture: Fixture,
 	overrides: Record<string, string> = {},
 ) {
+	const osName = process.platform === "darwin" ? "macOS" : "ubuntu";
+	const osVersion = process.platform === "darwin" ? "14.0" : "24.04";
 	const values = {
 		"source-sha": fixture.sourceSha,
 		package: fixture.tarball,
@@ -71,7 +73,8 @@ async function runReceipt(
 		status: "passed",
 		"tests-count": "1",
 		"expected-platform": process.platform,
-		"host-version": "15.6",
+		"os-name": osName,
+		"os-version": osVersion,
 		"expected-architecture": process.arch,
 		"require-kvm": "false",
 		"docker-version": "29.1.0",
@@ -113,6 +116,16 @@ for (const [name, overrides, message] of [
 		"measured host",
 		{ "expected-architecture": process.arch === "x64" ? "arm64" : "x64" },
 		/measured host/i,
+	],
+	[
+		"host distro",
+		{ "os-name": process.platform === "darwin" ? "ubuntu" : "debian" },
+		/supported host OS/i,
+	],
+	[
+		"host OS version",
+		{ "os-version": process.platform === "darwin" ? "13.9" : "22.04" },
+		/macOS 14|Ubuntu 24\.04/i,
 	],
 	["package version", { "package-version": "9.9.9" }, /package version/i],
 	[
@@ -163,7 +176,8 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			"imageDigest",
 			"selectedImage",
 			"platform",
-			"hostVersion",
+			"osName",
+			"osVersion",
 			"architecture",
 			"kvm",
 			"dockerVersion",
@@ -182,7 +196,8 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			imageDigest,
 			selectedImage: `docker.io/example/pi:local-${"a".repeat(64)}`,
 			platform: process.platform,
-			hostVersion: "15.6",
+			osName: process.platform === "darwin" ? "macOS" : "ubuntu",
+			osVersion: process.platform === "darwin" ? "14.0" : "24.04",
 			architecture: process.arch,
 			kvm: {
 				required: false,

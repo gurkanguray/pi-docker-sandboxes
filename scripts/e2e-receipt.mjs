@@ -46,6 +46,17 @@ function imageIdentity(value) {
 	fail("Image digest must be a sha256 ID or local content tag");
 }
 
+function versionAtLeast(actual, minimum) {
+	const left = actual.match(/^\d+(?:\.\d+)*$/)?.[0].split(".").map(Number);
+	const right = minimum.split(".").map(Number);
+	if (!left) return false;
+	for (let index = 0; index < Math.max(left.length, right.length); index++) {
+		if ((left[index] ?? 0) !== (right[index] ?? 0))
+			return (left[index] ?? 0) > (right[index] ?? 0);
+	}
+	return true;
+}
+
 try {
 	const values = argumentsFrom(process.argv.slice(2));
 	const status = required(values, "status");
@@ -72,9 +83,21 @@ try {
 		fail(
 			`Measured host mismatch: expected ${expectedPlatform}/${expectedArchitecture}, got ${process.platform}/${process.arch}`,
 		);
+	const osName = required(values, "os-name");
+	const osVersion = required(values, "os-version");
 	const requireKvm = required(values, "require-kvm");
 	if (requireKvm !== "true" && requireKvm !== "false")
 		fail("--require-kvm must be true or false");
+	if (process.platform === "darwin") {
+		if (osName !== "macOS") fail(`Supported host OS is macOS; got ${osName}`);
+		if (!versionAtLeast(osVersion, "14"))
+			fail(`macOS 14 or newer is required; got ${osVersion}`);
+	} else if (process.platform === "linux") {
+		if (osName !== "ubuntu")
+			fail(`Supported host OS is Ubuntu; got ${osName}`);
+		if (!versionAtLeast(osVersion, "24.04"))
+			fail(`Ubuntu 24.04 or newer is required; got ${osVersion}`);
+	} else fail(`Supported host OS is macOS or Ubuntu; got ${process.platform}`);
 	const kvm = {
 		required: requireKvm === "true",
 		path: requireKvm === "true" ? "/dev/kvm" : null,
@@ -199,7 +222,8 @@ try {
 		imageDigest: expectedImageDigest,
 		selectedImage,
 		platform: process.platform,
-		hostVersion: required(values, "host-version"),
+		osName,
+		osVersion,
 		architecture: process.arch,
 		kvm,
 		dockerVersion,
