@@ -193,8 +193,11 @@ sandboxTest(
 				"/docker-sandbox doctor",
 			]);
 			assert.equal(doctor.code, 0);
+			const diagnosticOutput = `${doctor.stdout}\n${doctor.stderr}`;
+			assert.match(diagnosticOutput, /sandbox attestation verified/i);
+			assert.match(diagnosticOutput, /host source mount is read-only/i);
 			assert.doesNotMatch(
-				`${doctor.stdout}\n${doctor.stderr}`,
+				diagnosticOutput,
 				/no model selected|api key|authentication failed/i,
 			);
 			const boundary = await client.exec(name, [

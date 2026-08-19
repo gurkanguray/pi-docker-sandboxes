@@ -180,12 +180,12 @@ test("checked-in lock selects the verified production standard runtime", async (
 	});
 	assert.equal(
 		packageJson.devDependencies["@earendil-works/pi-coding-agent"],
-		"0.84.1",
+		"0.84.2",
 	);
 	assert.equal(
 		packageLock.packages[""]?.devDependencies?.[
 			"@earendil-works/pi-coding-agent"
 		],
-		"0.84.1",
+		"0.84.2",
 	);
 });

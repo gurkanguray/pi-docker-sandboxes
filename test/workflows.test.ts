@@ -17,7 +17,9 @@ type Job = {
 	if?: string;
 	needs?: string[];
 	permissions?: Record<string, string>;
+	"runs-on"?: unknown;
 	steps?: Step[];
+	strategy?: { matrix?: Record<string, unknown> };
 	uses?: string;
 	with?: Record<string, unknown>;
 };
@@ -136,7 +138,7 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(e2e, /PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID/);
 	const imageRun = parsed
 		.get("e2e.yml")!
-		.jobs["macos-arm64"]!.steps?.find(
+		.jobs["hardware-e2e"]!.steps?.find(
 			(step) => step.name === "Load and bind the exact OCI candidate",
 		)?.run;
 	assert.ok(imageRun, "E2E image binding step must be executable");
@@ -441,6 +443,102 @@ test("release workflows are valid npm-only gates", async () => {
 		ci,
 		/go run github\.com\/rhysd\/actionlint\/cmd\/actionlint@v1\.7\.7/,
 	);
+	const ciWorkflow = parsed.get("ci.yml")!;
+	assert.deepEqual(ciWorkflow.jobs.compatibility.strategy?.matrix, {
+		node: ["22.19.0", "24.12.0"],
+		pi: ["0.84.1", "0.84.2"],
+	});
+	assert.match(ci, /npm run test:coverage/);
+	assert.match(ci, /docker pull --platform "\$PLATFORM" "\$RUNTIME_REFERENCE"/);
+	assert.deepEqual(ciWorkflow.jobs["package-runtime-smoke"].strategy?.matrix, {
+		include: [
+			{ runner: "ubuntu-24.04", platform: "linux/amd64" },
+			{ runner: "ubuntu-24.04-arm", platform: "linux/arm64" },
+		],
+	});
+	assert.equal(ciWorkflow.jobs.windows["runs-on"], "windows-2025");
+	assert.match(ci, /npm pack --ignore-scripts/);
+
+	const e2eWorkflow = parsed.get("e2e.yml")!;
+	assert.deepEqual(e2eWorkflow.jobs["hardware-e2e"].strategy?.matrix, {
+		include: [
+			{
+				name: "macos-arm64",
+				runner: [
+					"self-hosted",
+					"macOS",
+					"ARM64",
+					"docker-sandboxes",
+					"ephemeral",
+				],
+				platform: "linux/arm64",
+			},
+			{
+				name: "ubuntu-amd64-kvm",
+				runner: [
+					"self-hosted",
+					"Linux",
+					"X64",
+					"docker-sandboxes",
+					"kvm",
+					"ephemeral",
+				],
+				platform: "linux/amd64",
+			},
+			{
+				name: "ubuntu-arm64-kvm",
+				runner: [
+					"self-hosted",
+					"Linux",
+					"ARM64",
+					"docker-sandboxes",
+					"kvm",
+					"ephemeral",
+				],
+				platform: "linux/arm64",
+			},
+		],
+	});
+	for (const evidence of [
+		/PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH/,
+		/PI_CODING_AGENT_DIR/,
+		/cleanup-receipt\.json/,
+		/npm-package-\$SOURCE_SHA/,
+		/oci-candidate-\$SOURCE_SHA/,
+	]) assert.match(e2e, evidence);
+	assert.doesNotMatch(e2e, /continue-on-error:\s*true/);
+	const e2eTest = await readFile(
+		new URL("../test/e2e.test.ts", import.meta.url),
+		"utf8",
+	);
+	assert.match(e2eTest, /\/docker-sandbox doctor/);
+	assert.match(e2eTest, /sandbox attestation verified/i);
+	assert.match(e2eTest, /host source mount is read-only/i);
+	assert.match(
+		releaseText,
+		/test "\$sha" = "\$\(git rev-parse refs\/remotes\/origin\/main\)"/,
+	);
+	assert.match(releaseText, /docker\/image-lock\.json/);
+	assert.match(releaseText, /--all "docker:\/\/\$RUNTIME_REFERENCE"/);
+	assert.doesNotMatch(
+		release.jobs["image-candidate"].steps?.map((step) => step.uses).join("\n") ?? "",
+		/docker\/build-push-action/,
+	);
+	for (const artifact of [
+		"macos-arm64",
+		"ubuntu-amd64-kvm",
+		"ubuntu-arm64-kvm",
+	]) assert.match(releaseText, new RegExp(`${artifact}-e2e-`));
+
+	for (const [name, workflow] of parsed)
+		for (const [jobName, job] of Object.entries(workflow.jobs))
+			for (const step of job.steps ?? [])
+				if (step.uses && !step.uses.startsWith("./"))
+					assert.match(
+						step.uses.split("@")[1] ?? "",
+						/^[0-9a-f]{40}$/,
+						`${name}:${jobName} action must be SHA-pinned`,
+					);
 
 	const pkg = JSON.parse(
 		await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -450,5 +548,21 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.deepEqual(pkg.pi.extensions, [
 		"./extensions/docker-sandboxes/index.ts",
 	]);
-	assert.equal(pkg.engines.node, ">=24.12.0 <25");
+	assert.equal(pkg.engines.node, ">=22.19.0 <25");
+	for (const peer of [
+		"@earendil-works/pi-agent-core",
+		"@earendil-works/pi-ai",
+		"@earendil-works/pi-coding-agent",
+		"@earendil-works/pi-tui",
+	]) assert.equal(pkg.peerDependencies[peer], ">=0.84.1 <0.85.0");
+	assert.equal(pkg.devDependencies["@earendil-works/pi-coding-agent"], "0.84.2");
+
+	const coverage = await readFile(
+		new URL("../scripts/check-coverage.mjs", import.meta.url),
+		"utf8",
+	);
+	assert.match(coverage, /--experimental-test-coverage/);
+	assert.match(coverage, /--test-coverage-lines=90/);
+	assert.match(coverage, /--test-coverage-branches=79/);
+	assert.match(coverage, /--test-coverage-functions=84/);
 });

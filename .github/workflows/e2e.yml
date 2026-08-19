@@ -44,44 +44,55 @@ permissions:
   actions: read
   contents: read
 jobs:
-  macos-arm64:
-    runs-on: [self-hosted, macOS, ARM64, docker-sandboxes]
+  hardware-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner:
+              - self-hosted
+              - macOS
+              - ARM64
+              - docker-sandboxes
+              - ephemeral
+            platform: linux/arm64
+          - name: ubuntu-amd64-kvm
+            runner:
+              - self-hosted
+              - Linux
+              - X64
+              - docker-sandboxes
+              - kvm
+              - ephemeral
+            platform: linux/amd64
+          - name: ubuntu-arm64-kvm
+            runner:
+              - self-hosted
+              - Linux
+              - ARM64
+              - docker-sandboxes
+              - kvm
+              - ephemeral
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      HOME: >-
+        /tmp/pi-dsbx-${{ github.run_id }}-${{ strategy.job-index }}-home
+      PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH: "1"
+      OPENAI_API_KEY: task10-synthetic-not-a-provider-credential
     steps:
-      - name: Initialize fallback E2E evidence
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          E2E_LOG: ${{ runner.temp }}/pi-dsbx-e2e.log
-          E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
-          E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+      - name: Initialize isolated runner state
         run: |
-          mkdir -p "$RUNNER_TEMP"
-          : > "$E2E_LOG"
-          : > "$E2E_NAMES"
-          node --input-type=module <<'NODE'
-          import { writeFile } from "node:fs/promises";
-          const receipt = {
-            sourceSha: process.env.SOURCE_SHA,
-            packageIntegrity: null,
-            imageDigest: process.env.IMAGE_DIGEST,
-            selectedImage: null,
-            platform: process.platform,
-            macosVersion: null,
-            architecture: process.arch,
-            sbxVersion: null,
-            piVersion: null,
-            packageVersion: null,
-            tests: ["E2E setup"],
-            testsCount: 0,
-            status: "failed",
-            passedAt: null,
-          };
-          await writeFile(
-            process.env.E2E_RECEIPT,
-            `${JSON.stringify(receipt, null, 2)}\n`,
-          );
-          NODE
+          set -euo pipefail
+          rm -rf "$HOME"
+          mkdir -m 700 "$HOME"
+          echo "PI_CODING_AGENT_DIR=$HOME/.pi/agent" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/pi-dsbx-e2e.log"
+          : > "$RUNNER_TEMP/e2e-sandboxes.txt"
+          printf '{"status":"failed","removed":[]}\n' \
+            > "$RUNNER_TEMP/cleanup-receipt.json"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.source_sha }}
@@ -126,6 +137,7 @@ jobs:
           IMAGE_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-image
           IMAGE_ARTIFACT_NAME: ${{ inputs.image_artifact }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
           expected_artifact="oci-candidate-$SOURCE_SHA"
@@ -148,8 +160,10 @@ jobs:
             throw new Error("candidate image receipt mismatch");
           NODE
           skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          architecture="${PLATFORM#linux/}"
           docker run --rm --volume "$IMAGE_ARTIFACT:/candidate:ro" \
             --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
+            --override-os linux --override-arch "$architecture" \
             oci-archive:/candidate/candidate-image.oci.tar:candidate \
             "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
           image_id="$(docker image inspect "pi-docker-sandboxes:$SOURCE_SHA" \
@@ -232,6 +246,7 @@ jobs:
             ${{ steps.candidate.outputs.package_version }}
         run: |
           export PATH="$E2E_PREFIX/node_modules/.bin:$PATH"
+          test "$PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH" = 1
           npm run test:e2e 2>&1 | tee -a "$E2E_LOG"
       - name: Write artifact-bound E2E receipt
         if: always()
@@ -257,6 +272,11 @@ jobs:
           fi
           sbx_version="$(sbx --version | awk '{print $NF}' || true)"
           pi_version="$(pi --version | awk '{print $NF}' || true)"
+          if command -v sw_vers >/dev/null 2>&1; then
+            host_version="$(sw_vers -productVersion)"
+          else
+            host_version="$(uname -r)"
+          fi
           set +e
           node scripts/e2e-receipt.mjs \
             --source-sha "$SOURCE_SHA" \
@@ -270,12 +290,12 @@ jobs:
             --status "$status" \
             --tests-count "$count" \
             --platform "$(uname -s | tr '[:upper:]' '[:lower:]')" \
-            --macos-version "$(sw_vers -productVersion)" \
+            --macos-version "$host_version" \
             --architecture "$(uname -m)" \
             --sbx-version "$sbx_version" \
             --pi-version "$pi_version" \
             --receipt "$E2E_RECEIPT" \
-            --test "clone boundary, daemon isolation, network denial" \
+            --test "Pi diagnostics, clone, daemon, and network boundaries" \
             --test "binary patch round trip and host staging cleanup" \
             --test "preserve, export, discard, and signal recovery" \
             --test "empty Git onboarding" \
@@ -319,37 +339,58 @@ jobs:
           NODE
           fi
           exit "$receipt_status"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: macos-e2e-${{ inputs.source_sha }}
-          path: |
-            ${{ runner.temp }}/pi-dsbx-e2e.log
-            ${{ runner.temp }}/e2e-receipt.json
-          if-no-files-found: error
-          retention-days: 14
       - name: Clean only sandboxes recorded by this run
         if: always()
         env:
           E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+          CLEANUP_RECEIPT: ${{ runner.temp }}/cleanup-receipt.json
         run: |
           failures="$RUNNER_TEMP/e2e-cleanup-failures"
+          removed="$RUNNER_TEMP/e2e-cleanup-removed"
           : > "$failures"
+          : > "$removed"
           sort -u "$E2E_NAMES" | while IFS= read -r name; do
+            test -n "$name" || continue
             case "$name" in
               pi-dsbx-e2e-*|pi-dsbx-reexec-*|pi-dsbx-proxy-*)
-                if ! sbx rm --force "$name"; then
+                if sbx rm --force "$name"; then
+                  printf '%s\n' "$name" >> "$removed"
+                else
                   printf '%s\n' "$name" >> "$failures"
                 fi
                 ;;
               *)
                 echo "refusing to clean unrecognized sandbox: $name" >&2
-                exit 1
+                printf '%s\n' "$name" >> "$failures"
                 ;;
             esac
           done
+          rm -rf "$HOME"
+          HOME_REMOVED=1 REMOVED="$removed" FAILURES="$failures" \
+            RECEIPT="$CLEANUP_RECEIPT" node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const lines = async (path) => (await readFile(path, "utf8"))
+            .split("\n").filter(Boolean);
+          const failures = await lines(process.env.FAILURES);
+          await writeFile(process.env.RECEIPT, `${JSON.stringify({
+            status: failures.length ? "failed" : "passed",
+            removed: await lines(process.env.REMOVED),
+            homeRemoved: process.env.HOME_REMOVED === "1",
+            failures,
+          }, null, 2)}\n`);
+          NODE
           if test -s "$failures"; then
-            echo "failed to remove recorded E2E sandboxes:" >&2
+            echo "E2E cleanup failed:" >&2
             cat "$failures" >&2
             exit 1
           fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ${{ matrix.name }}-e2e-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/pi-dsbx-e2e.log
+            ${{ runner.temp }}/e2e-receipt.json
+            ${{ runner.temp }}/cleanup-receipt.json
+          if-no-files-found: error
+          retention-days: 14

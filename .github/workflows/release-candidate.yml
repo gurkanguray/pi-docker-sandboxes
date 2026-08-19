@@ -46,6 +46,7 @@ jobs:
           sha="$(git rev-list -n 1 "$TAG")"
           git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
           git merge-base --is-ancestor "$sha" refs/remotes/origin/main
+          test "$sha" = "$(git rev-parse refs/remotes/origin/main)"
           test "$GITHUB_REF" = "refs/tags/$TAG"
           test "$GITHUB_SHA" = "$sha"
           git checkout --detach "$sha"
@@ -115,84 +116,62 @@ jobs:
     needs: [metadata, package]
     runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
     outputs:
-      digest: ${{ steps.receipt.outputs.digest }}
+      digest: ${{ steps.runtime.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.metadata.outputs.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: npm-package-${{ needs.metadata.outputs.sha }}
-          path: candidate-package
-      - id: image
+      - id: runtime
+        name: Read the exact locked multi-platform runtime
+        env:
+          SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
         run: |
           set -euo pipefail
-          tarball="$(node scripts/assert-one-tarball.mjs candidate-package)"
-          cp "$tarball" docker/pi-docker-sandboxes.tgz
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
           import { readFile } from "node:fs/promises";
           const lock = JSON.parse(await readFile("docker/image-lock.json"));
-          for (const [name, value] of Object.entries({
-            base_image: lock.baseImage, pi_version: lock.piVersion,
-            package_version: lock.packageVersion,
-            fd_version: lock.tools.fdDebianVersion,
-            rg_version: lock.tools.rgDebianVersion,
-            git_version: lock.tools.gitDebianVersion,
-          })) console.log(`${name}=${value}`);
+          const runtime = lock.images?.standard;
+          if (runtime?.status !== "published" ||
+              !/^ghcr\.io\/[^@]+@sha256:[0-9a-f]{64}$/.test(
+                runtime.reference ?? "",
+              ) ||
+              JSON.stringify(runtime.platforms) !==
+                JSON.stringify(["linux/amd64", "linux/arm64"]))
+            throw new Error("standard runtime lock is not release-ready");
+          console.log(`reference=${runtime.reference}`);
+          console.log(`digest=${runtime.reference.split("@")[1]}`);
           NODE
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-        with:
-          platforms: arm64
-      - name: Set up Docker Buildx
-        uses: >-
-          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-      - id: build
-        name: Build the exact OCI candidate once
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: docker
-          platforms: linux/arm64
-          push: false
-          provenance: mode=max
-          outputs: type=oci,dest=${{ runner.temp }}/candidate-image.oci.tar
-          tags: pi-docker-sandboxes:${{ needs.metadata.outputs.sha }}
-          build-args: |
-            BASE_IMAGE=${{ steps.image.outputs.base_image }}
-            PI_VERSION=${{ steps.image.outputs.pi_version }}
-            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
-            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
-            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
-            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
-          cache-from: type=gha,scope=release-candidate-arm64
-          cache-to: type=gha,mode=max,scope=release-candidate-arm64
-      - id: receipt
+      - name: Export the exact locked multi-platform runtime
         env:
-          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
+        run: |
+          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          docker run --rm --volume "$RUNNER_TEMP:/output" "$skopeo" copy \
+            --all "docker://$RUNTIME_REFERENCE" \
+            oci-archive:/output/candidate-image.oci.tar:candidate
+      - name: Verify and receipt the locked runtime archive
+        env:
+          EXPECTED_DIGEST: ${{ steps.runtime.outputs.digest }}
+          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
           SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
         run: |
           set -euo pipefail
           mkdir oci
           tar -xf "$RUNNER_TEMP/candidate-image.oci.tar" -C oci index.json
           digest="$(node -p 'require("./oci/index.json").manifests[0].digest')"
-          test "$digest" = "$BUILD_DIGEST"
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$digest" = "$EXPECTED_DIGEST"
           node --input-type=module <<'NODE'
           import { writeFile } from "node:fs/promises";
-          const receipt = {
+          await writeFile("image-verification.json", `${JSON.stringify({
             sourceSha: process.env.SOURCE_SHA,
-            ociDigest: process.env.BUILD_DIGEST,
-            image: `pi-docker-sandboxes:${process.env.SOURCE_SHA}`,
-          };
-          await writeFile(
-            "image-verification.json",
-            `${JSON.stringify(receipt, null, 2)}\n`,
-          );
+            ociDigest: process.env.EXPECTED_DIGEST,
+            image: process.env.RUNTIME_REFERENCE,
+          }, null, 2)}\n`);
           NODE
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: oci-candidate-${{ needs.metadata.outputs.sha }}
@@ -247,8 +226,16 @@ jobs:
           path: evidence
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-e2e-${{ needs.metadata.outputs.sha }}
-          path: evidence
+          name: macos-arm64-e2e-${{ needs.metadata.outputs.sha }}
+          path: evidence/macos-arm64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ubuntu-amd64-kvm-e2e-${{ needs.metadata.outputs.sha }}
+          path: evidence/ubuntu-amd64-kvm
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ubuntu-arm64-kvm-e2e-${{ needs.metadata.outputs.sha }}
+          path: evidence/ubuntu-arm64-kvm
       - name: Join and verify candidate evidence
         env:
           SOURCE_SHA: ${{ needs.metadata.outputs.sha }}
@@ -270,10 +257,24 @@ jobs:
           const freshInstallReceipt = JSON.parse(
             await readFile("evidence/fresh-install-receipt.json"),
           );
-          const e2eReceipt = JSON.parse(
-            await readFile("evidence/e2e-receipt.json"),
-          );
+          const hardware = [
+            "macos-arm64",
+            "ubuntu-amd64-kvm",
+            "ubuntu-arm64-kvm",
+          ];
+          const e2eReceipts = [];
+          for (const host of hardware) {
+            const root = `evidence/${host}`;
+            const e2e = JSON.parse(
+              await readFile(`${root}/e2e-receipt.json`),
+            );
+            const cleanup = JSON.parse(
+              await readFile(`${root}/cleanup-receipt.json`),
+            );
+            e2eReceipts.push({ host, ...e2e, cleanup });
+          }
           const expected = process.env;
+          const e2eReceipt = e2eReceipts[0];
           if (imageReceipt.sourceSha !== expected.SOURCE_SHA ||
               imageReceipt.ociDigest !== expected.IMAGE_DIGEST ||
               packageReceipt.binVersion !== expected.VERSION ||
@@ -283,11 +284,15 @@ jobs:
               !freshInstallReceipt.cleanup?.packageRemoved ||
               !freshInstallReceipt.cleanup?.prefixRemoved ||
               !freshInstallReceipt.cleanup?.piHomeRemoved ||
-              e2eReceipt.sourceSha !== expected.SOURCE_SHA ||
-              e2eReceipt.candidateDigest !== expected.IMAGE_DIGEST ||
               e2eReceipt.packageVersion !== expected.VERSION ||
-              e2eReceipt.packageIntegrity !== packageReceipt.integrity ||
-              e2eReceipt.status !== "passed" || !e2eReceipt.passedAt)
+              e2eReceipts.some((e2e) =>
+                e2e.sourceSha !== expected.SOURCE_SHA ||
+                e2e.candidateDigest !== expected.IMAGE_DIGEST ||
+                e2e.packageVersion !== expected.VERSION ||
+                e2e.packageIntegrity !== packageReceipt.integrity ||
+                e2e.status !== "passed" || !e2e.passedAt ||
+                e2e.cleanup?.status !== "passed" ||
+                e2e.cleanup?.homeRemoved !== true))
             throw new Error(
               "candidate evidence does not bind to one candidate",
             );
@@ -302,6 +307,7 @@ jobs:
               `${expected.PROVENANCE_REF}#${expected.IMAGE_DIGEST}`,
             freshInstallReceipt,
             e2eReceipt,
+            e2eReceipts,
           };
           await writeFile(
             "release-candidate-receipt.json",
@@ -350,8 +356,8 @@ jobs:
           prefix="$(mktemp -d)"
           test "$(npm view "pi-docker-sandboxes" version)" = "$VERSION"
           npm install --ignore-scripts --prefix "$prefix" "pi-docker-sandboxes"
-          test "$(node -p \
-            "require('$prefix/node_modules/pi-docker-sandboxes/package.json').version")" \
+          installed="$prefix/node_modules/pi-docker-sandboxes/package.json"
+          test "$(node -p 'require(process.argv[1]).version' "$installed")" \
             = "$VERSION"
           "$prefix/node_modules/.bin/pi-dsbx" --help
           gallery=https://pi.dev/packages/pi-docker-sandboxes

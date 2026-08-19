@@ -62,15 +62,13 @@ test("public package metadata and packed CLI are release-ready", async () => {
 		pkg.peerDependencies["@earendil-works/pi-coding-agent"],
 		">=0.84.1 <0.85.0",
 	);
-	// Pi's package-authoring docs require wildcard peers for its bundled
-	// singleton/type packages so extensions reuse the host's module instances.
 	for (const peer of [
 		"@earendil-works/pi-ai",
 		"@earendil-works/pi-agent-core",
 		"@earendil-works/pi-tui",
-		"typebox",
 	])
-		assert.equal(pkg.peerDependencies[peer], "*");
+		assert.equal(pkg.peerDependencies[peer], ">=0.84.1 <0.85.0");
+	assert.equal(pkg.peerDependencies.typebox, "*");
 
 	const { stdout } = await exec("npm", ["pack", "--dry-run", "--json"], {
 		cwd: packageRoot,

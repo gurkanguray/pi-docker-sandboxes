@@ -10,7 +10,7 @@
 | --- | --- |
 | Host | macOS 14+ on Apple silicon or Ubuntu 24.04+ on ARM64 |
 | Pi | `>=0.84.1 <0.85.0` |
-| Node.js | `>=24.12.0 <25` |
+| Node.js | `>=22.19.0 <25` |
 | Docker | 29+ validated |
 | Docker Sandboxes | 0.38.x |
 | Locked image | `linux/arm64` |

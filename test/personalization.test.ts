@@ -566,7 +566,10 @@ test("git package specs fail closed against Pi's parser without echoing rejectio
 	const piPackage = JSON.parse(
 		await readFile(new URL("../package.json", piIndex), "utf8"),
 	) as { version?: string };
-	assert.equal(piPackage.version, "0.84.1");
+	assert.equal(
+		piPackage.version,
+		process.env.PI_TEST_VERSION ?? "0.84.2",
+	);
 	type ParsedGit = {
 		type: string;
 		host: string;
