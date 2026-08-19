@@ -102,7 +102,11 @@ export function superviseCommand(
 			const code = exitSignal
 				? 128 + (constants.signals[exitSignal] ?? 0)
 				: (exitCode ?? 1);
-			resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code });
+			resolve({
+				stdout: Buffer.concat(stdout),
+				stderr: Buffer.concat(stderr),
+				code,
+			});
 		};
 		const kill = (signal: NodeJS.Signals | 0): boolean => {
 			try {
@@ -213,7 +217,8 @@ export function superviseCommand(
 		options.policy.signal?.addEventListener("abort", abort, { once: true });
 		if (options.policy.signal?.aborted) abort();
 		timeoutTimer = setTimeout(
-			() => terminate(new CommandTimeoutError(command, options.policy.timeoutMs)),
+			() =>
+				terminate(new CommandTimeoutError(command, options.policy.timeoutMs)),
 			options.policy.timeoutMs,
 		);
 		child.stdin.end(options.input);

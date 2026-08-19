@@ -235,7 +235,8 @@ export class SbxClient {
 	}
 
 	private policy(phase: SbxCommandPhase): CommandPolicy {
-		const selected = this.options.policies?.[phase] ?? SBX_COMMAND_POLICIES[phase];
+		const selected =
+			this.options.policies?.[phase] ?? SBX_COMMAND_POLICIES[phase];
 		return {
 			...selected,
 			...(this.options.signal ? { signal: this.options.signal } : {}),
@@ -306,10 +307,7 @@ export class SbxClient {
 				this.execute(["create", "--help"], "discovery"),
 				this.execute(["kit", "--help"], "discovery"),
 				this.execute(["inspect", "--help"], "discovery"),
-				this.execute(
-					["policy", "check", "network", "--help"],
-					"discovery",
-				),
+				this.execute(["policy", "check", "network", "--help"], "discovery"),
 				this.acceptsFlag(["create", "--no-share-skills"], "no-share-skills"),
 				this.credentialServices(),
 			]);
@@ -349,7 +347,8 @@ export class SbxClient {
 		value: string,
 		timeoutMs = 15_000,
 	): Promise<void> {
-		if (!SERVICE_ID.test(id)) throw new TypeError(`Invalid credential service: ${id}`);
+		if (!SERVICE_ID.test(id))
+			throw new TypeError(`Invalid credential service: ${id}`);
 		if (!value || /[\0\r\n]/.test(value) || value.trim() !== value)
 			throw new TypeError("Invalid secret value");
 		await this.execute(["secret", "set", id], "secret", false, {
@@ -416,7 +415,11 @@ export class SbxClient {
 			args.push("--env", `${key}=${value}`);
 		}
 		if (options.user) {
-			if (!/^[A-Za-z0-9._][A-Za-z0-9._-]*(:[A-Za-z0-9._][A-Za-z0-9._-]*)?$/.test(options.user))
+			if (
+				!/^[A-Za-z0-9._][A-Za-z0-9._-]*(:[A-Za-z0-9._][A-Za-z0-9._-]*)?$/.test(
+					options.user,
+				)
+			)
 				throw new TypeError("Invalid sandbox user");
 			args.push("-u", options.user);
 		}
@@ -427,7 +430,11 @@ export class SbxClient {
 	async exec(
 		name: string,
 		argv: readonly string[],
-		options: { workdir?: string; env?: Record<string, string>; user?: string } = {},
+		options: {
+			workdir?: string;
+			env?: Record<string, string>;
+			user?: string;
+		} = {},
 	): Promise<ExecResult> {
 		return this.execute(this.execArgs(name, argv, options), "exec");
 	}
@@ -500,10 +507,7 @@ export class SbxClient {
 
 	async remove(name: string, force = false): Promise<void> {
 		validateSandboxName(name);
-		await this.execute(
-			["rm", ...(force ? ["--force"] : []), name],
-			"remove",
-		);
+		await this.execute(["rm", ...(force ? ["--force"] : []), name], "remove");
 	}
 	async copyFrom(
 		name: string,

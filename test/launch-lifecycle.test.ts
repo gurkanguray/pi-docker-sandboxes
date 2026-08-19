@@ -985,7 +985,10 @@ test("timed out sandbox mutation transitions durable state to recoverable failed
 			error instanceof OperationError &&
 			error.cause instanceof CommandTimeoutError,
 	);
-	const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+	const state = await loadSandboxState(
+		subject.fixture.root,
+		subject.fixture.name,
+	);
 	assert.equal(state.phase, "failed");
 	assert.equal(state.lastOperationError?.category, "create");
 	assert.equal(subject.fake.present(), false);

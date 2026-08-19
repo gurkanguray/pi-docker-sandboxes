@@ -241,8 +241,14 @@ test("setSecret sends the value on stdin and never on argv", async () => {
 	assert.deepEqual(calls, [
 		{ args: ["secret", "set", "openai"], input: "host-api-key-value\n" },
 	]);
-	assert.equal(JSON.stringify(calls[0]?.args).includes("host-api-key-value"), false);
-	await assert.rejects(() => client.setSecret("openai", "one\ntwo"), /Invalid secret value/);
+	assert.equal(
+		JSON.stringify(calls[0]?.args).includes("host-api-key-value"),
+		false,
+	);
+	await assert.rejects(
+		() => client.setSecret("openai", "one\ntwo"),
+		/Invalid secret value/,
+	);
 });
 
 test("rejects sandbox names before process execution", async () => {

@@ -36,8 +36,7 @@ export function runInherited(
 		const cleanup = () => {
 			if (cleanedUp) return;
 			cleanedUp = true;
-			for (const [signal, handler] of handlers)
-				process.off(signal, handler);
+			for (const [signal, handler] of handlers) process.off(signal, handler);
 		};
 		const forward = (signal) => {
 			shuttingDown = true;

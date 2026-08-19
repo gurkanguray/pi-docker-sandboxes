@@ -1230,8 +1230,7 @@ async function launchWithLease(context: {
 		if (result) {
 			launcherExitCode = LauncherExitCode.CustodyFailure;
 			warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
-		}
-		else if (primaryError) {
+		} else if (primaryError) {
 			const operationError = primaryError as OperationError;
 			primaryError = new LaunchOperationError(
 				operationError.phase,

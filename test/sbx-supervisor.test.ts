@@ -44,7 +44,8 @@ test("timeout is specific, bounded, and kills a TERM-resistant descendant", {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-supervisor-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const pidPath = join(directory, "descendant.pid");
-	const descendant = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+	const descendant =
+		"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
 	const parent = `
 		const {spawn} = require("node:child_process");
 		const {writeFileSync} = require("node:fs");
