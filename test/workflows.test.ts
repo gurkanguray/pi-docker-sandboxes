@@ -385,6 +385,9 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(releaseAssembly ?? "", /candidate\.releaseRunId/);
 	assert.match(releaseAssembly ?? "", /original workflow run/);
 	assert.match(releaseAssembly ?? "", /releaseRunId: candidate\.releaseRunId/);
+	assert.match(releaseAssembly ?? "", /name="\$\{asset##\*\/\}"/);
+	assert.match(releaseAssembly ?? "", /printf '%s  %s\\n'/);
+	assert.doesNotMatch(releaseAssembly ?? "", /xargs -0 sha256sum/);
 
 	for (const [name, workflow] of parsed)
 		for (const job of Object.values(workflow.jobs))

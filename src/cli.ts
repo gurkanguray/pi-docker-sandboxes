@@ -21,6 +21,7 @@ import { LauncherExitCode } from "./exit-codes.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { launch, type LaunchResult } from "./launch.ts";
+import { certifyHostPlatform } from "./platform.ts";
 import {
 	SandboxLeaseBusyError,
 	unlockSandboxLease,
@@ -298,6 +299,8 @@ export async function main(
 		removeState?: (path: string) => Promise<void>;
 		/** @internal Test-only launch boundary. */
 		launch?: typeof launch;
+		/** @internal Test-only host certification boundary. */
+		certifyHost?: typeof certifyHostPlatform;
 	} = {},
 ): Promise<number> {
 	const [command = "run", ...args] = argv;
@@ -307,6 +310,7 @@ export async function main(
 	}
 	if (command === "run") {
 		const parsed = parseRunArgs(args);
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		const reporter = createLaunchReporter();
 		const pausedConfirm = createPausedConfirm(reporter, confirm);
 		const checkingConfirm = createPausedConfirm(
@@ -394,6 +398,7 @@ export async function main(
 		if (!name) throw new TypeError("unlock requires --name NAME");
 		if (!yes) throw new TypeError("unlock requires explicit --yes authority");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		const record = await unlockSandboxLease(repository.root, name, true);
 		console.log(
 			`Unlocked abandoned ${record.operation} lease for sandbox ${record.sandbox}`,
@@ -428,6 +433,7 @@ export async function main(
 		}
 		if (action === "restore") {
 			if (yes) throw new TypeError("--yes is not valid for sessions restore");
+			await (dependencies.certifyHost ?? certifyHostPlatform)();
 			return withSandboxLease(
 				repository.root,
 				name,
@@ -503,6 +509,7 @@ export async function main(
 		if (!backupId) throw new TypeError("sessions delete requires BACKUP");
 		if (!yes)
 			throw new TypeError("sessions delete requires explicit --yes authority");
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		return withSandboxLease(
 			repository.root,
 			name,
@@ -526,6 +533,7 @@ export async function main(
 		if (command === "apply" && !patch)
 			throw new TypeError("apply requires a patch path");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		return withSandboxLease(repository.root, name, command, async () => {
 			const hasState = await sandboxStateExists(repository.root, name);
 			const state = hasState

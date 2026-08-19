@@ -43,6 +43,53 @@ const cli = new URL("../src/cli.ts", import.meta.url).pathname;
 
 const fixtureImage = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
 
+test("all mutating commands certify the host before mutation", async () => {
+	for (const argv of [
+		["run"],
+		["unlock", "--name", "fixture", "--yes"],
+		["sessions", "restore", "backup", "--name", "fixture"],
+		["sessions", "delete", "backup", "--name", "fixture", "--yes"],
+		["export", "--name", "fixture"],
+		["apply", "change.patch", "--name", "fixture", "--yes"],
+		["destroy", "--name", "fixture", "--yes"],
+	]) {
+		let certifications = 0;
+		let launched = false;
+		await assert.rejects(
+			() =>
+				main(argv, {
+					certifyHost: async () => {
+						certifications++;
+						throw new Error("unsupported host fixture");
+					},
+					launch: async () => {
+						launched = true;
+						assert.fail("launch must not run before host certification");
+					},
+				}),
+			/unsupported host fixture/,
+			argv.join(" "),
+		);
+		assert.equal(certifications, 1, argv.join(" "));
+		assert.equal(launched, false, argv.join(" "));
+	}
+});
+
+test("observational session listing remains available on uncertified hosts", async (t) => {
+	let certifications = 0;
+	t.mock.method(console, "log", () => undefined);
+	assert.equal(
+		await main(["sessions", "list", "--name", "fixture"], {
+			certifyHost: async () => {
+				certifications++;
+				throw new Error("unsupported host fixture");
+			},
+		}),
+		0,
+	);
+	assert.equal(certifications, 0);
+});
+
 test("CLI run maps lease contention and ordinary failures to process exit codes", async (t) => {
 	const errors: string[] = [];
 	t.mock.method(console, "error", (message: unknown) =>

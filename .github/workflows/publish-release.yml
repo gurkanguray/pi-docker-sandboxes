@@ -138,8 +138,21 @@ jobs:
                 "runtime/runtime-provenance.json",
             }, null, 2)}\n`);
           NODE
-          find release-assets -type f ! -name SHA256SUMS -print0 \
-            | sort -z | xargs -0 sha256sum > release-assets/SHA256SUMS
+          declare -A release_asset_names=()
+          : > release-assets/SHA256SUMS
+          while IFS= read -r -d '' asset; do
+            name="${asset##*/}"
+            if test -n "${release_asset_names[$name]:-}"; then
+              echo "release asset basename collision: $name" >&2
+              exit 1
+            fi
+            release_asset_names["$name"]=1
+            digest="$(sha256sum "$asset")"
+            printf '%s  %s\n' "${digest%% *}" "$name" \
+              >> release-assets/SHA256SUMS
+          done < <(
+            find release-assets -type f ! -name SHA256SUMS -print0 | sort -z
+          )
       - name: Create or resume the exact GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
