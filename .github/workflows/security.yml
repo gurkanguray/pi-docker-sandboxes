@@ -79,27 +79,6 @@ jobs:
         run: >-
           node scripts/check-release.mjs --allow-unreleased
           --tag "v$(node -p 'require("./package.json").version')"
-      - id: image
-        run: |
-          package_dir="$RUNNER_TEMP/npm-package"
-          mkdir "$package_dir"
-          npm pack --pack-destination "$package_dir"
-          tarball="$(node scripts/assert-one-tarball.mjs "$package_dir")"
-          npm run package:verify -- "$tarball" \
-            --receipt package-verification.json
-          cp "$tarball" docker/pi-docker-sandboxes.tgz
-          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
-          import { readFile } from "node:fs/promises";
-          const lock = JSON.parse(await readFile("docker/image-lock.json"));
-          for (const [name, value] of Object.entries({
-            base_image: lock.baseImage,
-            pi_version: lock.piVersion,
-            package_version: lock.packageVersion,
-            fd_version: lock.tools.fdDebianVersion,
-            rg_version: lock.tools.rgDebianVersion,
-            git_version: lock.tools.gitDebianVersion,
-          })) console.log(`${name}=${value}`);
-          NODE
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
           platforms: arm64
@@ -111,17 +90,12 @@ jobs:
         with:
           context: docker
           platforms: linux/arm64
+          target: standard
           load: true
           push: false
           tags: pi-docker-sandboxes:${{ github.sha }}
-          build-args: |
-            BASE_IMAGE=${{ steps.image.outputs.base_image }}
-            PI_VERSION=${{ steps.image.outputs.pi_version }}
-            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
-            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
-            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
-            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
-          cache-from: type=gha,scope=candidate-arm64
+          build-args: SOURCE_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=runtime-standard-arm64
       - name: Scan candidate image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:

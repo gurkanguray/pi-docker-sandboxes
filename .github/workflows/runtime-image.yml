@@ -1,0 +1,264 @@
+name: Runtime image candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: runtime-image-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - id: source
+        name: Bind source commit
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: source
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, docker]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: amd64,arm64
+      - uses: >-
+          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - name: Build the exact multi-platform archive once
+        uses: >-
+          docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: docker
+          platforms: linux/amd64,linux/arm64
+          target: ${{ matrix.variant }}
+          push: false
+          no-cache: true
+          provenance: false
+          build-args: SOURCE_SHA=${{ needs.source.outputs.sha }}
+          outputs: type=oci,dest=${{ runner.temp }}/runtime.oci.tar
+      - name: Smoke both exact platform manifests under QEMU
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          cd "$RUNNER_TEMP"
+          node "$GITHUB_WORKSPACE/scripts/verify-runtime-image.mjs" \
+            --archive runtime.oci.tar \
+            --variant "$VARIANT" \
+            --source-sha "$SOURCE_SHA" \
+            --receipt runtime-image-receipt.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-${{ matrix.variant }}-${{ needs.source.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/runtime.oci.tar
+            ${{ runner.temp }}/runtime-image-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  security:
+    needs: [source, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, docker]
+        arch: [amd64, arm64]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: runtime-${{ matrix.variant }}-${{ needs.source.outputs.sha }}
+          path: runtime
+      - name: Scan exact platform manifest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          input: runtime/runtime.oci.tar
+          format: sarif
+          output: runtime-${{ matrix.variant }}-${{ matrix.arch }}.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: false
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+          additional-args: --platform linux/${{ matrix.arch }}
+      - name: Generate exact platform CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          input: runtime/runtime.oci.tar
+          format: cyclonedx
+          output: runtime-${{ matrix.variant }}-${{ matrix.arch }}.cdx.json
+          additional-args: --platform linux/${{ matrix.arch }}
+      - name: Upload scan result
+        if: always()
+        uses: >-
+          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          sarif_file: runtime-${{ matrix.variant }}-${{ matrix.arch }}.sarif
+          category: runtime-${{ matrix.variant }}-${{ matrix.arch }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: security-${{ matrix.variant }}-${{ matrix.arch }}
+          path: |
+            runtime-${{ matrix.variant }}-${{ matrix.arch }}.sarif
+            runtime-${{ matrix.variant }}-${{ matrix.arch }}.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+  receipt:
+    needs: [source, build, security]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [standard, docker]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: runtime-${{ matrix.variant }}-${{ needs.source.outputs.sha }}
+          path: runtime
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: security-${{ matrix.variant }}-*
+          path: runtime/evidence
+          merge-multiple: true
+      - name: Bind SBOM and scan evidence into the receipt
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFile, readdir, writeFile } from "node:fs/promises";
+          const path = "runtime/runtime-image-receipt.json";
+          const receipt = JSON.parse(await readFile(path));
+          if (receipt.sourceSha !== process.env.SOURCE_SHA) process.exit(1);
+          const evidence = {};
+          for (const name of (await readdir("runtime/evidence")).sort()) {
+            const bytes = await readFile(`runtime/evidence/${name}`);
+            const digest = createHash("sha256").update(bytes).digest("hex");
+            evidence[name] = `sha256:${digest}`;
+          }
+          const entries = Object.entries(evidence);
+          receipt.sbom = Object.fromEntries(
+            entries.filter(([name]) => name.endsWith(".cdx.json")),
+          );
+          receipt.scans = Object.fromEntries(
+            entries.filter(([name]) => name.endsWith(".sarif")),
+          );
+          await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-${{ matrix.variant }}
+          path: runtime
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: [source, receipt]
+    runs-on: ubuntu-latest
+    environment:
+      name: release-runtime
+      url: https://github.com/${{ github.repository }}/pkgs
+    strategy:
+      max-parallel: 1
+      matrix:
+        variant: [standard, docker]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-${{ matrix.variant }}
+          path: runtime
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        name: Push the immutable candidate archive
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" |
+            tr '[:upper:]' '[:lower:]')"
+          export SUBJECT="ghcr.io/$owner/pi-docker-sandboxes-runtime-$VARIANT"
+          candidate="$SUBJECT:candidate-$SOURCE_SHA"
+          skopeo="quay.io/skopeo/stable@sha256:"
+          skopeo+="9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
+          if docker run --rm \
+            --volume "$HOME/.docker:/root/.docker:ro" "$skopeo" \
+            inspect "docker://$candidate"; then
+            echo "candidate already exists: $candidate" >&2
+            exit 1
+          fi
+          docker run --rm --volume "$PWD/runtime:/work:ro" \
+            --volume "$HOME/.docker:/root/.docker:ro" "$skopeo" \
+            copy --all "oci-archive:/work/runtime.oci.tar" \
+            "docker://$candidate"
+          docker run --rm \
+            --volume "$HOME/.docker:/root/.docker:ro" "$skopeo" \
+            inspect --raw "docker://$candidate" \
+            > runtime/published-index.json
+          digest="$(sha256sum runtime/published-index.json | cut -d' ' -f1)"
+          export DIGEST="sha256:$digest"
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const path = "runtime/runtime-image-receipt.json";
+          const receipt = JSON.parse(await readFile(path));
+          if (receipt.indexDigest !== process.env.DIGEST) process.exit(1);
+          receipt.candidateReference =
+            `${process.env.SUBJECT}@${process.env.DIGEST}`;
+          const output = `${JSON.stringify(receipt, null, 2)}\n`;
+          await writeFile("runtime/runtime-image-receipt.json", output);
+          NODE
+          echo "subject=$SUBJECT" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+        shell: bash
+      - name: Attest exact candidate index with GitHub OIDC
+        uses: >-
+          actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-name: ${{ steps.push.outputs.subject }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runtime-receipt-${{ matrix.variant }}
+          path: runtime/runtime-image-receipt.json
+          if-no-files-found: error
+          retention-days: 90

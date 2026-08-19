@@ -20,7 +20,11 @@ type Job = {
 	uses?: string;
 	with?: Record<string, unknown>;
 };
-type Workflow = { jobs: Record<string, Job> };
+type Workflow = {
+	on?: Record<string, unknown>;
+	permissions?: Record<string, string>;
+	jobs: Record<string, Job>;
+};
 
 test("release workflows are valid npm-only gates", async () => {
 	const names = (await readdir(workflows)).filter((name) =>
@@ -300,6 +304,58 @@ test("release workflows are valid npm-only gates", async () => {
 			for (const step of job.steps ?? [])
 				if (step.uses?.startsWith("docker/build-push-action@"))
 					assert.equal(step.with?.push, false, `${name} must not push images`);
+
+	const runtimeText = await readFile(
+		new URL("runtime-image.yml", workflows),
+		"utf8",
+	);
+	const runtime = parsed.get("runtime-image.yml")!;
+	assert.ok(runtime, "runtime-image.yml");
+	assert.deepEqual(Object.keys(runtime.on ?? {}), ["workflow_dispatch"]);
+	assert.deepEqual(runtime.permissions, { contents: "read" });
+	assert.match(runtimeText, /platforms: linux\/amd64,linux\/arm64/);
+	assert.match(runtimeText, /no-cache: true/);
+	assert.match(runtimeText, /target: \$\{\{ matrix\.variant \}\}/);
+	assert.match(runtimeText, /verify-runtime-image\.mjs/);
+	assert.match(runtimeText, /runtime-image-receipt\.json/);
+	assert.match(runtimeText, /format: cyclonedx/);
+	assert.match(runtimeText, /severity: HIGH,CRITICAL/);
+	assert.match(runtimeText, /candidate-\$SOURCE_SHA/);
+	assert.match(runtimeText, /subject-digest:/);
+	assert.doesNotMatch(
+		runtimeText,
+		/pull_request:|pi-docker-sandboxes\.tgz|PACKAGE_VERSION|flag:\s*["']wx["']/,
+	);
+	const runtimeSecuritySteps = runtime.jobs.security.steps ?? [];
+	for (const step of runtimeSecuritySteps.filter((candidate) =>
+		candidate.uses?.startsWith("aquasecurity/trivy-action@"),
+	))
+		assert.equal(step.with?.input, "runtime/runtime.oci.tar");
+	const publishRuntime = runtime.jobs.publish;
+	assert.equal(publishRuntime.environment?.name, "release-runtime");
+	assert.deepEqual(publishRuntime.permissions, {
+		contents: "read",
+		packages: "write",
+		"id-token": "write",
+		attestations: "write",
+	});
+	for (const job of Object.values(runtime.jobs))
+		for (const step of job.steps ?? [])
+			if (step.uses) {
+				const [action, revision] = step.uses.split("@");
+				assert.match(
+					revision ?? "",
+					/^[0-9a-f]{40}$/,
+					`${action} must be SHA-pinned`,
+				);
+			}
+	for (const [name, workflow] of parsed)
+		if (name !== "runtime-image.yml")
+			assert.notEqual(
+				workflow.jobs.publish?.permissions?.packages,
+				"write",
+				`${name} cannot publish GHCR`,
+			);
 
 	const ci = await readFile(new URL("ci.yml", workflows), "utf8");
 	assert.match(
