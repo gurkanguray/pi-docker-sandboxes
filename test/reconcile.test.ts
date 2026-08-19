@@ -166,9 +166,7 @@ test("Python SIGKILL probes production launch lifecycle crash points", async () 
 		});
 	}
 
-	const beforeRemove = await killAndRestart(
-		"after-removing-state-persistence",
-	);
+	const beforeRemove = await killAndRestart("after-removing-state-persistence");
 	assert.equal(beforeRemove.phase, "removing");
 	assert.equal(beforeRemove.exists, true);
 	assert.equal(beforeRemove.removalInvoked, false);
