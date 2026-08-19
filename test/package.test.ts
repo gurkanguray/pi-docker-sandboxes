@@ -115,7 +115,12 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 			"-tf",
 			join(directory, stdout.trim()),
 		]);
-		const files = new Set(listing.trim().split("\n"));
+		const files = new Set(
+			listing
+				.trim()
+				.split("\n")
+				.map((line) => line.replace(/\r$/, "")),
+		);
 		assert.equal(files.has("package/docker/image-lock.json"), true);
 		assert.equal(files.has("package/docker/runtime-lock.json"), true);
 		assert.equal(files.has("package/docker/runtime-release-lock.json"), true);
