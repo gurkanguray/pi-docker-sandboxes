@@ -45,8 +45,6 @@
     "docs:dev": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress docs",
     "docs:build": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress build docs",
     "check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; npm run typecheck && npm test",
-    "image:build": "if [ -f .source-checkout ]; then npm run build:cli; fi; node bin/pi-dsbx.mjs image build",
-    "image:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-image.mjs",
     "release:check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-release.mjs",
     "package:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-package.mjs",
     "smoke:fresh-install": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/fresh-install-smoke.mjs",

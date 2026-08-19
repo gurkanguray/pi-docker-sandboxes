@@ -42,7 +42,6 @@ pi-dsbx unlock --name NAME --yes
 pi-dsbx sessions list [--name NAME]
 pi-dsbx sessions restore [BACKUP] [--name NAME]
 pi-dsbx sessions delete BACKUP [--name NAME] --yes
-pi-dsbx image build
 ```
 
 Top-level help is available as `pi-dsbx --help`, `pi-dsbx -h`, or `pi-dsbx help`.
@@ -58,7 +57,6 @@ Top-level help is available as `pi-dsbx --help`, `pi-dsbx -h`, or `pi-dsbx help`
 | `pi-dsbx destroy` | Remove a sandbox under the custody rules below. |
 | `pi-dsbx unlock` | Remove an abandoned local lifecycle lease only after recorded-process absence checks and `--yes`. |
 | `pi-dsbx sessions list\|restore\|delete` | Inspect or explicitly manage bounded session backups. |
-| `pi-dsbx image build` | Compatibility command that fails closed; local production runtime creation is unsupported and it does not build an image. |
 
 ## `run` options
 

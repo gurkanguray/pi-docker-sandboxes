@@ -153,10 +153,7 @@ test("CLI reference stays source-complete and truthful", async () => {
 		reference,
 		new RegExp(`--sync.*${DEFAULT_CONFIG.syncProfile}.*default`, "i"),
 	);
-	assert.match(
-		reference,
-		/`pi-dsbx image build`.*(?:fails|unsupported|does not build)/i,
-	);
+	assert.doesNotMatch(reference, /pi-dsbx image build/i);
 	assert.doesNotMatch(reference, /`--image`|`--json`.*run option/i);
 });
 

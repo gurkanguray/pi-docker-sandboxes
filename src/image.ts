@@ -4,12 +4,6 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { OperationError } from "./errors.ts";
-import {
-	loadImageLock,
-	selectRuntimeImage,
-	type RuntimeImageLock,
-} from "./image-lock.ts";
-import { detectHostPlatform } from "./platform.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,33 +84,3 @@ export async function packPackage(
 	return join(destination, filename);
 }
 
-export interface ImageVerificationReceipt {
-	image: string;
-	digest: string;
-	platform: "linux/amd64" | "linux/arm64";
-}
-
-export async function verifyImageReceipt(
-	_image: string,
-	_lock: RuntimeImageLock,
-): Promise<never> {
-	throw new Error(
-		"production runtime image verification is unavailable until the runtime image workflow",
-	);
-}
-
-export function compareImageReceipts(
-	_local: ImageVerificationReceipt,
-	_candidate: ImageVerificationReceipt,
-): never {
-	throw new Error(
-		"production runtime image parity verification is unavailable until the runtime image workflow",
-	);
-}
-
-export async function buildLocalImage(): Promise<never> {
-	const lock = await loadImageLock();
-	const host = detectHostPlatform();
-	selectRuntimeImage(lock, false, host.runtimePlatform);
-	throw new Error("local production runtime image builds are not supported");
-}

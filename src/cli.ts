@@ -19,7 +19,6 @@ import {
 } from "./diagnostics.ts";
 import { LauncherExitCode } from "./exit-codes.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
-import { buildLocalImage } from "./image.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { launch, type LaunchResult } from "./launch.ts";
 import {
@@ -276,7 +275,7 @@ export function createPausedConfirm(
 }
 
 function usage(): string {
-	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status [--json]\n  pi-dsbx doctor [--json]\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx unlock --name NAME --yes\n  pi-dsbx sessions list [--name NAME]\n  pi-dsbx sessions restore [BACKUP] [--name NAME]\n  pi-dsbx sessions delete BACKUP [--name NAME] --yes\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
+	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status [--json]\n  pi-dsbx doctor [--json]\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx unlock --name NAME --yes\n  pi-dsbx sessions list [--name NAME]\n  pi-dsbx sessions restore [BACKUP] [--name NAME]\n  pi-dsbx sessions delete BACKUP [--name NAME] --yes\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -381,10 +380,6 @@ export async function main(
 	}
 	if (command === "config") {
 		console.log(JSON.stringify(await loadConfig(cwd), null, 2));
-		return 0;
-	}
-	if (command === "image" && args[0] === "build") {
-		await buildLocalImage();
 		return 0;
 	}
 	if (command === "unlock") {
