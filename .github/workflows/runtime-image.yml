@@ -381,12 +381,13 @@ jobs:
           export SUBJECT
           candidate="$SUBJECT:candidate-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker run --rm --volume "$PWD/runtime:/work:ro" \
-            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
-            copy --all "oci-archive:/work/runtime.oci.tar" \
-            "docker://$candidate"
+            --volume "$HOME/.docker/config.json:/tmp/auth.json:ro" \
+            "$SKOPEO_IMAGE" copy --authfile /tmp/auth.json --all \
+            "oci-archive:/work/runtime.oci.tar" "docker://$candidate"
           docker run --rm \
-            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
-            inspect --raw "docker://$candidate" \
+            --volume "$HOME/.docker/config.json:/tmp/auth.json:ro" \
+            "$SKOPEO_IMAGE" inspect --authfile /tmp/auth.json --raw \
+            "docker://$candidate" \
             > runtime/published-index.json
           digest="$(sha256sum runtime/published-index.json | cut -d' ' -f1)"
           DIGEST="sha256:$digest"
