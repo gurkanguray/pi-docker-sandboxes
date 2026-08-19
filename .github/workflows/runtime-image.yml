@@ -1,0 +1,349 @@
+name: Runtime image candidate
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Runtime variant to validate
+        required: true
+        type: choice
+        options: [standard, docker]
+permissions:
+  contents: read
+concurrency:
+  group: runtime-image-${{ github.sha }}-${{ inputs.variant }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      run_identity: ${{ steps.source.outputs.run_identity }}
+      artifact: ${{ steps.source.outputs.artifact }}
+      buildx_version: ${{ steps.lock.outputs.buildx_version }}
+      buildkit_driver: ${{ steps.lock.outputs.buildkit_driver }}
+      qemu_image: ${{ steps.lock.outputs.qemu_image }}
+      skopeo_image: ${{ steps.lock.outputs.skopeo_image }}
+      standard_base: ${{ steps.lock.outputs.standard_base }}
+      docker_base: ${{ steps.lock.outputs.docker_base }}
+      pi_version: ${{ steps.lock.outputs.pi_version }}
+      runtime_version: ${{ steps.lock.outputs.runtime_version }}
+      fd_version: ${{ steps.lock.outputs.fd_version }}
+      fd_amd64_name: ${{ steps.lock.outputs.fd_amd64_name }}
+      fd_amd64_sha256: ${{ steps.lock.outputs.fd_amd64_sha256 }}
+      fd_arm64_name: ${{ steps.lock.outputs.fd_arm64_name }}
+      fd_arm64_sha256: ${{ steps.lock.outputs.fd_arm64_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - id: source
+        name: Bind source commit
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/heads/main:refs/remotes/origin/main"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          {
+            echo "sha=$GITHUB_SHA"
+            echo "run_identity=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            echo "artifact=$VARIANT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+      - id: lock
+        name: Load authoritative runtime lock
+        run: >-
+          node scripts/runtime-build-args.mjs --github-output
+          >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: source
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          image: ${{ needs.source.outputs.qemu_image }}
+          platforms: amd64,arm64
+      - uses: >-
+          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          version: ${{ needs.source.outputs.buildx_version }}
+          driver-opts: image=${{ needs.source.outputs.buildkit_driver }}
+      - name: Build exact multi-platform archive without cache
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: docker
+          file: docker/runtime.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          target: ${{ inputs.variant }}
+          push: false
+          no-cache: true
+          provenance: false
+          build-args: |
+            SOURCE_SHA=${{ needs.source.outputs.sha }}
+            STANDARD_BASE=${{ needs.source.outputs.standard_base }}
+            DOCKER_BASE=${{ needs.source.outputs.docker_base }}
+            PI_VERSION=${{ needs.source.outputs.pi_version }}
+            RUNTIME_VERSION=${{ needs.source.outputs.runtime_version }}
+            FD_VERSION=${{ needs.source.outputs.fd_version }}
+            FD_AMD64_NAME=${{ needs.source.outputs.fd_amd64_name }}
+            FD_AMD64_SHA256=${{ needs.source.outputs.fd_amd64_sha256 }}
+            FD_ARM64_NAME=${{ needs.source.outputs.fd_arm64_name }}
+            FD_ARM64_SHA256=${{ needs.source.outputs.fd_arm64_sha256 }}
+          outputs: type=oci,dest=${{ runner.temp }}/runtime.oci.tar
+      - name: Verify both exact platform manifests under QEMU
+        env:
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          cd "$RUNNER_TEMP"
+          node "$GITHUB_WORKSPACE/scripts/verify-runtime-image.mjs" \
+            --archive runtime.oci.tar --variant "$VARIANT" \
+            --source-sha "$SOURCE_SHA" \
+            --lock "$GITHUB_WORKSPACE/docker/runtime-lock.json" \
+            --receipt runtime-image-receipt.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: >-
+            runtime-${{ needs.source.outputs.artifact }}
+          path: |
+            ${{ runner.temp }}/runtime.oci.tar
+            ${{ runner.temp }}/runtime-image-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  security:
+    needs: [source, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: >-
+            runtime-${{ needs.source.outputs.artifact }}
+          path: runtime
+      - name: Extract exact OCI archive
+        run: mkdir runtime/oci && tar -xf runtime/runtime.oci.tar -C runtime/oci
+      - id: scan
+        name: Scan exact platform manifest
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          input: runtime/oci
+          format: sarif
+          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
+          severity: HIGH,CRITICAL
+          limit-severities-for-sarif: true
+          ignore-unfixed: false
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+          additional-args: --platform linux/${{ matrix.arch }}
+      - name: Generate exact platform CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          input: runtime/oci
+          format: cyclonedx
+          output: runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
+          additional-args: --platform linux/${{ matrix.arch }}
+      - name: Bind platform evidence identities
+        if: always() && steps.scan.outcome != 'cancelled'
+        env:
+          ARCH: ${{ matrix.arch }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFile, writeFile } from "node:fs/promises";
+          const receipt = JSON.parse(
+            await readFile("runtime/runtime-image-receipt.json"),
+          );
+          const platform = `linux/${process.env.ARCH}`;
+          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
+              receipt.variant !== process.env.VARIANT ||
+              !receipt.platformDigests[platform]) process.exit(1);
+          const evidence = {
+            variant: receipt.variant,
+            sourceSha: receipt.sourceSha,
+            indexDigest: receipt.indexDigest,
+            platform,
+            platformDigest: receipt.platformDigests[platform],
+          };
+          const files = [["scan", "sarif"], ["sbom", "cdx.json"]];
+          for (const [kind, suffix] of files) {
+            const name =
+              `runtime-${receipt.variant}-${process.env.ARCH}.${suffix}`;
+            const bytes = await readFile(name);
+            const value = createHash("sha256").update(bytes).digest("hex");
+            evidence[kind] = { name, sha256: `sha256:${value}` };
+          }
+          const output =
+            `runtime-${receipt.variant}-${process.env.ARCH}.evidence.json`;
+          await writeFile(output, `${JSON.stringify(evidence, null, 2)}\n`);
+          NODE
+      - name: Enforce scan result after evidence generation
+        if: steps.scan.outcome == 'failure'
+        run: exit 1
+      - name: Upload scan result
+        if: always()
+        uses: >-
+          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
+        with:
+          sarif_file: runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
+          category: runtime-${{ inputs.variant }}-${{ matrix.arch }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: >-
+            security-${{ matrix.arch }}-${{ needs.source.outputs.artifact }}
+          path: |
+            runtime-${{ inputs.variant }}-${{ matrix.arch }}.sarif
+            runtime-${{ inputs.variant }}-${{ matrix.arch }}.cdx.json
+            runtime-${{ inputs.variant }}-${{ matrix.arch }}.evidence.json
+          if-no-files-found: error
+          retention-days: 90
+
+  receipt:
+    if: inputs.variant == 'standard'
+    needs: [source, build, security]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: runtime-standard-${{ needs.source.outputs.run_identity }}
+          path: runtime
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: security-*-standard-${{ needs.source.outputs.run_identity }}
+          path: runtime/evidence
+          merge-multiple: true
+      - name: Validate and bind exact evidence
+        run: >-
+          node scripts/finalize-runtime-receipt.mjs
+          runtime/runtime-image-receipt.json runtime/runtime.oci.tar
+          runtime/evidence ${{ needs.source.outputs.sha }} standard
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-standard-${{ needs.source.outputs.run_identity }}
+          path: runtime
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    if: inputs.variant == 'standard'
+    needs: [source, receipt]
+    runs-on: ubuntu-latest
+    environment:
+      name: release-runtime
+      url: https://github.com/${{ github.repository }}/pkgs
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: candidate-standard-${{ needs.source.outputs.run_identity }}
+          path: runtime
+      - name: Verify release-runtime protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          endpoint="repos/$GITHUB_REPOSITORY/environments/release-runtime"
+          gh api "$endpoint" > /tmp/environment.json
+          gh api "$endpoint/deployment-branch-policies" \
+            > /tmp/policies.json
+          node scripts/verify-runtime-environment.mjs \
+            /tmp/environment.json /tmp/policies.json
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        name: Push unique candidate and bind registry digest
+        env:
+          SKOPEO_IMAGE: ${{ needs.source.outputs.skopeo_image }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          owner=""
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" |
+            tr '[:upper:]' '[:lower:]')"
+          SUBJECT="ghcr.io/$owner/pi-docker-sandboxes-runtime-standard"
+          export SUBJECT
+          candidate="$SUBJECT:candidate-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker run --rm --volume "$PWD/runtime:/work:ro" \
+            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
+            copy --all "oci-archive:/work/runtime.oci.tar" \
+            "docker://$candidate"
+          docker run --rm \
+            --volume "$HOME/.docker:/root/.docker:ro" "$SKOPEO_IMAGE" \
+            inspect --raw "docker://$candidate" \
+            > runtime/published-index.json
+          digest="$(sha256sum runtime/published-index.json | cut -d' ' -f1)"
+          DIGEST="sha256:$digest"
+          export DIGEST
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const path = "runtime/runtime-image-receipt.json";
+          const receipt = JSON.parse(await readFile(path));
+          if (receipt.variant !== "standard" ||
+              receipt.indexDigest !== process.env.DIGEST) process.exit(1);
+          receipt.candidateReference =
+            `${process.env.SUBJECT}@${process.env.DIGEST}`;
+          await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
+          NODE
+          echo "subject=$SUBJECT" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Attest exact candidate index with GitHub OIDC
+        uses: >-
+          actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-name: ${{ steps.push.outputs.subject }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Attest final receipt and evidence with GitHub OIDC
+        uses: >-
+          actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: |
+            runtime/runtime-image-receipt.json
+            runtime/evidence/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runtime/runtime-image-receipt.json
+          if-no-files-found: error
+          retention-days: 90
