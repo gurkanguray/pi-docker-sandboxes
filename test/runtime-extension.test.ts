@@ -22,10 +22,13 @@ function fakeApi() {
 					args: string,
 					context: { ui: { notify(message: string, level: string): void } },
 				) => Promise<void>;
-			}
+		  }
 		| undefined;
 	let sessionStart:
-		| ((_event: unknown, context: { ui: { setStatus(key: string, value: string): void } }) => void)
+		| ((
+				_event: unknown,
+				context: { ui: { setStatus(key: string, value: string): void } },
+		  ) => void)
 		| undefined;
 	let flagRegistrations = 0;
 	const pi = {
@@ -69,7 +72,10 @@ test("attested runtime exposes status and diagnostics only", async () => {
 
 	assert.equal(fake.flagRegistrations(), 0);
 	assert.deepEqual(
-		fake.command()?.getArgumentCompletions?.("").map(({ value }) => value),
+		fake
+			.command()
+			?.getArgumentCompletions?.("")
+			.map(({ value }) => value),
 		["status", "doctor"],
 	);
 	const notifications: Array<[string, string]> = [];
@@ -88,9 +94,12 @@ test("attested runtime exposes status and diagnostics only", async () => {
 	assert.deepEqual(notifications[2], ["Unknown subcommand: config", "error"]);
 
 	const statuses: Array<[string, string]> = [];
-	fake.sessionStart()?.({}, {
-		ui: { setStatus: (key, value) => statuses.push([key, value]) },
-	});
+	fake.sessionStart()?.(
+		{},
+		{
+			ui: { setStatus: (key, value) => statuses.push([key, value]) },
+		},
+	);
 	assert.deepEqual(statuses, [["docker-sandboxes", "SBX: clone · hardened"]]);
 });
 
