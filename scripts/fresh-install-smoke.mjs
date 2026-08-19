@@ -18,11 +18,7 @@ export function runCommand(command, args, options) {
 			done({
 				command,
 				args,
-				exitCode: error
-					? typeof error.code === "number"
-						? error.code
-						: -1
-					: 0,
+				exitCode: error ? (typeof error.code === "number" ? error.code : -1) : 0,
 				error: error?.message,
 				signal: error?.signal,
 				stdout: stdout.trim(),
@@ -45,8 +41,8 @@ async function hasPackageRecord(piHome, source) {
 	const settings = await readFile(join(piHome, "settings.json"), "utf8")
 		.then(JSON.parse)
 		.catch(() => ({}));
-	return (settings.packages ?? []).some((entry) =>
-		(typeof entry === "string" ? entry : entry?.source) === source,
+	return (settings.packages ?? []).some(
+		(entry) => (typeof entry === "string" ? entry : entry?.source) === source,
 	);
 }
 
@@ -55,7 +51,9 @@ async function main() {
 	const published = args[0] === "--published";
 	const argument = published ? args[1] : args[0];
 	if (!argument || args.length !== (published ? 2 : 1))
-		fail("Usage: node scripts/fresh-install-smoke.mjs [--published] <tarball-or-version>");
+		fail(
+			"Usage: node scripts/fresh-install-smoke.mjs [--published] <tarball-or-version>",
+		);
 	if (published && !/^\d+\.\d+\.\d+$/.test(argument))
 		fail("Published Pi install verification requires an exact stable version");
 
@@ -166,9 +164,11 @@ async function main() {
 			// reaching a diagnostic result is the credential-free smoke assertion.
 			if (result.exitCode !== 0 && label !== "pi-dsbx doctor")
 				fail(`${label} failed`);
-			if (label === "pi extension launch" &&
+			if (
+				label === "pi extension launch" &&
 				(!result.stdout.includes("--docker-sandbox") ||
-				 !result.stdout.includes("--docker-sandbox-no-host-auth")))
+					!result.stdout.includes("--docker-sandbox-no-host-auth"))
+			)
 				fail("Pi did not discover the installed extension flags");
 			if (
 				label === "pi-dsbx doctor" &&
@@ -198,8 +198,10 @@ async function main() {
 			commands.push(launched);
 			if (launched.exitCode !== 0) fail("exact runtime launch failed");
 			const launchReceipt = JSON.parse(launched.stdout.split("\n").at(-1));
-			if (launchReceipt.runtimeLaunches !== 1 ||
-				launchReceipt.custody !== "released")
+			if (
+				launchReceipt.runtimeLaunches !== 1 ||
+				launchReceipt.custody !== "released"
+			)
 				fail("exact runtime launch cleanup was not verified");
 			runtimeLaunches = 1;
 		}
@@ -216,7 +218,8 @@ async function main() {
 			if (await hasPackageRecord(piHome, installSource))
 				fail("Pi remove left the package recorded");
 			const reinstall = await runCommand(piCommand, ["install", installSource], {
-				cwd: root, env,
+				cwd: root,
+				env,
 			});
 			reinstall.label = "pi reinstall exact npm version";
 			commands.push(reinstall);
@@ -224,7 +227,8 @@ async function main() {
 			if (!(await hasPackageRecord(piHome, installSource)))
 				fail("Pi reinstall did not restore the package record");
 			const finalRemove = await runCommand(piCommand, ["remove", installSource], {
-				cwd: root, env,
+				cwd: root,
+				env,
 			});
 			finalRemove.label = "pi final cleanup";
 			commands.push(finalRemove);

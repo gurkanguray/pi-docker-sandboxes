@@ -53,7 +53,7 @@ jobs:
           path: release-assets/public-install
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          pattern: '*-e2e-${{ inputs.source_sha }}'
+          pattern: "*-e2e-${{ inputs.source_sha }}"
           path: release-assets/e2e
       - name: Verify signed tag and assemble durable release evidence
         env:

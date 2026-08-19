@@ -450,10 +450,15 @@ test("published smoke uses exact Pi install, remove, reinstall, and cleanup", as
 	const npm = join(directory, "npm");
 	const pi = join(directory, "pi");
 	try {
-		await writeFile(npm, `#!/bin/sh
+		await writeFile(
+			npm,
+			`#!/bin/sh
 printf '%s\\n' '[{"name":"pi-docker-sandboxes","version":"9.8.7","integrity":"sha512-test"}]'
-`);
-		await writeFile(pi, `#!/usr/bin/env node
+`,
+		);
+		await writeFile(
+			pi,
+			`#!/usr/bin/env node
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -471,19 +476,22 @@ if (process.argv[2] === "install") {
   rmSync(root, { recursive: true, force: true });
   writeFileSync(settings, JSON.stringify({ packages: [] }));
 } else console.log("--docker-sandbox --docker-sandbox-no-host-auth");
-`);
+`,
+		);
 		await chmod(npm, 0o755);
 		await chmod(pi, 0o755);
 		const { stdout } = await exec(
 			process.execPath,
 			[freshInstallSmoke.pathname, "--published", "9.8.7"],
-			{ env: {
-				...process.env,
-				PATH: `${directory}:${process.env.PATH}`,
-				PI_COMMAND: pi,
-				PI_RELEASE_RUNTIME_IMAGE: `docker.io/example/runtime@sha256:${"a".repeat(64)}`,
-				PI_RELEASE_TEMPLATE_STORE_ID: "abcdef123456",
-			} },
+			{
+				env: {
+					...process.env,
+					PATH: `${directory}:${process.env.PATH}`,
+					PI_COMMAND: pi,
+					PI_RELEASE_RUNTIME_IMAGE: `docker.io/example/runtime@sha256:${"a".repeat(64)}`,
+					PI_RELEASE_TEMPLATE_STORE_ID: "abcdef123456",
+				},
+			},
 		);
 		const receipt = JSON.parse(stdout.trim().split("\n").at(-1)!);
 		assert.equal(receipt.actualPiInstall, true);
@@ -491,15 +499,22 @@ if (process.argv[2] === "install") {
 		assert.equal(receipt.packageRecordVerified, true);
 		assert.equal(receipt.extensionFlagsVerified, true);
 		assert.equal(receipt.runtimeLaunches, 1);
-		assert.deepEqual(receipt.commands.map(({ label }: { label: string }) => label), [
-			"pi install exact npm version", "pi extension launch",
-			"one exact runtime launch", "pi remove exact npm version",
-			"pi reinstall exact npm version",
-			"pi final cleanup",
-		]);
+		assert.deepEqual(
+			receipt.commands.map(({ label }: { label: string }) => label),
+			[
+				"pi install exact npm version",
+				"pi extension launch",
+				"one exact runtime launch",
+				"pi remove exact npm version",
+				"pi reinstall exact npm version",
+				"pi final cleanup",
+			],
+		);
 		assert.deepEqual(receipt.cleanup, {
-			packageRemoved: true, packageRecordRemoved: true,
-			prefixRemoved: true, piHomeRemoved: true,
+			packageRemoved: true,
+			packageRecordRemoved: true,
+			prefixRemoved: true,
+			piHomeRemoved: true,
 		});
 	} finally {
 		await rm(directory, { recursive: true, force: true });
@@ -551,11 +566,9 @@ if (command === "doctor") process.exitCode = 1;
 `,
 		);
 		await chmod(bin, 0o755);
-		const { stdout: packOutput } = await exec(
-			"npm",
-			["pack", "--json", source],
-			{ cwd: directory },
-		);
+		const { stdout: packOutput } = await exec("npm", ["pack", "--json", source], {
+			cwd: directory,
+		});
 		const tarball = join(directory, JSON.parse(packOutput)[0].filename);
 		const { stdout, stderr } = await exec(
 			process.execPath,
@@ -732,8 +745,12 @@ test("rejects a changelog without the package version and date", () =>
 
 test("rejects image-lock Pi version and mutable standard runtime", async () => {
 	for (const mutate of [
-		(lock: any) => { lock.piVersion = "0.83.0"; },
-		(lock: any) => { lock.images.standard.reference = "ghcr.io/example/runtime:latest"; },
+		(lock: any) => {
+			lock.piVersion = "0.83.0";
+		},
+		(lock: any) => {
+			lock.images.standard.reference = "ghcr.io/example/runtime:latest";
+		},
 	])
 		await withFixture(async (directory) => {
 			const path = join(directory, "docker", "image-lock.json");
@@ -750,9 +767,15 @@ test("rejects image-lock Pi version and mutable standard runtime", async () => {
 
 test("rejects incomplete or standard-authorizing CVE risk records", async () => {
 	for (const mutate of [
-		(record: any) => { delete record.owner; },
-		(record: any) => { record.variant = "standard"; },
-		(record: any) => { record.expiry = "2026-08-18"; },
+		(record: any) => {
+			delete record.owner;
+		},
+		(record: any) => {
+			record.variant = "standard";
+		},
+		(record: any) => {
+			record.expiry = "2026-08-18";
+		},
 	])
 		await withFixture(async (directory) => {
 			const path = join(directory, ".trivyignore.yaml");
@@ -831,11 +854,7 @@ test("release mode verifies signed tags without a repository verifier", () =>
 			await git(directory, ["config", "gpg.format", "ssh"]);
 			await git(directory, ["config", "gpg.program", canary.executable]);
 			await git(directory, ["config", "gpg.ssh.program", canary.executable]);
-			const result = await run(
-				directory,
-				["--tag", `v${version}`],
-				signing.env,
-			);
+			const result = await run(directory, ["--tag", `v${version}`], signing.env);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /✓ signed tag:/);
 			await assert.rejects(readFile(canary.marker, "utf8"));
@@ -848,11 +867,7 @@ test("release mode accepts a signed tag at HEAD", () =>
 	withFixture(async (directory) => {
 		const signing = await signedTag(directory);
 		try {
-			const result = await run(
-				directory,
-				["--tag", `v${version}`],
-				signing.env,
-			);
+			const result = await run(directory, ["--tag", `v${version}`], signing.env);
 			assert.equal(result.code, 0, result.stderr);
 			assert.match(result.stdout, /✓ signed tag:/);
 		} finally {
@@ -867,11 +882,7 @@ test("release mode rejects a signed tag behind HEAD", () =>
 			await writeFile(join(directory, "later.txt"), "later\n");
 			await git(directory, ["add", "later.txt"], signing.env);
 			await git(directory, ["commit", "--quiet", "-m", "later"], signing.env);
-			const result = await run(
-				directory,
-				["--tag", `v${version}`],
-				signing.env,
-			);
+			const result = await run(directory, ["--tag", `v${version}`], signing.env);
 			assert.equal(result.code, 1);
 			assert.match(result.stderr, /signed tag.*point to HEAD/i);
 		} finally {
@@ -887,7 +898,10 @@ test("succeeds without mutating tracked fixture files", () =>
 		const result = await run(directory);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(result.stdout, /✓ tag\/version:/);
-		assert.match(result.stdout, /✓ legacy-only CVE risk records: 12 CVEs \/ 64 scoped paths/);
+		assert.match(
+			result.stdout,
+			/✓ legacy-only CVE risk records: 12 CVEs \/ 64 scoped paths/,
+		);
 		const receipt = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
 		assert.deepEqual(Object.keys(receipt), [
 			"tag",

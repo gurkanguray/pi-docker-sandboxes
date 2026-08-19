@@ -276,7 +276,7 @@ test("release workflows are valid npm-only gates", async () => {
 		"receipt.tag !== `v${pkg.version}`",
 		"receipt.freshInstallReceipt?.version !== pkg.version",
 		"receipt.e2eReceipts?.length !== 3",
-		"receipt.runtimeReceipt?.variant !== \"standard\"",
+		'receipt.runtimeReceipt?.variant !== "standard"',
 	])
 		assert.ok(
 			verifyRun.includes(check),
@@ -291,7 +291,7 @@ test("release workflows are valid npm-only gates", async () => {
 		"packageReceipt.binVersion !== expected.VERSION",
 		"freshInstallReceipt.version !== expected.VERSION",
 		"e2eReceipt.packageVersion !== expected.VERSION",
-		"runtimeReceipt.variant !== \"standard\"",
+		'runtimeReceipt.variant !== "standard"',
 		"e2e.piVersion !== imageLock.piVersion",
 		"e2e.imageLockPiVersion !== imageLock.piVersion",
 	])
@@ -307,7 +307,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"runtime-evidence",
 	]);
 	const publicationRun = publication.steps?.find(
-		(step) => step.name === "Verify actual isolated Pi install and gallery availability",
+		(step) =>
+			step.name === "Verify actual isolated Pi install and gallery availability",
 	)?.run;
 	assert.ok(publicationRun, "publication verification must be executable");
 	assert.match(publicationRun, /npm view "pi-docker-sandboxes" version/);
