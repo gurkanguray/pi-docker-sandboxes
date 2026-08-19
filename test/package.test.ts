@@ -11,13 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const root = new URL("..", import.meta.url);
-const rootPath = fileURLToPath(root);
 
 test("runtime doctor ranges match package requirements", async () => {
 	const manifest = JSON.parse(
