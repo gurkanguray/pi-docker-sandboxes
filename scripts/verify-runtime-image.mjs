@@ -16,6 +16,45 @@ const buildKitBuildType =
 const isObject = (value) =>
 	value !== null && typeof value === "object" && !Array.isArray(value);
 
+function isResolvedDependency(dependency) {
+	if (
+		!isObject(dependency) ||
+		typeof dependency.uri !== "string" ||
+		dependency.uri.trim().length === 0 ||
+		!isObject(dependency.digest)
+	)
+		return false;
+	const digests = Object.entries(dependency.digest);
+	return (
+		digests.length > 0 &&
+		digests.every(
+			([algorithm, digest]) =>
+				algorithm.length > 0 &&
+				typeof digest === "string" &&
+				/^(?:[0-9a-f]{2})+$/.test(digest) &&
+				(algorithm !== "sha256" || digest.length === 64),
+		)
+	);
+}
+
+function parseUtcRfc3339(value) {
+	if (typeof value !== "string") return null;
+	const match =
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/.exec(
+			value,
+		);
+	if (!match || !Number.isFinite(Date.parse(value))) return null;
+	const wholeSecond = `${value.slice(0, 19)}Z`;
+	const milliseconds = Date.parse(wholeSecond);
+	if (
+		!Number.isFinite(milliseconds) ||
+		new Date(milliseconds).toISOString().slice(0, 19) !== value.slice(0, 19)
+	)
+		return null;
+	const fraction = (match[7] ?? "").padEnd(9, "0");
+	return BigInt(milliseconds) * 1_000_000n + BigInt(fraction || "0");
+}
+
 function parseArgs(argv) {
 	const values = { receipt: "runtime-image-receipt.json" };
 	for (let index = 0; index < argv.length; index += 2) {
@@ -123,14 +162,15 @@ export function validateAttestationManifest(
 		const args = external?.request?.args;
 		const runDetails = predicate?.runDetails;
 		const metadata = runDetails?.metadata;
-		const startedOn = Date.parse(metadata?.startedOn);
-		const finishedOn = Date.parse(metadata?.finishedOn);
+		const startedOn = parseUtcRfc3339(metadata?.startedOn);
+		const finishedOn = parseUtcRfc3339(metadata?.finishedOn);
 		if (
 			!isObject(predicate) ||
 			!isObject(build) ||
 			build.buildType !== buildKitBuildType ||
 			!Array.isArray(build.resolvedDependencies) ||
 			build.resolvedDependencies.length === 0 ||
+			!build.resolvedDependencies.every(isResolvedDependency) ||
 			!isObject(external) ||
 			!isObject(external.configSource) ||
 			external.configSource.path !== "runtime.Dockerfile" ||
@@ -144,10 +184,8 @@ export function validateAttestationManifest(
 			!isObject(metadata) ||
 			typeof metadata.invocationId !== "string" ||
 			metadata.invocationId.length === 0 ||
-			typeof metadata.startedOn !== "string" ||
-			typeof metadata.finishedOn !== "string" ||
-			!Number.isFinite(startedOn) ||
-			!Number.isFinite(finishedOn) ||
+			startedOn === null ||
+			finishedOn === null ||
 			finishedOn < startedOn
 		)
 			throw new Error("malformed BuildKit SLSA v1 provenance predicate");
@@ -163,6 +201,27 @@ export function validateAttestationCoverage(references, platformDescriptors) {
 		throw new Error(
 			"exactly one attestation manifest is required per verified platform",
 		);
+}
+
+export function validatePlatformDescriptors(descriptors, expectedPlatforms) {
+	const expected = new Set(expectedPlatforms);
+	const byPlatform = new Map();
+	const digests = new Set();
+	for (const descriptor of descriptors) {
+		const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
+		if (!expected.has(platform)) continue;
+		if (byPlatform.has(platform))
+			throw new Error(`duplicate OCI manifest for ${platform}`);
+		if (digests.has(descriptor.digest))
+			throw new Error(
+				`duplicate OCI platform manifest digest: ${descriptor.digest}`,
+			);
+		byPlatform.set(platform, descriptor);
+		digests.add(descriptor.digest);
+	}
+	if (byPlatform.size !== expected.size)
+		throw new Error("archive does not contain the locked runtime platforms");
+	return [...byPlatform.values()];
 }
 
 async function archiveIdentity(path) {
@@ -199,11 +258,12 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 		const platformDigests = {};
 		const platformDescriptors = new Map();
 		let labels;
-		for (const descriptor of index.manifests ?? []) {
-			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;
-			if (!expectedPlatforms.includes(platform)) continue;
-			if (platformDigests[platform])
-				throw new Error(`duplicate OCI manifest for ${platform}`);
+		const requiredDescriptors = validatePlatformDescriptors(
+			index.manifests ?? [],
+			expectedPlatforms,
+		);
+		for (const descriptor of requiredDescriptors) {
+			const platform = `${descriptor.platform.os}/${descriptor.platform.architecture}`;
 			const { value: manifest } = await readDescriptor(
 				layout,
 				descriptor,
@@ -234,11 +294,6 @@ export async function inspectArchive(archive, variant, sourceSha, lock) {
 			platformDigests[platform] = descriptor.digest;
 			platformDescriptors.set(descriptor.digest, descriptor);
 		}
-		if (
-			Object.keys(platformDigests).sort().join() !==
-			[...expectedPlatforms].sort().join()
-		)
-			throw new Error("archive does not contain the locked runtime platforms");
 		const attestationReferences = [];
 		for (const descriptor of index.manifests ?? []) {
 			const platform = `${descriptor.platform?.os}/${descriptor.platform?.architecture}`;

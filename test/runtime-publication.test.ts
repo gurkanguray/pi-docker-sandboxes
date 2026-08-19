@@ -16,6 +16,7 @@ const {
 	readDescriptor,
 	validateAttestationCoverage,
 	validateAttestationManifest,
+	validatePlatformDescriptors,
 } = verifierModule;
 
 const sha = (value: string) =>
@@ -218,6 +219,11 @@ test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
 			subject: [{ digest: { sha256: digestA.slice(7) } }],
 		}),
 	);
+	const alternateDigest: any = structuredClone(statement);
+	alternateDigest.predicate.buildDefinition.resolvedDependencies[0].digest = {
+		sha512: "e".repeat(128),
+	};
+	assert.doesNotThrow(() => validate(alternateDigest));
 	assert.throws(
 		() =>
 			validateAttestationManifest(
@@ -240,6 +246,33 @@ test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
 		"docker";
 	const missingDependency = structuredClone(statement);
 	missingDependency.predicate.buildDefinition.resolvedDependencies = [];
+	const invalidDependencies = [
+		null,
+		[],
+		{},
+		{ uri: "", digest: { sha256: "d".repeat(64) } },
+		{ uri: " ", digest: { sha256: "d".repeat(64) } },
+		{ uri: "pkg:test", digest: null },
+		{ uri: "pkg:test", digest: [] },
+		{ uri: "pkg:test", digest: {} },
+		{ uri: "pkg:test", digest: { sha256: "D".repeat(64) } },
+		{ uri: "pkg:test", digest: { sha256: "d".repeat(63) } },
+		{ uri: "pkg:test", digest: { sha512: "not-hex" } },
+		{
+			uri: "pkg:test",
+			digest: { sha256: "d".repeat(64), sha512: "not-hex" },
+		},
+	];
+	const invalidTimestamps = [
+		["", "2026-08-19T05:28:42Z"],
+		["2026-08-19 05:28:26Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26+00:00", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26z", "2026-08-19T05:28:42Z"],
+		["2026-02-30T05:28:26Z", "2026-03-02T05:28:42Z"],
+		["2026-08-19T05:28:26.1234567890Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:43Z", "2026-08-19T05:28:42Z"],
+		["2026-08-19T05:28:26.000000009Z", "2026-08-19T05:28:26.000000001Z"],
+	];
 	const cases: Array<[string, unknown]> = [
 		["missing predicate", { ...statement, predicate: undefined }],
 		[
@@ -259,6 +292,17 @@ test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
 		["wrong source", wrongSource],
 		["wrong variant", wrongVariant],
 		["missing dependency", missingDependency],
+		...invalidDependencies.map((dependency, index) => {
+			const candidate: any = structuredClone(statement);
+			candidate.predicate.buildDefinition.resolvedDependencies = [dependency];
+			return [`invalid dependency ${index}`, candidate] as [string, unknown];
+		}),
+		...invalidTimestamps.map(([startedOn, finishedOn], index) => {
+			const candidate = structuredClone(statement);
+			candidate.predicate.runDetails.metadata.startedOn = startedOn;
+			candidate.predicate.runDetails.metadata.finishedOn = finishedOn;
+			return [`invalid timestamps ${index}`, candidate] as [string, unknown];
+		}),
 	];
 	for (const [name, candidate] of cases)
 		assert.throws(() => validate(candidate), /provenance/, name);
@@ -275,7 +319,26 @@ test("attestations bind actual BuildKit mode=max SLSA v1 provenance", () => {
 		assert.throws(() => validate(invalidStatement), /attestation|subject/);
 });
 
-test("exactly one attestation manifest is required per platform", () => {
+test("required platform manifests have distinct digests", () => {
+	const descriptors = [
+		{ platform: { os: "linux", architecture: "amd64" }, digest: digestA },
+		{ platform: { os: "linux", architecture: "arm64" }, digest: digestB },
+	];
+	assert.deepEqual(
+		validatePlatformDescriptors(descriptors, ["linux/amd64", "linux/arm64"]),
+		descriptors,
+	);
+	assert.throws(
+		() =>
+			validatePlatformDescriptors(
+				[descriptors[0], { ...descriptors[1], digest: digestA }],
+				["linux/amd64", "linux/arm64"],
+			),
+		/duplicate OCI platform manifest digest/,
+	);
+});
+
+test("exactly one attestation manifest targets each required platform", () => {
 	const platforms = new Map([
 		[digestA, { digest: digestA }],
 		[digestB, { digest: digestB }],
@@ -283,15 +346,16 @@ test("exactly one attestation manifest is required per platform", () => {
 	assert.doesNotThrow(() =>
 		validateAttestationCoverage([digestA, digestB], platforms),
 	);
-	for (const references of [
-		[],
-		[digestA],
-		[digestA, digestA],
-		[digestA, digestB, `sha256:${"f".repeat(64)}`],
-	])
+	for (const [name, references] of [
+		["no targets", []],
+		["missing target", [digestA]],
+		["duplicate target", [digestA, digestA]],
+		["unexpected target", [digestA, digestB, `sha256:${"f".repeat(64)}`]],
+	] as Array<[string, string[]]>)
 		assert.throws(
 			() => validateAttestationCoverage(references, platforms),
 			/exactly one attestation manifest/,
+			name,
 		);
 });
 
