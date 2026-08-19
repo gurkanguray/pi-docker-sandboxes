@@ -102,7 +102,9 @@ export function migrateSandboxState(
 	);
 	return {
 		value: migrated,
-		warnings: ["Migrated sandbox lifecycle state from version 1 after daemon and image reconciliation"],
+		warnings: [
+			"Migrated sandbox lifecycle state from version 1 after daemon and image reconciliation",
+		],
 		sourceVersion: 1,
 		migrated: true,
 	};

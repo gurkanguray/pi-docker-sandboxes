@@ -457,7 +457,10 @@ function stateRecovery(path: string, name: string, missing = false): string[] {
 	];
 }
 
-async function preserveV1StateBytes(path: string, bytes: Buffer): Promise<void> {
+async function preserveV1StateBytes(
+	path: string,
+	bytes: Buffer,
+): Promise<void> {
 	const backup = `${path}.v1.backup`;
 	let file: FileHandle | undefined;
 	try {
@@ -486,7 +489,9 @@ async function preserveV1StateBytes(path: string, bytes: Buffer): Promise<void> 
 		await file?.close().catch(() => undefined);
 		if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
 		if (!(await readFile(backup)).equals(bytes))
-			throw new Error("Existing version 1 state backup does not match source bytes");
+			throw new Error(
+				"Existing version 1 state backup does not match source bytes",
+			);
 	}
 }
 

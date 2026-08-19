@@ -62,7 +62,8 @@ function rejectUnknown(
 	path: string,
 ): void {
 	const unknown = Object.keys(value).find((key) => !allowed.has(key));
-	if (unknown) throw new TypeError(`${path} has unknown state field ${unknown}`);
+	if (unknown)
+		throw new TypeError(`${path} has unknown state field ${unknown}`);
 }
 
 function image(
@@ -103,7 +104,11 @@ function parseImageAttestation(
 		throw new TypeError(`${path}.status is unsupported`);
 	return {
 		status: attestation.status,
-		image: image(attestation.image, `${path}.image`, attestation.templateStoreId),
+		image: image(
+			attestation.image,
+			`${path}.image`,
+			attestation.templateStoreId,
+		),
 		...(typeof attestation.templateStoreId === "string"
 			? { templateStoreId: attestation.templateStoreId }
 			: {}),
@@ -122,23 +127,36 @@ const BASE_KEYS = [
 ] as const;
 
 function base(input: Record<string, unknown>, path: string): SandboxStateBase {
-	const workspaceMode = requiredString(input.workspaceMode, `${path}.workspaceMode`);
+	const workspaceMode = requiredString(
+		input.workspaceMode,
+		`${path}.workspaceMode`,
+	);
 	if (workspaceMode !== "clone")
 		throw new TypeError(`${path}.workspaceMode is unsupported`);
 	return {
 		name: requiredString(input.name, `${path}.name`),
-		hostBaseCommit: requiredString(input.hostBaseCommit, `${path}.hostBaseCommit`),
+		hostBaseCommit: requiredString(
+			input.hostBaseCommit,
+			`${path}.hostBaseCommit`,
+		),
 		hostBranch: requiredString(input.hostBranch, `${path}.hostBranch`),
-		hostRepoIdentity: requiredString(input.hostRepoIdentity, `${path}.hostRepoIdentity`),
+		hostRepoIdentity: requiredString(
+			input.hostRepoIdentity,
+			`${path}.hostRepoIdentity`,
+		),
 		hostRoot: requiredString(input.hostRoot, `${path}.hostRoot`),
 		workspaceMode,
 		createdAt: requiredString(input.createdAt, `${path}.createdAt`),
 	};
 }
 
-export function parseSandboxStateV1(value: unknown, path: string): SandboxStateV1 {
+export function parseSandboxStateV1(
+	value: unknown,
+	path: string,
+): SandboxStateV1 {
 	const input = record(value, path);
-	if (input.version !== 1) throw new TypeError(`${path} is not version 1 state`);
+	if (input.version !== 1)
+		throw new TypeError(`${path} is not version 1 state`);
 	rejectUnknown(input, new Set([...BASE_KEYS, "imageAttestation"]), path);
 	const imageAttestation =
 		input.imageAttestation === undefined
@@ -147,12 +165,20 @@ export function parseSandboxStateV1(value: unknown, path: string): SandboxStateV
 					input.imageAttestation,
 					`${path}.imageAttestation`,
 				);
-	return { version: 1, ...base(input, path), ...(imageAttestation ? { imageAttestation } : {}) };
+	return {
+		version: 1,
+		...base(input, path),
+		...(imageAttestation ? { imageAttestation } : {}),
+	};
 }
 
-export function parseSandboxStateV2(value: unknown, path: string): SandboxStateV2 {
+export function parseSandboxStateV2(
+	value: unknown,
+	path: string,
+): SandboxStateV2 {
 	const input = record(value, path);
-	if (input.version !== 2) throw new TypeError(`${path} is not version 2 state`);
+	if (input.version !== 2)
+		throw new TypeError(`${path} is not version 2 state`);
 	rejectUnknown(
 		input,
 		new Set([
@@ -169,9 +195,16 @@ export function parseSandboxStateV2(value: unknown, path: string): SandboxStateV
 		]),
 		path,
 	);
-	if (!["creating", "ready", "exporting", "removing", "failed"].includes(String(input.phase)))
+	if (
+		!["creating", "ready", "exporting", "removing", "failed"].includes(
+			String(input.phase),
+		)
+	)
 		throw new TypeError(`${path}.phase is unsupported`);
-	if (!Number.isSafeInteger(input.runtimeSchema) || (input.runtimeSchema as number) < 1)
+	if (
+		!Number.isSafeInteger(input.runtimeSchema) ||
+		(input.runtimeSchema as number) < 1
+	)
 		throw new TypeError(`${path}.runtimeSchema must be a positive integer`);
 	const imageAttestation =
 		input.imageAttestation === undefined
@@ -182,12 +215,25 @@ export function parseSandboxStateV2(value: unknown, path: string): SandboxStateV
 				);
 	let lastOperationError: SandboxStateV2["lastOperationError"];
 	if (input.lastOperationError !== undefined) {
-		const error = record(input.lastOperationError, `${path}.lastOperationError`);
-		rejectUnknown(error, new Set(["category", "at"]), `${path}.lastOperationError`);
-		if (!["create", "image", "export", "remove", "reconcile"].includes(String(error.category)))
+		const error = record(
+			input.lastOperationError,
+			`${path}.lastOperationError`,
+		);
+		rejectUnknown(
+			error,
+			new Set(["category", "at"]),
+			`${path}.lastOperationError`,
+		);
+		if (
+			!["create", "image", "export", "remove", "reconcile"].includes(
+				String(error.category),
+			)
+		)
 			throw new TypeError(`${path}.lastOperationError.category is unsupported`);
 		lastOperationError = {
-			category: error.category as NonNullable<SandboxStateV2["lastOperationError"]>["category"],
+			category: error.category as NonNullable<
+				SandboxStateV2["lastOperationError"]
+			>["category"],
 			at: requiredString(error.at, `${path}.lastOperationError.at`),
 		};
 	}
@@ -196,12 +242,24 @@ export function parseSandboxStateV2(value: unknown, path: string): SandboxStateV
 		...base(input, path),
 		phase: input.phase as SandboxPhase,
 		...(imageAttestation ? { imageAttestation } : {}),
-		hostWorktreeIdentity: requiredString(input.hostWorktreeIdentity, `${path}.hostWorktreeIdentity`),
+		hostWorktreeIdentity: requiredString(
+			input.hostWorktreeIdentity,
+			`${path}.hostWorktreeIdentity`,
+		),
 		updatedAt: requiredString(input.updatedAt, `${path}.updatedAt`),
-		runtimeImage: image(input.runtimeImage, `${path}.runtimeImage`, input.templateStoreId),
+		runtimeImage: image(
+			input.runtimeImage,
+			`${path}.runtimeImage`,
+			input.templateStoreId,
+		),
 		runtimeSchema: input.runtimeSchema as number,
-		packageVersion: requiredString(input.packageVersion, `${path}.packageVersion`),
-		...(typeof input.templateStoreId === "string" ? { templateStoreId: input.templateStoreId } : {}),
+		packageVersion: requiredString(
+			input.packageVersion,
+			`${path}.packageVersion`,
+		),
+		...(typeof input.templateStoreId === "string"
+			? { templateStoreId: input.templateStoreId }
+			: {}),
 		...(lastOperationError ? { lastOperationError } : {}),
 	};
 }
@@ -210,5 +268,7 @@ export function parseSandboxState(value: unknown, path: string): SandboxState {
 	const input = record(value, path);
 	if (input.version === 1) return parseSandboxStateV1(input, path);
 	if (input.version === 2) return parseSandboxStateV2(input, path);
-	throw new TypeError(`${path} has unsupported state version ${String(input.version)}`);
+	throw new TypeError(
+		`${path} has unsupported state version ${String(input.version)}`,
+	);
 }

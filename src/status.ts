@@ -298,7 +298,9 @@ export async function runDoctor(
 			const daemonExists = await client.exists(name);
 			if (stateExists) {
 				const state = await loadSandboxState(repository.root, name);
-				const inspection = daemonExists ? await client.inspect(name) : undefined;
+				const inspection = daemonExists
+					? await client.inspect(name)
+					: undefined;
 				results.push(
 					lifecycleStatus(state, {
 						exists: daemonExists,
@@ -310,7 +312,8 @@ export async function runDoctor(
 			} else if (daemonExists)
 				results.push({
 					level: "fail",
-					message: "sandbox exists without lifecycle state; automatic removal is refused",
+					message:
+						"sandbox exists without lifecycle state; automatic removal is refused",
 				});
 		} catch (error) {
 			results.push({

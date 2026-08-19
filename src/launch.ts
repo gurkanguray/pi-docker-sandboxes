@@ -491,7 +491,8 @@ async function launchWithLease(context: {
 		throw new OperationError({
 			phase: "prepare",
 			operation: `reconcile sandbox ${name}`,
-			detail: "Sandbox exists without lifecycle state; automatic adoption and removal are refused",
+			detail:
+				"Sandbox exists without lifecycle state; automatic adoption and removal are refused",
 			recovery: [`sbx inspect ${shellArg(name)}`],
 		});
 	if (persistedState) {
@@ -1080,13 +1081,17 @@ async function launchWithLease(context: {
 					"remove sandbox",
 					async () => {
 						if (!state)
-							throw new Error("Sandbox removal requires durable lifecycle state");
+							throw new Error(
+								"Sandbox removal requires durable lifecycle state",
+							);
 						state.phase = "removing";
 						state.updatedAt = new Date().toISOString();
 						await (options.saveState ?? saveSandboxState)(state);
 						await client.remove(name, true);
 						if (await client.exists(name))
-							throw new Error("Sandbox removal was not confirmed by the daemon");
+							throw new Error(
+								"Sandbox removal was not confirmed by the daemon",
+							);
 					},
 				);
 				if (!removed) {

@@ -55,10 +55,7 @@ async function prepareSessionBackupRoot(
 	repositoryIdentity: string,
 	sandboxName: string,
 	create: boolean,
-): Promise<
-	| { root: string; validate: () => Promise<void> }
-	| undefined
-> {
+): Promise<{ root: string; validate: () => Promise<void> } | undefined> {
 	const root = sessionBackupRoot(agentDir, repositoryIdentity, sandboxName);
 	let canonicalAgentDir: string;
 	try {
@@ -207,10 +204,12 @@ export async function restoreSessions(
 	const backupDirectory = join(root, latest);
 	const sessions = join(backupDirectory, "sessions");
 	const selected = await Promise.all(
-		([
-			[backupDirectory, "backup"],
-			[sessions, "sessions"],
-		] as const).map(async ([path, label]) => {
+		(
+			[
+				[backupDirectory, "backup"],
+				[sessions, "sessions"],
+			] as const
+		).map(async ([path, label]) => {
 			const metadata = await lstat(path);
 			if (metadata.isSymbolicLink() || !metadata.isDirectory())
 				throw new TypeError(

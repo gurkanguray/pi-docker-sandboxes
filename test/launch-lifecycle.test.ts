@@ -475,7 +475,9 @@ test("create intent failures happen before the external create side effect", asy
 	await assert.rejects(failedSave.operation, /attestation state save failure/);
 	assert.equal(failedSave.log.includes("create"), false);
 	assert.equal(
-		await pathExists(statePath(failedSave.fixture.root, failedSave.fixture.name)),
+		await pathExists(
+			statePath(failedSave.fixture.root, failedSave.fixture.name),
+		),
 		false,
 	);
 
@@ -486,10 +488,12 @@ test("create intent failures happen before the external create side effect", asy
 	await assert.rejects(failedReinspection.operation, /reinspection failure/);
 	assert.equal(failedReinspection.log.includes("create"), false);
 	assert.equal(
-		(await loadSandboxState(
-			failedReinspection.fixture.root,
-			failedReinspection.fixture.name,
-		)).phase,
+		(
+			await loadSandboxState(
+				failedReinspection.fixture.root,
+				failedReinspection.fixture.name,
+			)
+		).phase,
 		"creating",
 	);
 });

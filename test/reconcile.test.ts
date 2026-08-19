@@ -5,10 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import {
-	reconcileSandbox,
-	type SandboxInspection,
-} from "../src/reconcile.ts";
+import { reconcileSandbox, type SandboxInspection } from "../src/reconcile.ts";
 import type { SandboxPhase, SandboxStateV2 } from "../src/state-schema.ts";
 import { loadSandboxState } from "../src/workspace.ts";
 
@@ -52,7 +49,13 @@ test("reconciliation transition table preserves ambiguous custody", () => {
 		}),
 		{ action: "preserve", reason: "interrupted export" },
 	);
-	for (const phase of ["creating", "ready", "exporting", "removing", "failed"] as const)
+	for (const phase of [
+		"creating",
+		"ready",
+		"exporting",
+		"removing",
+		"failed",
+	] as const)
 		assert.notEqual(
 			reconcileSandbox(state(phase), { exists: "unknown" }).action,
 			"remove-state",
@@ -85,15 +88,15 @@ test("Python SIGKILL phase probe restarts without authorizing ambiguous removal"
 			'import { dirname } from "node:path";',
 			`const path = ${JSON.stringify(join(root, ".git/pi-docker-sandbox/state", `${name}.json`))};`,
 			`const value = ${JSON.stringify(persisted)};`,
-			'await mkdir(dirname(path), { recursive: true });',
-			'const temp = `${path}.partial`;',
+			"await mkdir(dirname(path), { recursive: true });",
+			"const temp = `${path}.partial`;",
 			'const file = await open(temp, "wx", 0o600);',
-			'await file.writeFile(`${JSON.stringify(value)}\\n`);',
-			'await file.sync(); await file.close();',
-			'await rename(temp, path);',
+			"await file.writeFile(`${JSON.stringify(value)}\\n`);",
+			"await file.sync(); await file.close();",
+			"await rename(temp, path);",
 			'const parent = await open(dirname(path), "r"); await parent.sync(); await parent.close();',
 			'process.stdout.write("persisted\\n");',
-			'await new Promise(() => {});',
+			"await new Promise(() => {});",
 		].join("\n");
 		const python = [
 			"import os, signal, subprocess, sys",
@@ -103,9 +106,20 @@ test("Python SIGKILL phase probe restarts without authorizing ambiguous removal"
 			"assert p.wait() == -signal.SIGKILL",
 		].join("\n");
 		await exec("python3", ["-c", python, process.execPath, nodeSource]);
-		assert.equal(JSON.parse(await readFile(join(root, ".git/pi-docker-sandbox/state", `${name}.json`), "utf8")).phase, phase);
+		assert.equal(
+			JSON.parse(
+				await readFile(
+					join(root, ".git/pi-docker-sandbox/state", `${name}.json`),
+					"utf8",
+				),
+			).phase,
+			phase,
+		);
 		const restarted = await loadSandboxState(root, name);
 		const inspection: SandboxInspection = { exists: "unknown" };
-		assert.notEqual(reconcileSandbox(restarted, inspection).action, "remove-state");
+		assert.notEqual(
+			reconcileSandbox(restarted, inspection).action,
+			"remove-state",
+		);
 	}
 });

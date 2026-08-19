@@ -20,10 +20,7 @@ import {
 	sameFileIdentity,
 	writeJsonAtomic,
 } from "../src/migration.ts";
-import {
-	loadSandboxStateResult,
-	statePath,
-} from "../src/workspace.ts";
+import { loadSandboxStateResult, statePath } from "../src/workspace.ts";
 
 test("current config is preserved without migration warnings", () => {
 	const fixture = {
