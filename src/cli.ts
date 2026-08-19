@@ -420,11 +420,7 @@ export async function main(
 				throw new TypeError("sessions list accepts only --name NAME");
 			console.log(
 				JSON.stringify(
-					await listSessionBackups(
-						agentDir,
-						repository.identity,
-						name,
-					),
+					await listSessionBackups(agentDir, repository.identity, name),
 					null,
 					2,
 				),
@@ -461,12 +457,7 @@ export async function main(
 			name,
 			"sessions-delete",
 			async () => {
-				await deleteSessionBackup(
-					agentDir,
-					repository.identity,
-					name,
-					backupId,
-				);
+				await deleteSessionBackup(agentDir, repository.identity, name, backupId);
 				console.log(`Deleted session backup ${backupId}`);
 				return 0;
 			},
@@ -540,11 +531,7 @@ export async function main(
 			if (decision.action === "remove-state") {
 				if (command !== "destroy")
 					throw new Error("Sandbox is absent; lifecycle state preserved");
-				await removeSandboxState(
-					repository.root,
-					name,
-					dependencies.removeState,
-				);
+				await removeSandboxState(repository.root, name, dependencies.removeState);
 				console.log(`Sandbox ${name} was already absent; removed stale state`);
 				return 0;
 			}
@@ -563,11 +550,7 @@ export async function main(
 				state.phase = "exporting";
 				state.updatedAt = new Date().toISOString();
 				await saveSandboxState(state);
-				const result = await exportPatch(
-					client,
-					state,
-					config.export.directory,
-				);
+				const result = await exportPatch(client, state, config.export.directory);
 				markSandboxReady(state);
 				await saveSandboxState(state);
 				console.log(`${result.path}\n${result.summary.join("\n")}`);
@@ -625,11 +608,7 @@ export async function main(
 			if (await client.exists(name))
 				throw new Error("Sandbox removal was not confirmed by the daemon");
 			try {
-				await removeSandboxState(
-					repository.root,
-					name,
-					dependencies.removeState,
-				);
+				await removeSandboxState(repository.root, name, dependencies.removeState);
 			} catch (cause) {
 				throw new OperationError({
 					phase: "remove-or-keep",

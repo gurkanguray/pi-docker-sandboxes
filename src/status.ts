@@ -60,10 +60,7 @@ export async function attestSandbox(
 ): Promise<boolean> {
 	if (env.PI_DOCKER_SANDBOX_ACTIVE !== "1") return false;
 	try {
-		return isSandboxAttested(
-			env,
-			await readFile("/proc/self/mountinfo", "utf8"),
-		);
+		return isSandboxAttested(env, await readFile("/proc/self/mountinfo", "utf8"));
 	} catch {
 		return false;
 	}
@@ -299,18 +296,11 @@ export async function runDoctor(
 			const stateExists = await sandboxStateExists(repository.root, name);
 			const daemonExists = await client.exists(name);
 			if (stateExists) {
-				const state = await loadSandboxState(
-					repository.root,
-					name,
-					undefined,
-					{
-						expectedRepositoryIdentity: repository.identity,
-						expectedWorktreeIdentity: repository.worktreeIdentity,
-					},
-				);
-				const inspection = daemonExists
-					? await client.inspect(name)
-					: undefined;
+				const state = await loadSandboxState(repository.root, name, undefined, {
+					expectedRepositoryIdentity: repository.identity,
+					expectedWorktreeIdentity: repository.worktreeIdentity,
+				});
+				const inspection = daemonExists ? await client.inspect(name) : undefined;
 				results.push(
 					lifecycleStatus(state, {
 						exists: daemonExists,

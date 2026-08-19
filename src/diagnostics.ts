@@ -12,10 +12,7 @@ import { inspectSandboxLease } from "./lease.ts";
 import { detectHostPlatform } from "./platform.ts";
 import { reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
-import {
-	listSessionBackups,
-	reconcileSessionStaging,
-} from "./sessions.ts";
+import { listSessionBackups, reconcileSessionStaging } from "./sessions.ts";
 import {
 	inspectRepository,
 	loadSandboxState,
@@ -120,9 +117,7 @@ export function diagnosticsExitCode(
 	return receipt.checks.some((entry) => entry.level === "fail") ? 1 : 0;
 }
 
-function redactReceipt<T extends DoctorReceipt | StatusReceipt>(
-	receipt: T,
-): T {
+function redactReceipt<T extends DoctorReceipt | StatusReceipt>(receipt: T): T {
 	return JSON.parse(sanitizeDetail(JSON.stringify(receipt), 1024 * 1024)) as T;
 }
 
@@ -178,7 +173,8 @@ export async function buildDoctorReceipt(
 
 	try {
 		const version = await runCommand("pi", ["--version"]);
-		const compatible = version.match(/\d+\.\d+\.\d+/)?.[0] === IMAGE_LOCK.piVersion;
+		const compatible =
+			version.match(/\d+\.\d+\.\d+/)?.[0] === IMAGE_LOCK.piVersion;
 		checks.push(
 			check(
 				"pi",
@@ -433,7 +429,14 @@ export async function buildStatusReceipt(
 	options: DiagnosticsOptions = {},
 ): Promise<StatusReceipt> {
 	const doctor = await buildDoctorReceipt(options);
-	const ids = new Set(["image", "lease", "lifecycle", "upgrade", "backup", "git"]);
+	const ids = new Set([
+		"image",
+		"lease",
+		"lifecycle",
+		"upgrade",
+		"backup",
+		"git",
+	]);
 	const checks = doctor.checks.filter((entry) => ids.has(entry.id));
 	return {
 		schemaVersion: 1,

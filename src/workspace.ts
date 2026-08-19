@@ -1,11 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import {
-	constants,
-	lstatSync,
-	readFileSync,
-	realpathSync,
-} from "node:fs";
+import { constants, lstatSync, readFileSync, realpathSync } from "node:fs";
 import {
 	access,
 	lstat,
@@ -355,10 +350,14 @@ export async function createOwnedHostStaging(
 			? { uid: runtime.uid ?? process.getuid() }
 			: {}),
 	};
-	await writeFile(join(directory, HOST_STAGING_OWNER), `${JSON.stringify(record)}\n`, {
-		flag: "wx",
-		mode: 0o600,
-	});
+	await writeFile(
+		join(directory, HOST_STAGING_OWNER),
+		`${JSON.stringify(record)}\n`,
+		{
+			flag: "wx",
+			mode: 0o600,
+		},
+	);
 	const handle = await open(
 		parent,
 		constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -412,7 +411,10 @@ export async function reconcileOwnedHostStaging(
 ): Promise<string[]> {
 	const removed: string[] = [];
 	const host = runtime.host ?? hostname();
-	const uid = typeof process.getuid === "function" ? runtime.uid ?? process.getuid() : undefined;
+	const uid =
+		typeof process.getuid === "function"
+			? (runtime.uid ?? process.getuid())
+			: undefined;
 	for (const entry of (await readdir(parent))
 		.filter((name) => name.startsWith(HOST_STAGING_PREFIX))
 		.sort()) {
@@ -446,7 +448,8 @@ export async function reconcileOwnedHostStaging(
 			record.host !== host ||
 			!Number.isSafeInteger(record.pid) ||
 			(uid !== undefined && record.uid !== uid) ||
-			(runtime.processState ?? stagingProcessState)(record.pid as number) !== "absent"
+			(runtime.processState ?? stagingProcessState)(record.pid as number) !==
+				"absent"
 		)
 			continue;
 		await rm(directory, { recursive: true });
@@ -652,9 +655,7 @@ function shellArg(value: string): string {
 
 function stateRecovery(path: string, name: string, missing = false): string[] {
 	return [
-		...(missing
-			? []
-			: [`cp ${shellArg(path)} ${shellArg(`${path}.preserved`)}`]),
+		...(missing ? [] : [`cp ${shellArg(path)} ${shellArg(`${path}.preserved`)}`]),
 		`sbx exec ${shellArg(name)} git status --porcelain=v1`,
 		`sbx rm --force ${shellArg(name)}`,
 	];
@@ -679,12 +680,9 @@ function stateReadFlags(): { directory: number; file: number } {
 		"O_NONBLOCK",
 	] as const)
 		if (typeof constants[name] !== "number")
-			throw new Error(
-				`Secure state reads are unsupported: ${name} unavailable`,
-			);
+			throw new Error(`Secure state reads are unsupported: ${name} unavailable`);
 	return {
-		directory:
-			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		directory: constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
 		file: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
 	};
 }
@@ -700,12 +698,7 @@ async function readStateHandle(file: FileHandle): Promise<Buffer> {
 	const bytes = Buffer.alloc(metadata.size);
 	let offset = 0;
 	while (offset < bytes.length) {
-		const result = await file.read(
-			bytes,
-			offset,
-			bytes.length - offset,
-			offset,
-		);
+		const result = await file.read(bytes, offset, bytes.length - offset, offset);
 		if (result.bytesRead === 0) break;
 		offset += result.bytesRead;
 	}
@@ -754,9 +747,7 @@ async function openStateSnapshot(
 			discovered.nlink !== 1 ||
 			discovered.size > MAX_STATE_BYTES
 		)
-			throw new Error(
-				"Sandbox state is not a bounded single-link regular file",
-			);
+			throw new Error("Sandbox state is not a bounded single-link regular file");
 		file = await open(path, flags.file);
 		const openedIdentity = await file.stat();
 		if (!sameIdentity(discovered, openedIdentity))
@@ -826,9 +817,7 @@ async function preserveV1StateBytes(
 			!openedIdentity.isFile() ||
 			openedIdentity.nlink !== 1
 		)
-			throw new Error(
-				"Version 1 state backup is not a single-link regular file",
-			);
+			throw new Error("Version 1 state backup is not a single-link regular file");
 		const backupBytes = await readStateHandle(file);
 		const current = await lstat(backup);
 		if (
@@ -838,9 +827,7 @@ async function preserveV1StateBytes(
 			!sameIdentity(openedIdentity, current) ||
 			!backupBytes.equals(snapshot.bytes)
 		)
-			throw new Error(
-				"Existing version 1 state backup is unsafe or mismatched",
-			);
+			throw new Error("Existing version 1 state backup is unsafe or mismatched");
 		await file.sync();
 		const finalBackup = await lstat(backup);
 		if (
@@ -1066,9 +1053,7 @@ function destinationFlags(values: PatchOpenConstants = constants): {
 		"O_NONBLOCK",
 	] as const) {
 		if (typeof values[name] !== "number")
-			throw new Error(
-				`Secure patch export is unsupported: ${name} unavailable`,
-			);
+			throw new Error(`Secure patch export is unsupported: ${name} unavailable`);
 	}
 	return {
 		directory: values.O_RDONLY! | values.O_DIRECTORY! | values.O_NOFOLLOW!,
@@ -1316,9 +1301,7 @@ async function patchContainmentRoot(
 		};
 	} catch (cause) {
 		await Promise.all(
-			guardians.map((guardian) =>
-				guardian.handle.close().catch(() => undefined),
-			),
+			guardians.map((guardian) => guardian.handle.close().catch(() => undefined)),
 		);
 		throw cause;
 	}
@@ -1349,8 +1332,7 @@ async function preparePatchFile(
 			await directory.validate();
 			const childPath = join(currentPath, part);
 			let childStat = await lstat(childPath).catch((cause) => {
-				if ((cause as NodeJS.ErrnoException).code === "ENOENT")
-					return undefined;
+				if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 				throw cause;
 			});
 			if (!childStat) {

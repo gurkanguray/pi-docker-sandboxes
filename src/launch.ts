@@ -192,8 +192,7 @@ export function sanitizedHostEnvironment(
 	const output: NodeJS.ProcessEnv = {};
 	const add = (key: string): void => {
 		const value = env[key];
-		if (value && !/[\u0000-\u001f\u007f-\u009f]/.test(value))
-			output[key] = value;
+		if (value && !/[\u0000-\u001f\u007f-\u009f]/.test(value)) output[key] = value;
 	};
 	for (const key of HOST_ENV_ALLOWLIST) add(key);
 	for (const key of Object.keys(env)) if (LOCALE_ENV_NAME.test(key)) add(key);
@@ -370,9 +369,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	if (options.fresh && config.sandbox.name)
 		throw new Error("--fresh cannot be combined with sandbox.name");
 	if (!config.enabled)
-		throw new Error(
-			"Docker Sandboxes integration is disabled by configuration",
-		);
+		throw new Error("Docker Sandboxes integration is disabled by configuration");
 	let resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
 	try {
 		resolvedImage = await (options.resolveImage ?? resolveKitImage)(config);
@@ -460,9 +457,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			} catch (current) {
 				if (!(current instanceof UnbornHeadError)) throw current;
 				if (current.root !== root)
-					throw new Error(
-						"Git repository identity changed before initialization",
-					);
+					throw new Error("Git repository identity changed before initialization");
 				await createEmptyInitialCommit(root);
 				repository = await inspectHostRepository(cwd);
 			}
@@ -649,9 +644,7 @@ async function launchWithLease(context: {
 		config.auth.mode === "proxy" ? mapped.requested : [],
 	);
 	for (const id of mapped.unmatched)
-		pushProviderWarning(
-			`Host provider ${id} has no sandbox credential service`,
-		);
+		pushProviderWarning(`Host provider ${id} has no sandbox credential service`);
 	for (const id of resolvedProviders.unsupported)
 		pushProviderWarning(
 			`Requested credential service ${id} is not both audited and proxy-supported`,
@@ -758,8 +751,7 @@ async function launchWithLease(context: {
 	const makeResult = (): LaunchResult => ({
 		agentExitCode: agentExitCode!,
 		launcherExitCode,
-		custody:
-			custodyOverride ?? (lifecycle.preserved ? "preserved" : "released"),
+		custody: custodyOverride ?? (lifecycle.preserved ? "preserved" : "released"),
 		name,
 		state,
 		warnings,
@@ -811,11 +803,7 @@ async function launchWithLease(context: {
 		const profileDirectory = join(temp, "profile");
 		const agentDir = join(homedir(), ".pi", "agent");
 		if (state)
-			await reconcileSessionStaging(
-				agentDir,
-				state.hostRepoIdentity,
-				name,
-			);
+			await reconcileSessionStaging(agentDir, state.hostRepoIdentity, name);
 		const nativePackages = existing
 			? []
 			: await listNativePackageSpecs(agentDir, config.syncProfile, config.sync);
@@ -904,9 +892,7 @@ async function launchWithLease(context: {
 			image: resolvedImage.image,
 			sandboxName: name,
 			extraAllow:
-				nativePackagesToInstall.length > 0
-					? NATIVE_INSTALL_ALLOW_HOSTS
-					: undefined,
+				nativePackagesToInstall.length > 0 ? NATIVE_INSTALL_ALLOW_HOSTS : undefined,
 		});
 		const kitDirectory = join(temp, "kit");
 		await writeKitDirectory(kitDirectory, spec, {
@@ -1026,13 +1012,11 @@ async function launchWithLease(context: {
 							)
 						).code === 0;
 				} catch (cause) {
-					if (interrupted(cause) || !(cause instanceof SbxCommandError))
-						throw cause;
+					if (interrupted(cause) || !(cause instanceof SbxCommandError)) throw cause;
 					compilerInstalled = false;
 				}
 				if (!compilerInstalled) {
-					const warning =
-						"Could not install compiler; native packages were skipped";
+					const warning = "Could not install compiler; native packages were skipped";
 					warnings.push(warning);
 					options.onWarning?.(warning);
 				}
@@ -1053,11 +1037,9 @@ async function launchWithLease(context: {
 					let packageError: unknown;
 					try {
 						await client.copyTo(name, verifiedNpm, staged);
-						const owned = await client.exec(
-							name,
-							["chown", "agent:agent", staged],
-							{ user: "root" },
-						);
+						const owned = await client.exec(name, ["chown", "agent:agent", staged], {
+							user: "root",
+						});
 						if (owned.code !== 0)
 							throw new Error("Could not secure staged npm package ownership");
 						installed =
@@ -1072,13 +1054,9 @@ async function launchWithLease(context: {
 						else installed = false;
 					}
 					try {
-						const removed = await client.exec(
-							name,
-							["rm", "-f", "--", staged],
-							{
-								user: "root",
-							},
-						);
+						const removed = await client.exec(name, ["rm", "-f", "--", staged], {
+							user: "root",
+						});
 						if (removed.code !== 0)
 							throw new Error("Could not remove staged npm package");
 					} catch (cause) {
@@ -1137,11 +1115,9 @@ async function launchWithLease(context: {
 				credentialError = cause;
 			}
 			try {
-				const removed = await client.exec(
-					name,
-					["rm", "-f", "--", temporaryAuth],
-					{ user: "root" },
-				);
+				const removed = await client.exec(name, ["rm", "-f", "--", temporaryAuth], {
+					user: "root",
+				});
 				if (removed.code !== 0)
 					throw new Error("Could not remove staged OAuth credentials");
 			} catch (cause) {
@@ -1214,8 +1190,7 @@ async function launchWithLease(context: {
 					[
 						{
 							label: "managed session backup guidance",
-							detail:
-								"sandbox and state preserved; relaunch to retry managed backup",
+							detail: "sandbox and state preserved; relaunch to retry managed backup",
 						},
 					],
 				);
@@ -1249,8 +1224,7 @@ async function launchWithLease(context: {
 				exportRequested =
 					config.export.onExit === "always" ||
 					(config.export.onExit === "prompt" &&
-						(await options.confirm?.("Export sandbox changes as a patch?")) ===
-							true);
+						(await options.confirm?.("Export sandbox changes as a patch?")) === true);
 				if (exportRequested)
 					exportSucceeded = await finalize(
 						"export-or-preserve",
@@ -1293,9 +1267,7 @@ async function launchWithLease(context: {
 					"remove sandbox",
 					async () => {
 						if (!state)
-							throw new Error(
-								"Sandbox removal requires durable lifecycle state",
-							);
+							throw new Error("Sandbox removal requires durable lifecycle state");
 						state.phase = "removing";
 						state.updatedAt = new Date().toISOString();
 						await (options.saveState ?? saveSandboxState)(state);
@@ -1305,9 +1277,7 @@ async function launchWithLease(context: {
 						const removalConfirmed = !(await client.exists(name));
 						await options.onCrashPoint?.("after-removal-confirmation");
 						if (!removalConfirmed)
-							throw new Error(
-								"Sandbox removal was not confirmed by the daemon",
-							);
+							throw new Error("Sandbox removal was not confirmed by the daemon");
 					},
 				);
 				if (!removed) {
@@ -1338,8 +1308,7 @@ async function launchWithLease(context: {
 	} catch (error) {
 		if (error !== finalizationStopped) {
 			await markInterruptedState(error, primaryPhase);
-			const operationError =
-				error instanceof OperationError ? error : undefined;
+			const operationError = error instanceof OperationError ? error : undefined;
 			if (operationError && stateMarkFailures.length === 0)
 				primaryError = operationError;
 			else {

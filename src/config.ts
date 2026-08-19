@@ -256,9 +256,7 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 				`${source}.auth.providers`,
 			).map((provider) => {
 				if (!AUTH_PROVIDER.test(provider))
-					throw new TypeError(
-						`${source}.auth.providers contains an invalid id`,
-					);
+					throw new TypeError(`${source}.auth.providers contains an invalid id`);
 				return provider;
 			});
 	}
@@ -295,10 +293,9 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 		rejectUnknown(network, NETWORK_KEYS, `${source}.network.`);
 		output.network = {};
 		if (network.allow !== undefined)
-			output.network.allow = strings(
-				network.allow,
-				`${source}.network.allow`,
-			).map((domain) => validateDomain(domain));
+			output.network.allow = strings(network.allow, `${source}.network.allow`).map(
+				(domain) => validateDomain(domain),
+			);
 		if (network.deny !== undefined)
 			output.network.deny = strings(network.deny, `${source}.network.deny`).map(
 				(domain) => validateDomain(domain),
@@ -315,10 +312,7 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.export.onExit = value;
 		}
 		if (exportConfig.directory !== undefined) {
-			const value = string(
-				exportConfig.directory,
-				`${source}.export.directory`,
-			);
+			const value = string(exportConfig.directory, `${source}.export.directory`);
 			if (value.split(/[\\/]/).includes(".."))
 				throw new TypeError(
 					`${source}.export.directory may not traverse parent directories`,

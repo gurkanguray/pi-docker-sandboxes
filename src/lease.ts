@@ -92,8 +92,7 @@ function flags(): { directory: number; create: number; read: number } {
 		if (typeof constants[name] !== "number")
 			throw new Error(`Lifecycle leases are unsupported: ${name} unavailable`);
 	return {
-		directory:
-			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		directory: constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
 		create:
 			constants.O_CREAT |
 			constants.O_EXCL |
@@ -150,10 +149,7 @@ async function prepareLeaseDirectory(
 			const parent = await open(parentPath, flags().directory);
 			try {
 				const opened = await parent.stat();
-				if (
-					!opened.isDirectory() ||
-					!sameIdentity(identities[index - 1]!, opened)
-				)
+				if (!opened.isDirectory() || !sameIdentity(identities[index - 1]!, opened))
 					throw new Error("Lifecycle lease parent changed while syncing");
 				await sync(parentPath, parent);
 			} finally {
@@ -284,23 +280,32 @@ async function openLeaseSnapshot(
 			await parent.close();
 			return undefined;
 		}
-		if (!discovered.isFile() || discovered.isSymbolicLink() || discovered.nlink !== 1)
+		if (
+			!discovered.isFile() ||
+			discovered.isSymbolicLink() ||
+			discovered.nlink !== 1
+		)
 			throw busy();
 		file = await open(path, flags().read);
 		const identity = await file.stat();
-		if (!identity.isFile() || identity.nlink !== 1 || !sameIdentity(identity, discovered))
+		if (
+			!identity.isFile() ||
+			identity.nlink !== 1 ||
+			!sameIdentity(identity, discovered)
+		)
 			throw busy();
 		const bytes = await readBounded(file);
 		const record = parseRecord(bytes);
 		if (!record || record.sandbox !== name) throw busy();
 		const validate = async (): Promise<void> => {
-			const [openedParent, currentParent, opened, current, reread] = await Promise.all([
-				parent.stat(),
-				lstat(directory),
-				file!.stat(),
-				lstat(path),
-				readBounded(file!),
-			]);
+			const [openedParent, currentParent, opened, current, reread] =
+				await Promise.all([
+					parent.stat(),
+					lstat(directory),
+					file!.stat(),
+					lstat(path),
+					readBounded(file!),
+				]);
 			if (
 				!openedParent.isDirectory() ||
 				currentParent.isSymbolicLink() ||
@@ -337,7 +342,9 @@ export async function inspectSandboxLease(
 		const host = runtime.host ?? hostname();
 		if (snapshot.record.host !== host)
 			return { status: "uncertain", record: snapshot.record };
-		const state = (runtime.processState ?? localProcessState)(snapshot.record.pid);
+		const state = (runtime.processState ?? localProcessState)(
+			snapshot.record.pid,
+		);
 		return {
 			status:
 				state === "present"
@@ -357,15 +364,20 @@ export async function unlockSandboxLease(
 	root: string,
 	name: string,
 	yes: boolean,
-	runtime: SandboxLeaseRuntime & { beforeUnlink?: (path: string) => Promise<void> } = {},
+	runtime: SandboxLeaseRuntime & {
+		beforeUnlink?: (path: string) => Promise<void>;
+	} = {},
 ): Promise<LeaseRecord> {
 	if (!yes) throw new Error("Unlock requires explicit --yes authority");
 	const snapshot = await openLeaseSnapshot(root, name);
-	if (!snapshot) throw new Error(`No lifecycle lease exists for sandbox ${name}`);
+	if (!snapshot)
+		throw new Error(`No lifecycle lease exists for sandbox ${name}`);
 	try {
 		if (snapshot.record.host !== (runtime.host ?? hostname()))
 			throw new Error("Lease host identity is not local; refusing unlock");
-		const state = (runtime.processState ?? localProcessState)(snapshot.record.pid);
+		const state = (runtime.processState ?? localProcessState)(
+			snapshot.record.pid,
+		);
 		if (state !== "absent")
 			throw new Error(
 				state === "present"
@@ -503,9 +515,7 @@ export async function acquireSandboxLease(
 							!sameIdentity(identity, opened) ||
 							!sameIdentity(identity, current)
 						)
-							throw new Error(
-								"Lifecycle lease ownership changed before release",
-							);
+							throw new Error("Lifecycle lease ownership changed before release");
 						await unlink(path);
 						await actual.syncDirectory(parent.directory, parent.handle);
 					} finally {

@@ -205,7 +205,8 @@ export async function reconcileSessionStaging(
 			continue;
 		}
 		const record = owner as Record<string, unknown>;
-		const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+		const uid =
+			typeof process.getuid === "function" ? process.getuid() : undefined;
 		if (
 			record.schema !== 1 ||
 			record.kind !== "pi-dsbx-session-staging" ||
@@ -240,7 +241,9 @@ export async function listSessionBackups(
 	);
 	if (!prepared) return [];
 	await prepared.validate();
-	const entries = (await readdir(prepared.root)).filter(isBackupTimestamp).sort();
+	const entries = (await readdir(prepared.root))
+		.filter(isBackupTimestamp)
+		.sort();
 	const backups: SessionBackup[] = [];
 	for (const id of entries) {
 		const path = join(prepared.root, id);
@@ -464,9 +467,7 @@ export async function restoreSessions(
 				!current.isDirectory() ||
 				!sameIdentity(metadata, current)
 			)
-				throw new TypeError(
-					`Managed session ${label} directory identity changed`,
-				);
+				throw new TypeError(`Managed session ${label} directory identity changed`);
 		}
 	};
 	await validateSelected();
