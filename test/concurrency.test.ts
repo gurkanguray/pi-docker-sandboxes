@@ -3,10 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import {
-	acquireSandboxLease,
-	LEASE_BUSY_EXIT_CODE,
-} from "../src/lease.ts";
+import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
 import {
 	CommandCancelledError,
 	CommandTimeoutError,
@@ -29,8 +26,11 @@ test("simultaneous lifecycle commands have one owner and deterministic busy cont
 		),
 	);
 	const owners = attempts.filter(
-		(result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof acquireSandboxLease>>> =>
-			result.status === "fulfilled",
+		(
+			result,
+		): result is PromiseFulfilledResult<
+			Awaited<ReturnType<typeof acquireSandboxLease>>
+		> => result.status === "fulfilled",
 	);
 	assert.equal(owners.length, 1);
 	assert.equal(

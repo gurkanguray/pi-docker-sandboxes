@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	readdir,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { migrateSandboxState, writeJsonAtomic } from "../src/migration.ts";
 import { reconcileSandbox } from "../src/reconcile.ts";
-import { listSessionBackups, pruneSessionBackups, sessionBackupRoot } from "../src/sessions.ts";
+import {
+	listSessionBackups,
+	pruneSessionBackups,
+	sessionBackupRoot,
+} from "../src/sessions.ts";
 import type { SandboxStateV2 } from "../src/state-schema.ts";
 
 const oldImage = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
@@ -21,7 +32,9 @@ const legacy = {
 	createdAt: "2026-08-18T00:00:00.000Z",
 };
 
-function currentState(phase: SandboxStateV2["phase"] = "ready"): SandboxStateV2 {
+function currentState(
+	phase: SandboxStateV2["phase"] = "ready",
+): SandboxStateV2 {
 	return {
 		version: 2,
 		phase,
@@ -95,7 +108,15 @@ test("disk-full atomic sync preserves the previous state and clears staging", as
 		code: "ENOSPC",
 	});
 	await assert.rejects(
-		writeJsonAtomic(path, { version: 2 }, { beforeRename: async () => { throw diskFull; } }),
+		writeJsonAtomic(
+			path,
+			{ version: 2 },
+			{
+				beforeRename: async () => {
+					throw diskFull;
+				},
+			},
+		),
 		(error: unknown) => error === diskFull,
 	);
 	assert.equal(await readFile(path, "utf8"), '{"version":1}\n');
@@ -128,7 +149,9 @@ test("upgrade backup pruning ratchets limits while retaining the newest recovery
 		["2026-08-16T00-00-00-000Z"],
 	);
 	assert.deepEqual(
-		(await listSessionBackups(agentDir, "repository", "pi-upgrade")).map(({ id }) => id),
+		(await listSessionBackups(agentDir, "repository", "pi-upgrade")).map(
+			({ id }) => id,
+		),
 		["2026-08-17T00-00-00-000Z", "2026-08-18T00-00-00-000Z"],
 	);
 });

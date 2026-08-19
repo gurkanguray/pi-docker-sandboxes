@@ -63,9 +63,7 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(archive ?? "", /--dereference --hard-dereference/);
 	assert.match(archive ?? "", /--directory docs\/\.vitepress\/dist/);
 	assert.match(archive ?? "", /\$RUNNER_TEMP\/artifact\.tar/);
-	const upload = docsSteps.find(
-		(step) => step.name === "Upload Pages artifact",
-	);
+	const upload = docsSteps.find((step) => step.name === "Upload Pages artifact");
 	assert.equal(
 		upload?.uses,
 		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
@@ -87,11 +85,7 @@ test("release workflows are valid npm-only gates", async () => {
 		/npm publish|docker\/build-push-action|packages:\s*write/,
 	);
 	for (const action of docsText.matchAll(/uses:\s*([^\s]+)@([^\s]+)/g))
-		assert.match(
-			action[2]!,
-			/^[0-9a-f]{40}$/,
-			`${action[1]} must be SHA-pinned`,
-		);
+		assert.match(action[2]!, /^[0-9a-f]{40}$/, `${action[1]} must be SHA-pinned`);
 
 	const releaseText = await readFile(
 		new URL("release-candidate.yml", workflows),
@@ -321,7 +315,10 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.deepEqual(runtime.permissions, { contents: "read" });
 	assert.match(runtimeText, /platforms: linux\/amd64,linux\/arm64/);
 	assert.match(runtimeText, /no-cache: true/);
-	assert.match(runtimeText, /target: \$\{\{ needs\.source\.outputs\.variant \}\}/);
+	assert.match(
+		runtimeText,
+		/target: \$\{\{ needs\.source\.outputs\.variant \}\}/,
+	);
 	assert.match(runtimeText, /options: \[standard, docker\]/);
 	assert.doesNotMatch(runtimeText, /matrix\.variant/);
 	assert.match(runtimeText, /verify-runtime-image\.mjs/);
@@ -351,7 +348,10 @@ test("release workflows are valid npm-only gates", async () => {
 	for (const step of runtimeSecuritySteps.filter((candidate) =>
 		candidate.uses?.startsWith("aquasecurity/trivy-action@"),
 	))
-		assert.match(String(step.with?.input), /runtime-.*matrix\.arch.*\.docker\.tar/);
+		assert.match(
+			String(step.with?.input),
+			/runtime-.*matrix\.arch.*\.docker\.tar/,
+		);
 	const runtimeLock = JSON.parse(
 		await readFile(
 			new URL("../docker/runtime-lock.json", import.meta.url),
@@ -464,13 +464,7 @@ test("release workflows are valid npm-only gates", async () => {
 		include: [
 			{
 				name: "macos-arm64",
-				runner: [
-					"self-hosted",
-					"macOS",
-					"ARM64",
-					"docker-sandboxes",
-					"ephemeral",
-				],
+				runner: ["self-hosted", "macOS", "ARM64", "docker-sandboxes", "ephemeral"],
 				platform: "linux/arm64",
 			},
 			{
@@ -505,7 +499,8 @@ test("release workflows are valid npm-only gates", async () => {
 		/cleanup-receipt\.json/,
 		/npm-package-\$SOURCE_SHA/,
 		/oci-candidate-\$SOURCE_SHA/,
-	]) assert.match(e2e, evidence);
+	])
+		assert.match(e2e, evidence);
 	assert.doesNotMatch(e2e, /continue-on-error:\s*true/);
 	const e2eTest = await readFile(
 		new URL("../test/e2e.test.ts", import.meta.url),
@@ -521,14 +516,12 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(releaseText, /docker\/image-lock\.json/);
 	assert.match(releaseText, /--all "docker:\/\/\$RUNTIME_REFERENCE"/);
 	assert.doesNotMatch(
-		release.jobs["image-candidate"].steps?.map((step) => step.uses).join("\n") ?? "",
+		release.jobs["image-candidate"].steps?.map((step) => step.uses).join("\n") ??
+			"",
 		/docker\/build-push-action/,
 	);
-	for (const artifact of [
-		"macos-arm64",
-		"ubuntu-amd64-kvm",
-		"ubuntu-arm64-kvm",
-	]) assert.match(releaseText, new RegExp(`${artifact}-e2e-`));
+	for (const artifact of ["macos-arm64", "ubuntu-amd64-kvm", "ubuntu-arm64-kvm"])
+		assert.match(releaseText, new RegExp(`${artifact}-e2e-`));
 
 	for (const [name, workflow] of parsed)
 		for (const [jobName, job] of Object.entries(workflow.jobs))
@@ -554,7 +547,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"@earendil-works/pi-ai",
 		"@earendil-works/pi-coding-agent",
 		"@earendil-works/pi-tui",
-	]) assert.equal(pkg.peerDependencies[peer], ">=0.84.1 <0.85.0");
+	])
+		assert.equal(pkg.peerDependencies[peer], ">=0.84.1 <0.85.0");
 	assert.equal(pkg.devDependencies["@earendil-works/pi-coding-agent"], "0.84.2");
 
 	const coverage = await readFile(

@@ -198,11 +198,7 @@ export async function reconcileSessionStaging(
 		let owner: unknown;
 		try {
 			const metadata = await lstat(ownerPath);
-			if (
-				!metadata.isFile() ||
-				metadata.isSymbolicLink() ||
-				metadata.nlink !== 1
-			)
+			if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1)
 				continue;
 			owner = JSON.parse(await readFile(ownerPath, "utf8"));
 		} catch {
@@ -329,8 +325,7 @@ export async function pruneSessionBackups(
 	const cutoff = now.getTime() - retention.maxAgeDays * 86_400_000;
 	for (const backup of retained.slice())
 		if (backupDate(backup.id).getTime() < cutoff) remove(backup);
-	while (retained.length > Math.max(1, retention.maxCount))
-		remove(retained[0]!);
+	while (retained.length > Math.max(1, retention.maxCount)) remove(retained[0]!);
 	while (
 		retained.length > 1 &&
 		retained
@@ -384,9 +379,7 @@ export async function backupSessions(
 			kind: "pi-dsbx-session-staging",
 			path: basename(partial),
 			pid: process.pid,
-			...(typeof process.getuid === "function"
-				? { uid: process.getuid() }
-				: {}),
+			...(typeof process.getuid === "function" ? { uid: process.getuid() } : {}),
 		})}\n`,
 		{ flag: "wx", mode: 0o600 },
 	);
@@ -480,9 +473,7 @@ export async function restoreSessions(
 				!current.isDirectory() ||
 				!sameIdentity(metadata, current)
 			)
-				throw new TypeError(
-					`Managed session ${label} directory identity changed`,
-				);
+				throw new TypeError(`Managed session ${label} directory identity changed`);
 		}
 	};
 	await validateSelected();

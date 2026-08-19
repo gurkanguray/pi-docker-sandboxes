@@ -252,9 +252,7 @@ test("session list/delete and owned stale staging are explicit and bounded", asy
 			kind: "pi-dsbx-session-staging",
 			path: partialName,
 			pid: 999_999_999,
-			...(typeof process.getuid === "function"
-				? { uid: process.getuid() }
-				: {}),
+			...(typeof process.getuid === "function" ? { uid: process.getuid() } : {}),
 		}),
 	);
 	await mkdir(join(root, ".partial-unowned"));
@@ -305,66 +303,57 @@ test("restore selects only the latest backup and atomically swaps exact sessions
 
 test("restore copy failure removes only partial staging and preserves cleanup failure", async (t) => {
 	for (const cleanupFails of [false, true])
-		await t.test(
-			cleanupFails ? "cleanup failure" : "copy failure",
-			async () => {
-				const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-copy-"));
-				const id = "2026-08-14T12-34-56-789Z";
-				await mkdir(
-					join(sessionBackupRoot(agentDir, "repo", "sandbox"), id, "sessions"),
-					{ recursive: true },
-				);
-				const copyFailure = new Error("injected restore copy failure");
-				const cleanupFailure = new Error("injected staging cleanup failure");
-				let staging = "";
-				const execCalls: string[][] = [];
-				const client = {
-					copyTo: async (
-						_name: string,
-						_source: string,
-						destination: string,
-					) => {
-						staging = destination;
-						throw copyFailure;
-					},
-					exec: async (_name: string, argv: string[]) => {
-						execCalls.push(argv);
-						if (cleanupFails) throw cleanupFailure;
-						return { stdout: "", stderr: "", code: 0 };
-					},
-				} as unknown as SbxClient;
+		await t.test(cleanupFails ? "cleanup failure" : "copy failure", async () => {
+			const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-restore-copy-"));
+			const id = "2026-08-14T12-34-56-789Z";
+			await mkdir(
+				join(sessionBackupRoot(agentDir, "repo", "sandbox"), id, "sessions"),
+				{ recursive: true },
+			);
+			const copyFailure = new Error("injected restore copy failure");
+			const cleanupFailure = new Error("injected staging cleanup failure");
+			let staging = "";
+			const execCalls: string[][] = [];
+			const client = {
+				copyTo: async (_name: string, _source: string, destination: string) => {
+					staging = destination;
+					throw copyFailure;
+				},
+				exec: async (_name: string, argv: string[]) => {
+					execCalls.push(argv);
+					if (cleanupFails) throw cleanupFailure;
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
 
-				if (cleanupFails) {
-					await assert.rejects(
-						restoreSessions(client, agentDir, "repo", "sandbox", id),
-						(error: AggregateError) =>
-							error instanceof AggregateError &&
-							error.errors[0] === copyFailure &&
-							error.errors[1] === cleanupFailure,
-					);
-				} else {
-					await assert.rejects(
-						restoreSessions(client, agentDir, "repo", "sandbox", id),
-						copyFailure,
-					);
-				}
-				assert.match(staging, /\/\.sessions-restore-/);
-				assert.equal(execCalls.length, 1);
-				assert.equal(execCalls[0]?.includes(staging), true);
-				assert.equal(
-					execCalls[0]?.some((argument) =>
-						argument.includes("/home/agent/.pi/agent/sessions"),
-					),
-					false,
+			if (cleanupFails) {
+				await assert.rejects(
+					restoreSessions(client, agentDir, "repo", "sandbox", id),
+					(error: AggregateError) =>
+						error instanceof AggregateError &&
+						error.errors[0] === copyFailure &&
+						error.errors[1] === cleanupFailure,
 				);
-				assert.equal(
-					execCalls[0]?.some((argument) =>
-						argument.includes(".sessions-rollback-"),
-					),
-					false,
+			} else {
+				await assert.rejects(
+					restoreSessions(client, agentDir, "repo", "sandbox", id),
+					copyFailure,
 				);
-			},
-		);
+			}
+			assert.match(staging, /\/\.sessions-restore-/);
+			assert.equal(execCalls.length, 1);
+			assert.equal(execCalls[0]?.includes(staging), true);
+			assert.equal(
+				execCalls[0]?.some((argument) =>
+					argument.includes("/home/agent/.pi/agent/sessions"),
+				),
+				false,
+			);
+			assert.equal(
+				execCalls[0]?.some((argument) => argument.includes(".sessions-rollback-")),
+				false,
+			);
+		});
 });
 
 test("real restore shell rolls back swap, lost-response, and validation failures", async (t) => {
