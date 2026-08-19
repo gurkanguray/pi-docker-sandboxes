@@ -107,7 +107,9 @@ interface RestartReceipt {
 	decision: ReturnType<typeof reconcileSandbox>;
 }
 
-async function killAndRestart(point: LaunchCrashPoint): Promise<RestartReceipt> {
+async function killAndRestart(
+	point: LaunchCrashPoint,
+): Promise<RestartReceipt> {
 	const root = await repository();
 	const python = [
 		"import json, os, signal, subprocess, sys",

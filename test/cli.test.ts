@@ -439,7 +439,10 @@ test("management export and destroy refuse non-ready reconciled state", async ()
 		const result = await runCli(subject, command, [...args], false);
 		assert.equal(result.code, 1);
 		assert.match(result.stderr, /interrupted export|failed lifecycle/i);
-		assert.equal(result.calls.some((call) => call[0] === "rm"), false);
+		assert.equal(
+			result.calls.some((call) => call[0] === "rm"),
+			false,
+		);
 		assert.equal(
 			(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
 			phase,
@@ -458,7 +461,10 @@ test("management image mismatch marks failed and never removes", async () => {
 	);
 	assert.equal(result.code, 1);
 	assert.match(result.stderr, /runtime image mismatch/i);
-	assert.equal(result.calls.some((call) => call[0] === "rm"), false);
+	assert.equal(
+		result.calls.some((call) => call[0] === "rm"),
+		false,
+	);
 	assert.equal(
 		(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
 		"failed",
@@ -477,7 +483,10 @@ test("management daemon ambiguity preserves state and never removes", async () =
 	);
 	assert.equal(result.code, 1);
 	assert.match(result.stderr, /daemon unavailable|sbx list failed/i);
-	assert.equal(result.calls.some((call) => call[0] === "rm"), false);
+	assert.equal(
+		result.calls.some((call) => call[0] === "rm"),
+		false,
+	);
 	assert.equal(
 		(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
 		"ready",

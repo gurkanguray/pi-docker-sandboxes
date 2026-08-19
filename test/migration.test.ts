@@ -275,15 +275,10 @@ test("existing v1 backups reject symlinks and hardlinks", async () => {
 		else await link(target, `${fixture.path}.v1.backup`);
 		await assert.rejects(
 			() =>
-				loadSandboxStateResult(
-					fixture.root,
-					fixture.name,
-					migrationEvidence,
-					{
-						expectedRepositoryIdentity: "identity",
-						expectedWorktreeIdentity: fixture.root,
-					},
-				),
+				loadSandboxStateResult(fixture.root, fixture.name, migrationEvidence, {
+					expectedRepositoryIdentity: "identity",
+					expectedWorktreeIdentity: fixture.root,
+				}),
 			(error: unknown) => {
 				assert.match(
 					(error as { detail?: string }).detail ?? "",

@@ -437,11 +437,15 @@ async function saveSandboxStateAt(
 	const reportedPath = statePath(root, name);
 	const value = parseSandboxState(state, reportedPath);
 	const prepared = await prepareStateDirectory(root);
-	await writeJsonAtomic(join(prepared.directory, basename(reportedPath)), value, {
-		directoryPrepared: true,
-		validateDirectory: prepared.validate,
-		beforeRename,
-	});
+	await writeJsonAtomic(
+		join(prepared.directory, basename(reportedPath)),
+		value,
+		{
+			directoryPrepared: true,
+			validateDirectory: prepared.validate,
+			beforeRename,
+		},
+	);
 }
 
 export async function saveSandboxState(state: SandboxState): Promise<void> {
@@ -481,7 +485,9 @@ function stateReadFlags(): { directory: number; file: number } {
 		"O_NONBLOCK",
 	] as const)
 		if (typeof constants[name] !== "number")
-			throw new Error(`Secure state reads are unsupported: ${name} unavailable`);
+			throw new Error(
+				`Secure state reads are unsupported: ${name} unavailable`,
+			);
 	return {
 		directory:
 			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
@@ -527,7 +533,9 @@ async function openStateSnapshot(
 		gitStat.isSymbolicLink() ||
 		(await realpath(git)) !== join(canonicalRoot, ".git")
 	)
-		throw new Error("Sandbox state requires a real main-worktree Git directory");
+		throw new Error(
+			"Sandbox state requires a real main-worktree Git directory",
+		);
 	const path = statePath(root, name);
 	const directory = dirname(path);
 	const canonicalDirectory = join(
@@ -559,7 +567,9 @@ async function openStateSnapshot(
 			discovered.nlink !== 1 ||
 			discovered.size > MAX_STATE_BYTES
 		)
-			throw new Error("Sandbox state is not a bounded single-link regular file");
+			throw new Error(
+				"Sandbox state is not a bounded single-link regular file",
+			);
 		file = await open(path, flags.file);
 		const openedIdentity = await file.stat();
 		if (!sameIdentity(discovered, openedIdentity))
@@ -629,7 +639,9 @@ async function preserveV1StateBytes(
 			!openedIdentity.isFile() ||
 			openedIdentity.nlink !== 1
 		)
-			throw new Error("Version 1 state backup is not a single-link regular file");
+			throw new Error(
+				"Version 1 state backup is not a single-link regular file",
+			);
 		const backupBytes = await readStateHandle(file);
 		const current = await lstat(backup);
 		if (
@@ -639,7 +651,9 @@ async function preserveV1StateBytes(
 			!sameIdentity(openedIdentity, current) ||
 			!backupBytes.equals(snapshot.bytes)
 		)
-			throw new Error("Existing version 1 state backup is unsafe or mismatched");
+			throw new Error(
+				"Existing version 1 state backup is unsafe or mismatched",
+			);
 		await file.sync();
 		const finalBackup = await lstat(backup);
 		if (

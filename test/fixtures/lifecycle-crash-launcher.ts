@@ -1,9 +1,6 @@
 import { access, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-	launch,
-	type LaunchCrashPoint,
-} from "../../src/launch.ts";
+import { launch, type LaunchCrashPoint } from "../../src/launch.ts";
 import { reconcileSandbox } from "../../src/reconcile.ts";
 import type { SbxClient } from "../../src/sbx/client.ts";
 import { loadSandboxState, sandboxName } from "../../src/workspace.ts";
