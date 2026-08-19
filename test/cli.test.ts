@@ -44,14 +44,20 @@ async function fixture(
 		const repository = await inspectRepository(canonical);
 		const name = sandboxName(canonical);
 		await saveSandboxState({
-			version: 1,
+			version: 2,
+			phase: "ready",
 			name,
 			hostBaseCommit: repository.head,
 			hostBranch: repository.branch,
 			hostRepoIdentity: repository.identity,
+			hostWorktreeIdentity: canonical,
 			hostRoot: canonical,
 			workspaceMode: "clone",
 			createdAt: "2026-08-12T00:00:00.000Z",
+			updatedAt: "2026-08-18T00:00:00.000Z",
+			runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+			runtimeSchema: 1,
+			packageVersion: "1.0.0",
 		});
 	}
 	const bin = join(root, "bin");
@@ -60,7 +66,9 @@ async function fixture(
 	const script = join(bin, "sbx");
 	await writeFile(
 		script,
-		`#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nappendFileSync(process.env.FAKE_SBX_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");\nif (process.argv[2] === "exec") process.stdout.write(process.env.FAKE_DIRTY === "1" ? " M file.txt\\n" : "");\n`,
+		`#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nappendFileSync(process.env.FAKE_SBX_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");\nif (process.argv[2] === "exec") process.stdout.write(process.env.FAKE_DIRTY === "1" ? " M file.txt\\n" : "");
+if (process.argv[2] === "list") process.stdout.write('{"sandboxes":[]}\\n');
+`,
 	);
 	await chmod(script, 0o755);
 	return { root: canonical, bin, log };
@@ -379,7 +387,7 @@ test("inline false destroy booleans strip without granting authority", async () 
 	assert.deepEqual(malformed.calls, []);
 });
 
-test("destroy with --discard-changes removes a sandbox that has no clone state", async () => {
+test("destroy refuses a sandbox that has no durable lifecycle state", async () => {
 	const subject = await fixture({ state: false });
 	const name = sandboxName(subject.root);
 	const result = await runDestroy(
@@ -387,8 +395,9 @@ test("destroy with --discard-changes removes a sandbox that has no clone state",
 		["--name", name, "--discard-changes"],
 		false,
 	);
-	assert.equal(result.code, 0, result.stderr);
-	assert.deepEqual(result.calls, [["rm", "--force", name]]);
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /durable lifecycle state/i);
+	assert.deepEqual(result.calls, []);
 });
 
 test("--yes cannot discard dirty sandbox changes", async () => {
@@ -412,7 +421,7 @@ test("--discard-changes authorizes dirty removal and --yes authorizes clean remo
 		assert.equal(result.code, 0, result.stderr);
 		assert.deepEqual(
 			result.calls.map((call) => call[0]),
-			["exec", "rm"],
+			["exec", "rm", "list"],
 		);
 		await assert.rejects(
 			access(statePath(subject.root, sandboxName(subject.root))),
@@ -455,7 +464,7 @@ test("destroy reports stale state custody when exact state cleanup fails", async
 			.map((line) => JSON.parse(line));
 		assert.deepEqual(
 			calls.map((call) => call[0]),
-			["exec", "rm"],
+			["exec", "rm", "list"],
 		);
 	} finally {
 		process.chdir(previousCwd);

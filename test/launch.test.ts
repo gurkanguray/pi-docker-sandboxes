@@ -1465,7 +1465,7 @@ test("--yes creates exactly one empty initial commit", async () => {
 	assert.equal(await git(root, "show", "--format=", "--name-only", "HEAD"), "");
 });
 
-test("state persists immediately after create before repository reinspection", async () => {
+test("creating intent persists before create and repository reinspection", async () => {
 	for (const mode of [
 		"success",
 		"launch-failure",
@@ -1485,7 +1485,7 @@ test("state persists immediately after create before repository reinspection", a
 			},
 			create: async () => {
 				calls.push("create");
-				assert.equal(await exists(path), false);
+				assert.equal(await exists(path), true);
 				if (mode === "launch-failure")
 					throw new Error("injected launch failure");
 				if (mode === "head-drift") {
@@ -1528,10 +1528,7 @@ test("state persists immediately after create before repository reinspection", a
 					? ["validate", "create", "inspect", "attach"]
 					: ["validate", "create"],
 		);
-		assert.equal(
-			await exists(path),
-			mode === "success" || mode === "head-drift" || mode === "identity-drift",
-		);
+		assert.equal(await exists(path), true);
 	}
 });
 

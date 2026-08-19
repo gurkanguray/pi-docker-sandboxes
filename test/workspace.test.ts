@@ -59,15 +59,22 @@ async function repository(): Promise<string> {
 
 async function sandboxState(root: string): Promise<SandboxState> {
 	const repositoryState = await inspectRepository(root);
+	const now = new Date().toISOString();
 	return {
-		version: 1,
+		version: 2,
+		phase: "ready",
 		name: sandboxName(root),
 		hostBaseCommit: repositoryState.head,
 		hostBranch: repositoryState.branch,
 		hostRepoIdentity: repositoryState.identity,
+		hostWorktreeIdentity: root,
 		hostRoot: root,
 		workspaceMode: "clone",
-		createdAt: new Date().toISOString(),
+		createdAt: now,
+		updatedAt: now,
+		runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+		runtimeSchema: 1,
+		packageVersion: "1.0.0",
 	};
 }
 
@@ -264,14 +271,20 @@ test("state writes replace atomically and corrupt state has recovery context", a
 	const repositoryState = await inspectRepository(root);
 	const name = sandboxName(root);
 	const state: SandboxState = {
-		version: 1,
+		version: 2,
+		phase: "ready",
 		name,
 		hostBaseCommit: repositoryState.head,
 		hostBranch: repositoryState.branch,
 		hostRepoIdentity: repositoryState.identity,
+		hostWorktreeIdentity: root,
 		hostRoot: root,
 		workspaceMode: "clone",
 		createdAt: "2026-08-12T00:00:00.000Z",
+		updatedAt: "2026-08-18T00:00:00.000Z",
+		runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+		runtimeSchema: 1,
+		packageVersion: "1.0.0",
 	};
 	await saveSandboxState(state);
 	await saveSandboxState({ ...state, hostBranch: "updated" });
@@ -913,6 +926,23 @@ test("patch destination detects parent replacement and leaves outside untouched"
 	);
 	assert.deepEqual(await readdir(outside), []);
 	assert.deepEqual(await readdir(moved), []);
+});
+
+test("unsupported patch directory sync fails closed and retains the claimed artifact", async () => {
+	const root = await repository();
+	const path = join(root, "patches", "unsynced.patch");
+	await assert.rejects(
+		() =>
+			preparePatchDestination(root, "patches", "unsynced.patch", {
+				syncDirectory: async () => {
+					throw Object.assign(new Error("unsupported directory sync"), {
+						code: "EINVAL",
+					});
+				},
+			}),
+		/unsupported directory sync/,
+	);
+	assert.equal((await lstat(path)).isFile(), true);
 });
 
 test("failed patch claims are retained rather than removed by pathname", async () => {

@@ -27,6 +27,7 @@ import {
 	inspectRepository,
 	loadSandboxState,
 	removeSandboxState,
+	saveSandboxState,
 	sandboxStateExists,
 	sandboxName,
 	statePath,
@@ -359,11 +360,17 @@ export async function main(
 			if (command === "export") {
 				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
 				const config = await loadConfig(cwd);
+				state.phase = "exporting";
+				state.updatedAt = new Date().toISOString();
+				await saveSandboxState(state);
 				const result = await exportPatch(
 					client,
 					state,
 					config.export.directory,
 				);
+				state.phase = "ready";
+				state.updatedAt = new Date().toISOString();
+				await saveSandboxState(state);
 				console.log(`${result.path}\n${result.summary.join("\n")}`);
 				return 0;
 			}
@@ -410,7 +417,14 @@ export async function main(
 				throw new Error(
 					"Destroy cancelled; use --discard-changes to authorize noninteractive dirty removal",
 				);
+			if (!state)
+				throw new Error("Sandbox removal requires durable lifecycle state");
+			state.phase = "removing";
+			state.updatedAt = new Date().toISOString();
+			await saveSandboxState(state);
 			await client.remove(name, true);
+			if (await client.exists(name))
+				throw new Error("Sandbox removal was not confirmed by the daemon");
 			try {
 				await removeSandboxState(
 					repository.root,

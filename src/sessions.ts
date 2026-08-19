@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
 	chmod,
 	lstat,
 	mkdir,
 	mkdtemp,
+	open,
 	readdir,
 	realpath,
 	rename,
@@ -162,6 +164,15 @@ export async function backupSessions(
 		await prepared!.validate();
 		await rename(partial, destination);
 		await prepared!.validate();
+		const parent = await open(
+			root,
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		);
+		try {
+			await parent.sync();
+		} finally {
+			await parent.close();
+		}
 		return destination;
 	} catch (cause) {
 		try {

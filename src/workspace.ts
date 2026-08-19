@@ -29,13 +29,21 @@ import {
 import {
 	migrateSandboxState,
 	type Migration,
+	type SandboxMigrationEvidence,
 	writeJsonAtomic,
 } from "./migration.ts";
 import { type SbxClient, validateSandboxName } from "./sbx/client.ts";
-import type { SandboxState } from "./state-schema.ts";
+import {
+	parseSandboxState,
+	type SandboxState,
+	type SandboxStateV2,
+} from "./state-schema.ts";
 export type {
 	SandboxImageAttestation,
+	SandboxPhase,
 	SandboxState,
+	SandboxStateV1,
+	SandboxStateV2,
 } from "./state-schema.ts";
 
 const execFileAsync = promisify(execFile);
@@ -368,6 +376,7 @@ export async function removeSandboxState(
 		)
 			throw new Error("Sandbox state path identity changed before removal");
 		await unlink(path);
+		await parent.sync();
 	} catch (cause) {
 		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw cause;
@@ -422,7 +431,7 @@ async function prepareStateDirectory(root: string): Promise<{
 
 export async function saveSandboxState(state: SandboxState): Promise<void> {
 	const reportedPath = statePath(state.hostRoot, state.name);
-	const value = migrateSandboxState(state, reportedPath).value;
+	const value = parseSandboxState(state, reportedPath);
 	const prepared = await prepareStateDirectory(state.hostRoot);
 	await writeJsonAtomic(
 		join(prepared.directory, basename(reportedPath)),
@@ -448,17 +457,53 @@ function stateRecovery(path: string, name: string, missing = false): string[] {
 	];
 }
 
+async function preserveV1StateBytes(path: string, bytes: Buffer): Promise<void> {
+	const backup = `${path}.v1.backup`;
+	let file: FileHandle | undefined;
+	try {
+		file = await open(
+			backup,
+			constants.O_CREAT |
+				constants.O_EXCL |
+				constants.O_WRONLY |
+				constants.O_NOFOLLOW,
+			0o600,
+		);
+		await file.writeFile(bytes);
+		await file.sync();
+		await file.close();
+		file = undefined;
+		const parent = await open(
+			dirname(path),
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		);
+		try {
+			await parent.sync();
+		} finally {
+			await parent.close();
+		}
+	} catch (cause) {
+		await file?.close().catch(() => undefined);
+		if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+		if (!(await readFile(backup)).equals(bytes))
+			throw new Error("Existing version 1 state backup does not match source bytes");
+	}
+}
+
 export async function loadSandboxStateResult(
 	root: string,
 	name: string,
-): Promise<Migration<SandboxState>> {
+	evidence?: SandboxMigrationEvidence,
+): Promise<Migration<SandboxStateV2>> {
 	const path = statePath(root, name);
-	let migrated: Migration<SandboxState>;
+	let migrated: Migration<SandboxStateV2>;
 	try {
-		migrated = migrateSandboxState(
-			JSON.parse(await readFile(path, "utf8")),
-			path,
-		);
+		const bytes = await readFile(path);
+		migrated = migrateSandboxState(JSON.parse(bytes.toString("utf8")), path, evidence);
+		if (migrated.migrated) {
+			await preserveV1StateBytes(path, bytes);
+			await saveSandboxState(migrated.value);
+		}
 	} catch (cause) {
 		const missing = (cause as NodeJS.ErrnoException).code === "ENOENT";
 		throw new OperationError({
@@ -489,8 +534,9 @@ export async function loadSandboxStateResult(
 export async function loadSandboxState(
 	root: string,
 	name: string,
-): Promise<SandboxState> {
-	return (await loadSandboxStateResult(root, name)).value;
+	evidence?: SandboxMigrationEvidence,
+): Promise<SandboxStateV2> {
+	return (await loadSandboxStateResult(root, name, evidence)).value;
 }
 
 export async function sandboxStateExists(
@@ -540,6 +586,8 @@ export interface PatchDestinationOptions {
 	beforeCreate?: (directory: string, path: string) => Promise<void>;
 	/** @internal Deterministic race injection after the file is opened. */
 	afterCreate?: (directory: string, path: string) => Promise<void>;
+	/** @internal Deterministic directory-sync failure injection. */
+	syncDirectory?: (directory: string) => Promise<void>;
 }
 
 class PatchClaimError extends Error {
@@ -977,14 +1025,9 @@ export async function preparePatchDestination(
 	try {
 		await prepared.file.sync();
 		await prepared.validateParent();
-		await prepared.parent.sync().catch((cause) => {
-			if (
-				!["EINVAL", "ENOTSUP", "EBADF"].includes(
-					(cause as NodeJS.ErrnoException).code ?? "",
-				)
-			)
-				throw cause;
-		});
+		if (options.syncDirectory)
+			await options.syncDirectory(dirname(prepared.path));
+		else await prepared.parent.sync();
 		return prepared.path;
 	} finally {
 		await prepared.file.close().catch(() => undefined);
@@ -1099,14 +1142,9 @@ export async function exportPatch(
 				)
 					throw new Error("Patch file changed during write");
 				await prepared.validateParent();
-				await prepared.parent.sync().catch((cause) => {
-					if (
-						!["EINVAL", "ENOTSUP", "EBADF"].includes(
-							(cause as NodeJS.ErrnoException).code ?? "",
-						)
-					)
-						throw cause;
-				});
+				if (options.destination?.syncDirectory)
+					await options.destination.syncDirectory(dirname(prepared.path));
+				else await prepared.parent.sync();
 				completed = true;
 			} catch (cause) {
 				const current = await lstat(prepared.path).catch(() => undefined);

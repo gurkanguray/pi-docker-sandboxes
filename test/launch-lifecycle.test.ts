@@ -28,6 +28,7 @@ import {
 	sandboxName,
 	saveSandboxState,
 	statePath,
+	type SandboxPhase,
 	type SandboxState,
 } from "../src/workspace.ts";
 
@@ -100,6 +101,7 @@ interface FakeOptions {
 	exportError?: Error;
 	finalExistsError?: Error;
 	removeError?: Error;
+	removeUnconfirmed?: boolean;
 	backupError?: Error;
 	restoreError?: Error;
 	missingSessions?: boolean;
@@ -180,7 +182,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		remove: async () => {
 			log.push("remove");
 			if (options.removeError) throw options.removeError;
-			present = false;
+			if (!options.removeUnconfirmed) present = false;
 		},
 	} as unknown as SbxClient;
 	return { client, present: () => present };
@@ -206,7 +208,9 @@ async function runCase(
 		yes?: boolean;
 		resolvedImage?: { image: string; templateStoreId?: string };
 		imageAttestation?: SandboxState["imageAttestation"];
+		persistedPhase?: SandboxPhase;
 		saveStateErrorAfter?: number;
+		onSaveState?: (state: SandboxState) => void;
 		repositoryInspectionErrorAfter?: number;
 		sessionBackup?: boolean;
 	},
@@ -226,7 +230,19 @@ async function runCase(
 	}
 	if (options.imageAttestation)
 		fixture.state.imageAttestation = options.imageAttestation;
-	if (options.existed) await saveSandboxState(fixture.state);
+	if (options.persistedPhase) {
+		const now = "2026-08-18T00:00:00.000Z";
+		await saveSandboxState({
+			...fixture.state,
+			version: 2,
+			phase: options.persistedPhase,
+			hostWorktreeIdentity: fixture.root,
+			updatedAt: now,
+			runtimeImage: fixtureImage,
+			runtimeSchema: 1,
+			packageVersion: "1.0.0",
+		});
+	} else if (options.existed) await saveSandboxState(fixture.state);
 	const log: string[] = [];
 	const fake = fakeClient(log, options);
 	const cleanup = {
@@ -275,11 +291,12 @@ async function runCase(
 		...(options.resolvedImage
 			? { resolveImage: async () => options.resolvedImage! }
 			: {}),
-		...(options.saveStateErrorAfter
+		...(options.saveStateErrorAfter || options.onSaveState
 			? {
 					saveState: async (state: SandboxState) => {
 						saveStateCalls++;
-						if (saveStateCalls >= options.saveStateErrorAfter!)
+						options.onSaveState?.(structuredClone(state));
+						if (saveStateCalls >= (options.saveStateErrorAfter ?? Infinity))
 							throw new Error("injected attestation state save failure");
 						await saveSandboxState(state);
 					},
@@ -453,27 +470,12 @@ test("clone sandboxes attest configured remote images before attach", async () =
 	assert.equal(mismatch.fake.present(), true);
 });
 
-test("clone create state failures retain executable custody", async () => {
+test("create intent failures happen before the external create side effect", async () => {
 	const failedSave = await runCase({ keep: true, saveStateErrorAfter: 1 });
-	await assert.rejects(failedSave.operation, (error: unknown) => {
-		assert.equal((error as { phase?: string }).phase, "create");
-		assert.deepEqual((error as { recovery?: string[] }).recovery, [
-			`sbx inspect '${failedSave.fixture.name}'`,
-			`sbx exec '${failedSave.fixture.name}' git status --porcelain=v1`,
-			`sbx exec '${failedSave.fixture.name}' git diff --binary`,
-			`sbx rm --force '${failedSave.fixture.name}'`,
-		]);
-		assert.match(
-			(error as { detail?: string }).detail ?? "",
-			/data-loss warning: removing .* loses any sandbox-only changes/,
-		);
-		return true;
-	});
-	assert.equal(failedSave.log.includes("attach"), false);
+	await assert.rejects(failedSave.operation, /attestation state save failure/);
+	assert.equal(failedSave.log.includes("create"), false);
 	assert.equal(
-		await pathExists(
-			statePath(failedSave.fixture.root, failedSave.fixture.name),
-		),
+		await pathExists(statePath(failedSave.fixture.root, failedSave.fixture.name)),
 		false,
 	);
 
@@ -481,24 +483,14 @@ test("clone create state failures retain executable custody", async () => {
 		keep: true,
 		repositoryInspectionErrorAfter: 2,
 	});
-	await assert.rejects(failedReinspection.operation, (error: unknown) => {
-		assert.equal((error as { phase?: string }).phase, "create");
-		assert.deepEqual((error as { recovery?: string[] }).recovery, [
-			`pi-dsbx export --name '${failedReinspection.fixture.name}'`,
-			`pi-dsbx destroy --name '${failedReinspection.fixture.name}' --discard-changes`,
-			`pi-dsbx run --name '${failedReinspection.fixture.name}'`,
-		]);
-		return true;
-	});
-	assert.equal(failedReinspection.log.includes("attach"), false);
+	await assert.rejects(failedReinspection.operation, /reinspection failure/);
+	assert.equal(failedReinspection.log.includes("create"), false);
 	assert.equal(
-		await pathExists(
-			statePath(
-				failedReinspection.fixture.root,
-				failedReinspection.fixture.name,
-			),
-		),
-		true,
+		(await loadSandboxState(
+			failedReinspection.fixture.root,
+			failedReinspection.fixture.name,
+		)).phase,
+		"creating",
 	);
 });
 
@@ -522,7 +514,7 @@ test("verified attestation state save failure preserves without attach", async (
 
 test("recorded image attestation is enforced on every resume", async () => {
 	const image = fixtureImage;
-	const selectedImage = `example.invalid/image@sha256:${"b".repeat(64)}`;
+	const selectedImage = image;
 	for (const status of ["pending", "verified"] as const) {
 		const matching = await runCase({
 			existed: true,
@@ -542,9 +534,51 @@ test("recorded image attestation is enforced on every resume", async () => {
 			resolvedImage: { image: selectedImage },
 			inspection: { image: `${image}-wrong` },
 		});
-		await assert.rejects(mismatch.operation, /resumed sandbox image/i);
+		await assert.rejects(mismatch.operation, (error: unknown) => {
+			assert.match(
+				(error as { detail?: string }).detail ?? "",
+				/matching daemon and image evidence/i,
+			);
+			return true;
+		});
 		assert.equal(mismatch.log.includes("attach"), false);
 	}
+});
+
+test("startup reconciles creating and refuses interrupted export", async () => {
+	const creating = await runCase({
+		existed: true,
+		persistedPhase: "creating",
+		keep: true,
+	});
+	const resumed = await creating.operation;
+	assert.equal(resumed.state?.phase, "ready");
+	assert.equal(creating.log.includes("attach"), true);
+
+	const exporting = await runCase({
+		existed: true,
+		persistedPhase: "exporting",
+		keep: true,
+	});
+	await assert.rejects(exporting.operation, /interrupted export/i);
+	assert.equal(exporting.log.includes("attach"), false);
+	assert.equal(exporting.log.includes("remove"), false);
+	assert.equal(
+		(await loadSandboxState(exporting.fixture.root, exporting.fixture.name))
+			.phase,
+		"exporting",
+	);
+});
+
+test("known absent removing state is reconciled before a fresh create", async () => {
+	const subject = await runCase({
+		existed: false,
+		persistedPhase: "removing",
+		keep: true,
+	});
+	const result = await subject.operation;
+	assert.equal(result.state?.phase, "ready");
+	assert.equal(subject.log.filter((entry) => entry === "create").length, 1);
 });
 
 function assertLifecycle(
@@ -573,6 +607,7 @@ test("newly created clean sandbox is removed with its state", async () => {
 		"exec:git status --porcelain=v1",
 		"cleanup",
 		"remove",
+		"exists",
 		"unlink-state",
 	]);
 	assertLifecycle(result, {
@@ -596,8 +631,8 @@ test("existing sandbox without attestation is verified and preserved", async () 
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
-		"validate",
 		"inspect",
+		"validate",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -647,6 +682,25 @@ test("new sandbox with keep remains classified as newly created", async () => {
 	);
 });
 
+test("lifecycle intents are persisted before create, export, and remove", async () => {
+	const phases: string[] = [];
+	const subject = await runCase({
+		status: " M file.txt\n",
+		onExit: "always",
+		onSaveState: (state) => {
+			if (state.version === 2) phases.push(state.phase);
+		},
+	});
+	await subject.operation;
+	assert.deepEqual(phases, [
+		"creating",
+		"ready",
+		"exporting",
+		"ready",
+		"removing",
+	]);
+});
+
 test("changed sandbox is removed only after successful export", async () => {
 	const subject = await runCase({ status: " M file.txt\n", onExit: "always" });
 	const result = await subject.operation;
@@ -664,6 +718,7 @@ test("changed sandbox is removed only after successful export", async () => {
 		`exec:git diff --cached --numstat ${subject.fixture.state.hostBaseCommit}`,
 		"cleanup",
 		"remove",
+		"exists",
 		"unlink-state",
 	]);
 	assertLifecycle(result, { changed: true, exported: true, preserved: false });
@@ -695,8 +750,8 @@ test("changed sandbox with rejected export is preserved", async () => {
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
-		"validate",
 		"inspect",
+		"validate",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -756,8 +811,8 @@ test("changed sandbox with export disabled is preserved", async () => {
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
-		"validate",
 		"inspect",
+		"validate",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -806,8 +861,8 @@ test("export failure preserves sandbox and remains the primary error", async () 
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
-		"validate",
 		"inspect",
+		"validate",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -817,8 +872,8 @@ test("export failure preserves sandbox and remains the primary error", async () 
 	]);
 	assert.equal(subject.fake.present(), true);
 	assert.equal(
-		await pathExists(statePath(subject.fixture.root, subject.fixture.name)),
-		true,
+		(await loadSandboxState(subject.fixture.root, subject.fixture.name)).phase,
+		"exporting",
 	);
 });
 
@@ -867,7 +922,7 @@ test("failed cleanup never triggers sandbox removal", async () => {
 	);
 });
 
-test("create failure never removes a sandbox or writes state", async () => {
+test("create failure preserves the durable creating intent", async () => {
 	const primary = new Error("injected create failure");
 	const subject = await runCase({ launchError: primary });
 	await assert.rejects(subject.operation, (error) => {
@@ -885,8 +940,8 @@ test("create failure never removes a sandbox or writes state", async () => {
 	]);
 	assert.equal(subject.fake.present(), false);
 	assert.equal(
-		await pathExists(statePath(subject.fixture.root, subject.fixture.name)),
-		false,
+		(await loadSandboxState(subject.fixture.root, subject.fixture.name)).phase,
+		"creating",
 	);
 });
 
@@ -943,8 +998,8 @@ test("remove failure preserves sandbox and state after nonzero Pi exit", async (
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",
-		"validate",
 		"inspect",
+		"validate",
 		"attach",
 		"exists",
 		"exec:git status --porcelain=v1",
@@ -955,6 +1010,22 @@ test("remove failure preserves sandbox and state after nonzero Pi exit", async (
 	assert.equal(
 		await pathExists(statePath(subject.fixture.root, subject.fixture.name)),
 		true,
+	);
+});
+
+test("unconfirmed removal preserves removing state and never unlinks it", async () => {
+	const subject = await runCase({
+		existed: true,
+		status: "",
+		removeUnconfirmed: true,
+	});
+	const result = await subject.operation;
+	assert.equal(result.lifecycle.preserved, true);
+	assert.equal(subject.log.includes("unlink-state"), false);
+	assert.equal(subject.fake.present(), true);
+	assert.equal(
+		(await loadSandboxState(subject.fixture.root, subject.fixture.name)).phase,
+		"removing",
 	);
 });
 
@@ -972,9 +1043,10 @@ test("state unlink failure reports stale state after successful remove", async (
 		result.warnings.join("\n"),
 		/stale[\s\S]*injected state unlink failure/i,
 	);
-	assert.deepEqual(subject.log.slice(-3), [
+	assert.deepEqual(subject.log.slice(-4), [
 		"cleanup",
 		"remove",
+		"exists",
 		"unlink-state",
 	]);
 	assert.equal(subject.fake.present(), false);
@@ -1102,6 +1174,7 @@ test("missing managed sessions continue through clean inspection and removal", a
 		"exec:git status --porcelain=v1",
 		"cleanup",
 		"remove",
+		"exists",
 		"unlink-state",
 	]);
 	assert.equal(subject.log.includes("backup-sessions"), false);

@@ -15,13 +15,16 @@ import {
 	sanitizeDetail,
 	type OperationPhase,
 } from "./errors.ts";
+import { IMAGE_LOCK } from "./image-lock.ts";
 import {
 	buildKitSpec,
+	PACKAGE_VERSION,
 	resolveKitImage,
 	type KitImageResolver,
 	writeKitDirectory,
 } from "./kit.ts";
 import { withSandboxLease } from "./lease.ts";
+import { reconcileSandbox } from "./reconcile.ts";
 import {
 	createPersonalizationSnapshot,
 	listNativePackageSpecs,
@@ -47,7 +50,8 @@ import {
 	sandboxName,
 	saveSandboxState,
 	statePath,
-	type SandboxState,
+	sandboxStateExists,
+	type SandboxStateV2,
 	UnbornHeadError,
 } from "./workspace.ts";
 
@@ -172,7 +176,7 @@ export interface LaunchLifecycle {
 export interface LaunchResult {
 	exitCode: number;
 	name: string;
-	state?: SandboxState;
+	state?: SandboxStateV2;
 	warnings: string[];
 	lifecycle: LaunchLifecycle;
 }
@@ -480,20 +484,88 @@ async function launchWithLease(context: {
 	}
 	if (options.fresh && existing)
 		throw new Error("Fresh sandbox name collision; retry the launch");
-	let state: SandboxState | undefined;
-	let stateMigrated = false;
+	let state: SandboxStateV2 | undefined;
 	const warnings = [...loadedConfig.warnings];
-	if (existing) {
-		const loadedState = await loadSandboxStateResult(root, name);
+	const persistedState = await sandboxStateExists(root, name);
+	if (existing && !persistedState)
+		throw new OperationError({
+			phase: "prepare",
+			operation: `reconcile sandbox ${name}`,
+			detail: "Sandbox exists without lifecycle state; automatic adoption and removal are refused",
+			recovery: [`sbx inspect ${shellArg(name)}`],
+		});
+	if (persistedState) {
+		let inspection: Record<string, unknown> | undefined;
+		if (existing) inspection = await client.inspect(name);
+		const loadedState = await loadSandboxStateResult(
+			root,
+			name,
+			existing && inspection
+				? {
+						exists: true,
+						inspectedImage: String(inspection.image ?? ""),
+						expectedImage: resolvedImage.image,
+						runtimeSchema: IMAGE_LOCK.runtimeSchema,
+						packageVersion: PACKAGE_VERSION,
+						...(resolvedImage.templateStoreId
+							? { templateStoreId: resolvedImage.templateStoreId }
+							: {}),
+					}
+				: undefined,
+		);
 		state = loadedState.value;
-		stateMigrated = loadedState.migrated;
 		warnings.push(...loadedState.warnings);
 		if (state.hostRepoIdentity !== repository.identity)
 			throw new Error("Existing sandbox belongs to another repository");
+		if (state.hostWorktreeIdentity !== repository.root)
+			throw new Error("Existing sandbox belongs to another worktree");
 		if (state.hostBaseCommit !== repository.head)
 			throw new Error(
 				"Host HEAD changed since sandbox creation; export or destroy the sandbox before continuing",
 			);
+		if (
+			state.runtimeImage !== resolvedImage.image ||
+			state.runtimeSchema !== IMAGE_LOCK.runtimeSchema ||
+			state.packageVersion !== PACKAGE_VERSION
+		) {
+			state.phase = "failed";
+			state.updatedAt = new Date().toISOString();
+			state.lastOperationError = {
+				category: "reconcile",
+				at: state.updatedAt,
+			};
+			await (options.saveState ?? saveSandboxState)(state);
+			throw new Error(
+				"Recorded runtime is incompatible with this controller; sandbox preserved for export and recreation",
+			);
+		}
+		const decision = reconcileSandbox(state, {
+			exists: existing,
+			...(existing
+				? { imageMatches: inspection?.image === state.runtimeImage }
+				: {}),
+		});
+		if (decision.action === "remove-state") {
+			await removeSandboxState(root, name);
+			state = undefined;
+			existing = false;
+		} else if (decision.action === "mark-ready") {
+			state.phase = "ready";
+			state.updatedAt = new Date().toISOString();
+			delete state.lastOperationError;
+			await (options.saveState ?? saveSandboxState)(state);
+		} else if (decision.action === "mark-failed") {
+			state.phase = "failed";
+			state.updatedAt = new Date().toISOString();
+			state.lastOperationError = {
+				category: "image",
+				at: state.updatedAt,
+			};
+			await (options.saveState ?? saveSandboxState)(state);
+			throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+		} else if (state.phase !== "ready") {
+			throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+		}
 	}
 
 	options.onStatus?.("syncing host credentials");
@@ -715,11 +787,76 @@ async function launchWithLease(context: {
 		};
 		if (!existing) {
 			primaryPhase = "create";
+			const now = new Date().toISOString();
+			state = {
+				version: 2,
+				phase: "creating",
+				name,
+				hostBaseCommit: repository.head,
+				hostBranch: repository.branch,
+				hostRepoIdentity: repository.identity,
+				hostWorktreeIdentity: repository.root,
+				hostRoot: repository.root,
+				workspaceMode: "clone",
+				createdAt: now,
+				updatedAt: now,
+				runtimeImage: resolvedImage.image,
+				runtimeSchema: IMAGE_LOCK.runtimeSchema,
+				packageVersion: PACKAGE_VERSION,
+				...(resolvedImage.templateStoreId
+					? { templateStoreId: resolvedImage.templateStoreId }
+					: {}),
+				imageAttestation: {
+					status: "pending",
+					image: resolvedImage.image,
+					...(resolvedImage.templateStoreId
+						? { templateStoreId: resolvedImage.templateStoreId }
+						: {}),
+				},
+			};
+			primaryOperation = "persist creating sandbox intent";
+			await (options.saveState ?? saveSandboxState)(state);
+			const current = await inspectHostRepository(root);
+			if (
+				current.identity !== state.hostRepoIdentity ||
+				current.head !== state.hostBaseCommit
+			)
+				throw new Error("Host repository changed during sandbox creation");
 			primaryOperation = "create sandbox";
 			options.onStatus?.("creating sandbox");
+			lifecycle.preserved = true;
 			await client.create(request);
 			lifecycle.created = true;
-			lifecycle.preserved = true;
+			primaryOperation = "reinspect repository after sandbox creation";
+			const createdAgainst = await inspectHostRepository(root);
+			if (
+				createdAgainst.identity !== state.hostRepoIdentity ||
+				createdAgainst.head !== state.hostBaseCommit
+			)
+				throw new Error("Host repository changed during sandbox creation");
+			primaryOperation = "verify created sandbox image";
+			try {
+				verifyCreatedImage(await client.inspect(name), {
+					image: state.runtimeImage,
+					...(state.templateStoreId
+						? { templateStoreId: state.templateStoreId }
+						: {}),
+				});
+			} catch (cause) {
+				state.phase = "failed";
+				state.updatedAt = new Date().toISOString();
+				state.lastOperationError = {
+					category: "image",
+					at: state.updatedAt,
+				};
+				await (options.saveState ?? saveSandboxState)(state);
+				throw cause;
+			}
+			state.phase = "ready";
+			state.updatedAt = new Date().toISOString();
+			state.imageAttestation!.status = "verified";
+			primaryOperation = "persist ready sandbox state";
+			await (options.saveState ?? saveSandboxState)(state);
 			let compilerInstalled = nativePackagesToInstall.length === 0;
 			if (nativePackagesToInstall.length > 0) {
 				primaryOperation = "install sandbox compiler toolchain";
@@ -775,116 +912,6 @@ async function launchWithLease(context: {
 					warnings.push(warning);
 					options.onWarning?.(warning);
 				}
-			}
-			if (repository) {
-				state = {
-					version: 1,
-					name,
-					hostBaseCommit: repository.head,
-					hostBranch: repository.branch,
-					hostRepoIdentity: repository.identity,
-					hostRoot: repository.root,
-					workspaceMode: "clone",
-					createdAt: new Date().toISOString(),
-					imageAttestation: {
-						status: "pending",
-						image: resolvedImage.image,
-						...(resolvedImage.templateStoreId
-							? { templateStoreId: resolvedImage.templateStoreId }
-							: {}),
-					},
-				};
-			}
-		}
-
-		if (existing && state && !state.imageAttestation) {
-			state.imageAttestation = {
-				status: "pending",
-				image: resolvedImage.image,
-				...(resolvedImage.templateStoreId
-					? { templateStoreId: resolvedImage.templateStoreId }
-					: {}),
-			};
-			stateMigrated = true;
-		}
-
-		if (state && (!existing || stateMigrated)) {
-			primaryPhase = !existing ? "create" : "prepare";
-			if (!existing) {
-				primaryOperation = "persist pending sandbox state";
-				try {
-					await (options.saveState ?? saveSandboxState)(state);
-				} catch (cause) {
-					throw new LaunchOperationError(
-						"create",
-						primaryOperation,
-						lifecycle,
-						cause,
-						errorDetail(cause),
-						[
-							`sbx inspect ${shellArg(name)}`,
-							`sbx exec ${shellArg(name)} git status --porcelain=v1`,
-							`sbx exec ${shellArg(name)} git diff --binary`,
-							`sbx rm --force ${shellArg(name)}`,
-						],
-						[
-							{
-								label: "data-loss warning",
-								detail: `removing ${shellArg(name)} loses any sandbox-only changes`,
-							},
-						],
-					);
-				}
-				primaryOperation =
-					"reinspect repository after sandbox state persistence";
-				try {
-					const current = await inspectHostRepository(root);
-					if (
-						current.identity !== state.hostRepoIdentity ||
-						current.head !== state.hostBaseCommit
-					)
-						throw new Error("Host repository changed during sandbox creation");
-				} catch (cause) {
-					throw new LaunchOperationError(
-						"create",
-						primaryOperation,
-						lifecycle,
-						cause,
-						errorDetail(cause),
-						custodyCommands(),
-					);
-				}
-			} else {
-				primaryOperation = "persist migrated sandbox state";
-				const current = await inspectHostRepository(root);
-				if (
-					current.identity !== state.hostRepoIdentity ||
-					current.head !== state.hostBaseCommit
-				)
-					throw new Error("Host repository changed during sandbox preparation");
-				await (options.saveState ?? saveSandboxState)(state);
-			}
-		}
-		const attestation = state?.imageAttestation;
-		if (attestation) {
-			primaryOperation = existing
-				? "verify resumed sandbox image"
-				: "verify created sandbox image";
-			try {
-				verifyCreatedImage(await client.inspect(name), attestation);
-				if (attestation.status === "pending") {
-					attestation.status = "verified";
-					await (options.saveState ?? saveSandboxState)(state!);
-				}
-			} catch (cause) {
-				throw new LaunchOperationError(
-					existing ? "prepare" : "create",
-					primaryOperation,
-					lifecycle,
-					cause,
-					errorDetail(cause),
-					custodyCommands(),
-				);
 			}
 		}
 
@@ -1017,10 +1044,15 @@ async function launchWithLease(context: {
 					exportSucceeded = await finalize(
 						"export-or-preserve",
 						"export sandbox changes",
-						() =>
-							exportPatch(client, state!, config.export.directory).then(
-								() => {},
-							),
+						async () => {
+							state!.phase = "exporting";
+							state!.updatedAt = new Date().toISOString();
+							await (options.saveState ?? saveSandboxState)(state!);
+							await exportPatch(client, state!, config.export.directory);
+							state!.phase = "ready";
+							state!.updatedAt = new Date().toISOString();
+							await (options.saveState ?? saveSandboxState)(state!);
+						},
 					);
 			}
 			lifecycle.exported = exportSucceeded;
@@ -1043,8 +1075,19 @@ async function launchWithLease(context: {
 					result = { exitCode, name, state, warnings, lifecycle };
 					throw finalizationStopped;
 				}
-				const removed = await finalize("remove-or-keep", "remove sandbox", () =>
-					client.remove(name, true),
+				const removed = await finalize(
+					"remove-or-keep",
+					"remove sandbox",
+					async () => {
+						if (!state)
+							throw new Error("Sandbox removal requires durable lifecycle state");
+						state.phase = "removing";
+						state.updatedAt = new Date().toISOString();
+						await (options.saveState ?? saveSandboxState)(state);
+						await client.remove(name, true);
+						if (await client.exists(name))
+							throw new Error("Sandbox removal was not confirmed by the daemon");
+					},
 				);
 				if (!removed) {
 					warnCustody();

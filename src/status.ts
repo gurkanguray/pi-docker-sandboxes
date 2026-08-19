@@ -2,13 +2,20 @@ import { execFile } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.ts";
+import { reconcileSandbox, type SandboxInspection } from "./reconcile.ts";
 import { resolveAvailableServices } from "./providers.ts";
 import {
 	SbxClient,
 	SbxNotInstalledError,
 	type SbxCapabilities,
 } from "./sbx/client.ts";
-import { inspectRepository } from "./workspace.ts";
+import type { SandboxStateV2 } from "./state-schema.ts";
+import {
+	inspectRepository,
+	loadSandboxState,
+	sandboxName,
+	sandboxStateExists,
+} from "./workspace.ts";
 
 const execFileAsync = promisify(execFile);
 export const TESTED_SBX_VERSION = /^0\.38\./;
@@ -16,6 +23,20 @@ export const TESTED_SBX_VERSION = /^0\.38\./;
 export interface DoctorResult {
 	level: "pass" | "warning" | "fail";
 	message: string;
+}
+
+export function lifecycleStatus(
+	state: SandboxStateV2,
+	inspection: SandboxInspection,
+): DoctorResult {
+	const decision = reconcileSandbox(state, inspection);
+	const healthy = state.phase === "ready" && decision.action === "preserve";
+	return {
+		level: healthy ? "pass" : "warning",
+		message: healthy
+			? `sandbox lifecycle: ready`
+			: `sandbox lifecycle: ${state.phase}; reconciliation ${decision.action} (${"reason" in decision ? decision.reason : "confirmed daemon state"})`,
+	};
 }
 
 export function isSandboxAttested(
@@ -270,6 +291,33 @@ export async function runDoctor(
 				message:
 					"host working tree has uncommitted changes (clone still protects host writes)",
 			});
+		try {
+			const config = await loadConfig(cwd);
+			const name = config.sandbox.name ?? sandboxName(repository.root);
+			const stateExists = await sandboxStateExists(repository.root, name);
+			const daemonExists = await client.exists(name);
+			if (stateExists) {
+				const state = await loadSandboxState(repository.root, name);
+				const inspection = daemonExists ? await client.inspect(name) : undefined;
+				results.push(
+					lifecycleStatus(state, {
+						exists: daemonExists,
+						...(inspection
+							? { imageMatches: inspection.image === state.runtimeImage }
+							: {}),
+					}),
+				);
+			} else if (daemonExists)
+				results.push({
+					level: "fail",
+					message: "sandbox exists without lifecycle state; automatic removal is refused",
+				});
+		} catch (error) {
+			results.push({
+				level: "warning",
+				message: `sandbox lifecycle reconciliation unavailable: ${(error as Error).message}`,
+			});
+		}
 	} catch {
 		results.push({
 			level: "warning",

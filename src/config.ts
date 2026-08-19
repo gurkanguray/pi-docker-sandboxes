@@ -314,12 +314,10 @@ async function readConfig(
 	path: string,
 ): Promise<{ value: ConfigOverride; warnings: string[] }> {
 	try {
-		const { migrateConfig } = await import("./migration.ts");
-		const migrated = migrateConfig(
-			JSON.parse(await readFile(path, "utf8")),
-			path,
-		);
-		return { value: migrated.value, warnings: migrated.warnings };
+		return {
+			value: parseConfig(JSON.parse(await readFile(path, "utf8")), path),
+			warnings: [],
+		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT")
 			return { value: {}, warnings: [] };
