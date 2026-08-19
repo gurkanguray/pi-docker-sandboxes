@@ -40,7 +40,11 @@ import {
 	syncHostProviderSecrets,
 } from "./host-auth.ts";
 import { certifyHostPlatform, type SupportedHost } from "./platform.ts";
-import { providerSetupGuidance } from "./preflight.ts";
+import {
+	preflightLinuxKvm,
+	providerSetupGuidance,
+	type KvmPreflightOptions,
+} from "./preflight.ts";
 import { resolveAvailableServices } from "./providers.ts";
 import {
 	CommandCancelledError,
@@ -155,6 +159,8 @@ export interface LaunchOptions {
 	resolveImage?: KitImageResolver;
 	/** @internal Test-only host certification injection. */
 	certifyPlatform?: () => Promise<SupportedHost>;
+	/** @internal Test-only Linux KVM preflight boundary. */
+	kvmPreflight?: KvmPreflightOptions;
 	/** @internal Test-only state persistence injection. */
 	saveState?: typeof saveSandboxState;
 	/** @internal Test-only repository inspection injection. */
@@ -384,11 +390,12 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		});
 	}
 	try {
-		await (options.certifyPlatform ?? certifyHostPlatform)();
+		const host = await (options.certifyPlatform ?? certifyHostPlatform)();
+		await preflightLinuxKvm(host, options.kvmPreflight);
 	} catch (cause) {
 		throw new OperationError({
 			phase: "preflight",
-			operation: "certify host platform",
+			operation: "certify host platform and virtualization",
 			detail: errorDetail(cause),
 			recovery: ["pi-dsbx doctor"],
 			cause,

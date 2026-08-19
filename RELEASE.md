@@ -94,7 +94,9 @@ release checks.
    assets include SHA-256 checksums, the published tarball and verification
    receipts, package and runtime provenance, raw SARIF scans, CycloneDX SBOMs,
    all E2E and cleanup receipts, Pi installation receipt, compatibility record,
-   and rollback instructions.
+   and rollback instructions. A failed GitHub Release publication may be resumed
+   only by retrying the publish job in the original workflow run; a new dispatch
+   must not reuse its nondeterministic hardware or public-install diagnostics.
 
 ## Rollback
 

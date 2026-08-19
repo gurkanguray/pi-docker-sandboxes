@@ -10,6 +10,7 @@ import { sanitizeDetail } from "./errors.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
 import { inspectSandboxLease } from "./lease.ts";
+import { HOST_PI_RANGE, NODE_RANGE } from "./package-metadata.ts";
 import {
 	certifyHostPlatform,
 	detectHostPlatform,
@@ -76,6 +77,15 @@ export interface DiagnosticsOptions {
 	statFilesystem?: typeof statfs;
 }
 
+function shareable(value: string): string {
+	const sanitized = sanitizeDetail(value, 200);
+	if (/^(?:\/|[A-Za-z]:[\\/])/.test(sanitized)) return "[private-path]";
+	return sanitized.replace(
+		/(^|\s)(?:\/(?:Users|home|tmp|private|var\/folders)\/[^\s,;]+)/g,
+		"$1[private-path]",
+	);
+}
+
 function check(
 	id: string,
 	level: DiagnosticLevel,
@@ -86,14 +96,14 @@ function check(
 		? Object.fromEntries(
 				Object.entries(data).map(([key, value]) => [
 					key,
-					typeof value === "string" ? sanitizeDetail(value, 200) : value,
+					typeof value === "string" ? shareable(value) : value,
 				]),
 			)
 		: undefined;
 	return {
 		id,
 		level,
-		summary: sanitizeDetail(summary),
+		summary: shareable(summary),
 		...(redactedData ? { data: redactedData } : {}),
 	};
 }
@@ -118,14 +128,42 @@ async function defaultCommand(
 	).stdout.trim();
 }
 
-function supportedNode(version: string): boolean {
-	const match = version.match(/^v?(\d+)\.(\d+)\.(\d+)/);
-	return Boolean(
-		match &&
-			Number(match[1]) === 24 &&
-			(Number(match[2]) > 12 ||
-				(Number(match[2]) === 12 && Number(match[3]) >= 0)),
-	);
+function versionTuple(value: string): [number, number, number] | undefined {
+	const match = value.match(/v?(\d+)\.(\d+)\.(\d+)/);
+	return match
+		? [Number(match[1]), Number(match[2]), Number(match[3])]
+		: undefined;
+}
+
+function compareVersion(
+	left: readonly number[],
+	right: readonly number[],
+): number {
+	for (let index = 0; index < 3; index++) {
+		const difference = (left[index] ?? 0) - (right[index] ?? 0);
+		if (difference) return difference;
+	}
+	return 0;
+}
+
+function supportedVersion(version: string, range: string): boolean {
+	const actual = versionTuple(version);
+	if (!actual) return false;
+	return range.split("||").some((alternative) => {
+		const clauses = [...alternative.matchAll(/(\^|>=|>|<=|<)?\s*(\d+\.\d+\.\d+)/g)];
+		return clauses.length > 0 && clauses.every(([, operator = "", expected]) => {
+			const target = versionTuple(expected!);
+			if (!target) return false;
+			const compared = compareVersion(actual, target);
+			if (operator === "^")
+				return compared >= 0 && actual[0] === target[0];
+			if (operator === ">=") return compared >= 0;
+			if (operator === ">") return compared > 0;
+			if (operator === "<=") return compared <= 0;
+			if (operator === "<") return compared < 0;
+			return compared === 0;
+		});
+	});
 }
 
 export function diagnosticsExitCode(
@@ -186,26 +224,26 @@ export async function buildDoctorReceipt(
 	checks.push(
 		check(
 			"node",
-			supportedNode(nodeVersion) ? "pass" : "fail",
-			supportedNode(nodeVersion)
+			supportedVersion(nodeVersion, NODE_RANGE) ? "pass" : "fail",
+			supportedVersion(nodeVersion, NODE_RANGE)
 				? `Node ${nodeVersion} is supported`
-				: `Node ${nodeVersion} is outside >=24.12.0 <25`,
-			{ version: nodeVersion },
+				: `Node ${nodeVersion} is outside ${NODE_RANGE}`,
+			{ version: nodeVersion, expectedRange: NODE_RANGE },
 		),
 	);
 
 	try {
 		const version = await runCommand("pi", ["--version"]);
-		const compatible =
-			version.match(/\d+\.\d+\.\d+/)?.[0] === IMAGE_LOCK.piVersion;
+		const detectedVersion = version.match(/\d+\.\d+\.\d+/)?.[0] ?? version;
+		const compatible = supportedVersion(detectedVersion, HOST_PI_RANGE);
 		checks.push(
 			check(
 				"pi",
 				compatible ? "pass" : "fail",
 				compatible
-					? `Pi ${IMAGE_LOCK.piVersion} is available`
-					: `Pi version is incompatible with ${IMAGE_LOCK.piVersion}`,
-				{ expectedVersion: IMAGE_LOCK.piVersion },
+					? `Pi ${detectedVersion} satisfies the host peer range`
+					: `Pi ${detectedVersion} is outside ${HOST_PI_RANGE}`,
+				{ version: detectedVersion, expectedRange: HOST_PI_RANGE },
 			),
 		);
 	} catch (cause) {

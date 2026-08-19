@@ -1,4 +1,7 @@
 {
+  "schemaVersion": 1,
+  "authorization": "none",
+  "variant": "legacy-docker-unpublished",
   "vulnerabilities": [
     {
       "id": "CVE-2026-33818",

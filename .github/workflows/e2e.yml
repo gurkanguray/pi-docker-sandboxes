@@ -297,7 +297,10 @@ jobs:
           else
             status=failed
           fi
+          docker_version="$(docker version \
+            --format '{{.Server.Version}}' || true)"
           sbx_version="$(sbx --version | awk '{print $NF}' || true)"
+          sbx_version="${sbx_version#v}"
           pi_version=""
           image_lock_pi_version=""
           if test -s "$RUNTIME_RECEIPT" && test -n "$INSTALLED_PACKAGE"; then
@@ -336,6 +339,7 @@ jobs:
             --host-version "$host_version" \
             --expected-architecture "${{ matrix.host-arch }}" \
             --require-kvm "${{ matrix.requires-kvm }}" \
+            --docker-version "$docker_version" \
             --sbx-version "$sbx_version" \
             --pi-version "$pi_version" \
             --image-lock-pi-version "$image_lock_pi_version" \
@@ -376,6 +380,7 @@ jobs:
               opened: false,
               openMode: process.env.KVM_REQUIRED === "true" ? "r+" : null,
             },
+            dockerVersion: null,
             sbxVersion: null,
             piVersion: null,
             imageLockPiVersion: null,

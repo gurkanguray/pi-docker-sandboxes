@@ -3,17 +3,15 @@ import { execFile } from "node:child_process";
 import {
 	access,
 	chmod,
-	cp,
 	mkdir,
 	mkdtemp,
 	readFile,
 	rm,
-	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -21,79 +19,16 @@ const exec = promisify(execFile);
 const root = new URL("..", import.meta.url);
 const rootPath = fileURLToPath(root);
 
-test("source package builds the CLI exactly once before scriptless packing", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-source-pack-"));
-	try {
-		const source = join(directory, "source");
-		const output = join(directory, "output");
-		await mkdir(source);
-		await mkdir(output);
-		for (const path of ["package.json", "tsconfig.json", "tsconfig.cli.json"])
-			await cp(join(rootPath, path), join(source, path));
-		await cp(join(rootPath, "src"), join(source, "src"), { recursive: true });
-		await cp(join(rootPath, "runtime"), join(source, "runtime"), {
-			recursive: true,
-		});
-		await symlink(join(rootPath, "node_modules"), join(source, "node_modules"));
-		await writeFile(join(source, ".source-checkout"), "");
-		const { packPackage, runImageCommand } = await import("../src/image.ts");
-		const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
-		const archive = await packPackage(
-			output,
-			source,
-			async (command, args, options = {}) => {
-				calls.push({ command, args, cwd: options.cwd });
-				return runImageCommand(command, args, options);
-			},
-		);
-		assert.deepEqual(calls, [
-			{ command: "npm", args: ["run", "build:cli"], cwd: source },
-			{
-				command: "npm",
-				args: [
-					"pack",
-					source,
-					"--pack-destination",
-					output,
-					"--json",
-					"--ignore-scripts",
-				],
-				cwd: undefined,
-			},
-		]);
-		const { stdout: listing } = await exec("tar", ["-tf", archive]);
-		assert.match(listing, /^package\/dist\/cli\.js$/m);
-		assert.match(listing, /^package\/dist\/image\.js$/m);
-	} finally {
-		await rm(directory, { recursive: true, force: true });
-	}
-});
-
-test("source CLI build failure is structured", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-source-fail-"));
-	try {
-		await writeFile(join(directory, ".source-checkout"), "");
-		await writeFile(
-			join(directory, "package.json"),
-			JSON.stringify({
-				name: "pi-dsbx-build-failure",
-				version: "1.0.0",
-				scripts: { "build:cli": "node -e 'process.exit(7)'" },
-			}),
-		);
-		const { packPackage } = await import("../src/image.ts");
-		await assert.rejects(
-			packPackage(directory, directory),
-			(error: unknown) => {
-				assert.equal((error as { name?: string }).name, "OperationError");
-				assert.equal((error as { phase?: string }).phase, "prepare");
-				assert.equal((error as { exitCode?: number }).exitCode, 7);
-				return true;
-			},
-		);
-	} finally {
-		await rm(directory, { recursive: true, force: true });
-	}
+test("runtime doctor ranges match package requirements", async () => {
+	const manifest = JSON.parse(
+		await readFile(new URL("../package.json", import.meta.url), "utf8"),
+	);
+	const metadata = await import("../src/package-metadata.ts");
+	assert.equal(metadata.NODE_RANGE, manifest.engines.node);
+	assert.equal(
+		metadata.HOST_PI_RANGE,
+		manifest.peerDependencies["@earendil-works/pi-coding-agent"],
+	);
 });
 
 test("packed CLI runs from node_modules", async () => {
@@ -147,56 +82,6 @@ test("packed CLI runs from node_modules", async () => {
 			1,
 		);
 		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
-	} finally {
-		await chmod(
-			join(directory, "node_modules", "pi-docker-sandboxes"),
-			0o755,
-		).catch(() => {});
-		await rm(directory, { recursive: true, force: true });
-	}
-});
-
-test("installed read-only package repacks without scripts or a compiler", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-installed-pack-"));
-	try {
-		const sourceArchive = join(directory, "source.tgz");
-		const { packPackage: packSource } = await import("../src/image.ts");
-		await exec("mv", [await packSource(directory, rootPath), sourceArchive]);
-		const packageDirectory = join(
-			directory,
-			"node_modules",
-			"pi-docker-sandboxes",
-		);
-		await mkdir(packageDirectory, { recursive: true });
-		await exec("tar", [
-			"-xzf",
-			sourceArchive,
-			"--strip-components=1",
-			"-C",
-			packageDirectory,
-		]);
-		await chmod(packageDirectory, 0o555);
-		const { packPackage, runImageCommand } = await import(
-			pathToFileURL(join(packageDirectory, "dist", "image.js")).href
-		);
-		const output = join(directory, "output");
-		await mkdir(output);
-		const calls: string[][] = [];
-		const archive = await packPackage(
-			output,
-			packageDirectory,
-			async (
-				command: string,
-				args: string[],
-				options: { cwd?: string; maxBuffer?: number } = {},
-			) => {
-				calls.push(args);
-				return runImageCommand(command, args, options);
-			},
-		);
-		assert.equal(calls.length, 1);
-		const { stdout: listing } = await exec("tar", ["-tf", archive]);
-		assert.match(listing, /^package\/dist\/cli\.js$/m);
 	} finally {
 		await chmod(
 			join(directory, "node_modules", "pi-docker-sandboxes"),

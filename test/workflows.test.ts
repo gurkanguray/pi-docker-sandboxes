@@ -154,46 +154,53 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(imageRun, /console\.log\(matches\[0\]\.id\);/);
 	assert.doesNotMatch(imageRun, /templates\.images\?\.find\(/);
 	const security = await readFile(new URL("security.yml", workflows), "utf8");
-	assert.match(security, /expected_artifact="oci-candidate-\$SOURCE_SHA"/);
-	const trivySteps = Object.values(parsed.get("security.yml")!.jobs).flatMap(
-		(job) =>
-			(job.steps ?? []).filter((step) =>
-				step.uses?.startsWith("aquasecurity/trivy-action@"),
-			),
+	assert.doesNotMatch(security, /workflow_call|runtime\.Dockerfile|build-push-action/);
+	assert.match(security, /docker\/runtime-release-lock\.json/);
+	assert.match(security, /verify-production-runtime\.mjs/);
+	assert.match(security, /gh attestation verify "oci:\/\/\$RUNTIME_REFERENCE"/);
+	const securityWorkflow = parsed.get("security.yml")!;
+	assert.equal(securityWorkflow.jobs.image, undefined);
+	assert.equal(securityWorkflow.jobs["candidate-image"], undefined);
+	const publicRuntime = securityWorkflow.jobs["public-runtime"];
+	assert.deepEqual(publicRuntime.strategy?.matrix?.arch, ["amd64", "arm64"]);
+	const trivySteps = Object.values(securityWorkflow.jobs).flatMap((job) =>
+		(job.steps ?? []).filter((step) =>
+			step.uses?.startsWith("aquasecurity/trivy-action@"),
+		),
 	);
-	assert.equal(trivySteps.length, 5);
+	assert.equal(trivySteps.length, 3);
 	for (const step of trivySteps) {
 		assert.equal(
 			step.uses,
 			"aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25",
 		);
 		assert.equal(step.with?.version, "v0.74.0");
+		assert.equal(step.with?.trivyignores, undefined);
 	}
-	const repositoryScan = trivySteps.find(
-		(step) => step.name === "Scan repository",
+	const imageScan = trivySteps.find(
+		(step) => step.name === "Scan exact public standard runtime",
 	)!;
-	assert.equal(repositoryScan.with?.trivyignores, undefined);
-	assert.equal(repositoryScan.with?.["limit-severities-for-sarif"], true);
-	const imageScans = trivySteps.filter((step) =>
-		["Scan candidate image", "Scan exact candidate image"].includes(
-			step.name ?? "",
-		),
+	assert.equal(imageScan.with?.["limit-severities-for-sarif"], true);
+	assert.equal(
+		imageScan.with?.["image-ref"],
+		"${{ steps.runtime.outputs.reference }}",
 	);
-	assert.equal(imageScans.length, 2);
-	for (const step of imageScans) {
-		assert.equal(step.with?.trivyignores, ".trivyignore.yaml");
-		assert.equal(step.with?.["limit-severities-for-sarif"], true);
-	}
 
 	const policy = JSON.parse(
 		await readFile(new URL("../.trivyignore.yaml", import.meta.url), "utf8"),
 	) as {
+		schemaVersion: number;
+		authorization: string;
+		variant: string;
 		vulnerabilities: Array<{
 			id: string;
 			paths: string[];
 			statement: string;
 		}>;
 	};
+	assert.equal(policy.schemaVersion, 1);
+	assert.equal(policy.authorization, "none");
+	assert.equal(policy.variant, "legacy-docker-unpublished");
 	assert.deepEqual(policy.vulnerabilities.map(({ id }) => id).sort(), [
 		"CVE-2026-33818",
 		"CVE-2026-34040",
@@ -224,32 +231,6 @@ test("release workflows are valid npm-only gates", async () => {
 		assert.match(exception.expiry, /^\d{4}-\d{2}-\d{2}$/);
 		assert.match(exception.nextReview, /^\d{4}-\d{2}-\d{2}$/);
 	}
-	for (const jobName of ["image", "candidate-image"]) {
-		const validation = parsed
-			.get("security.yml")!
-			.jobs[jobName]!.steps?.find(
-				(step) => step.name === "Validate image exception policy",
-			)?.run;
-		assert.match(validation ?? "", /scripts\/check-release\.mjs/);
-		assert.match(
-			validation ?? "",
-			/--tag "v\$\(node -p 'require\("\.\/package\.json"\)\.version'\)"/,
-		);
-	}
-	const candidateSteps =
-		parsed.get("security.yml")!.jobs["candidate-image"]!.steps!;
-	const candidateCheckout = candidateSteps.findIndex(
-		(step) =>
-			step.uses === "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
-	);
-	const candidateScan = candidateSteps.findIndex(
-		(step) => step.name === "Scan exact candidate image",
-	);
-	assert.ok(candidateCheckout >= 0 && candidateCheckout < candidateScan);
-	assert.equal(
-		candidateSteps[candidateCheckout]!.with?.ref,
-		"${{ inputs.source_sha }}",
-	);
 	const publish = await readFile(new URL("publish-npm.yml", workflows), "utf8");
 	assert.match(publish, /receipt\.e2eReceipts\?\.length !== 3/);
 	assert.doesNotMatch(publish, /npm\W+pack/);
@@ -312,7 +293,18 @@ test("release workflows are valid npm-only gates", async () => {
 			`${check} must be enforced by publish verification`,
 		);
 
-	const receiptRun = release.jobs.receipt.steps?.find(
+	const receiptSteps = release.jobs.receipt.steps ?? [];
+	const receiptCheckout = receiptSteps.find(
+		(step) => step.uses?.startsWith("actions/checkout@"),
+	);
+	assert.equal(receiptCheckout?.with?.ref, "${{ needs.metadata.outputs.sha }}");
+	assert.ok(
+		receiptSteps.indexOf(receiptCheckout!) <
+			receiptSteps.findIndex(
+				(step) => step.name === "Join and verify candidate evidence",
+			),
+	);
+	const receiptRun = receiptSteps.find(
 		(step) => step.name === "Join and verify candidate evidence",
 	)?.run;
 	assert.ok(receiptRun, "candidate receipt join must be executable");
@@ -328,6 +320,9 @@ test("release workflows are valid npm-only gates", async () => {
 		"e2e.kvm?.required !== facts.kvm",
 		"!e2e.kvm?.characterDevice",
 		"!e2e.kvm?.opened",
+		"e2e.hostVersion",
+		"e2e.dockerVersion",
+		"e2e.sbxVersion",
 	])
 		assert.ok(
 			receiptRun.includes(check),
@@ -379,6 +374,12 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(releaseResume ?? "", /existing release asset differs/);
 	assert.match(releaseResume ?? "", /existing GitHub Release metadata differs/);
 	assert.match(releaseResume ?? "", /existing GitHub Release asset set differs/);
+	const releaseAssembly = durable.jobs.release.steps?.find(
+		(step) => step.name === "Verify signed tag and assemble durable release evidence",
+	)?.run;
+	assert.match(releaseAssembly ?? "", /candidate\.releaseRunId/);
+	assert.match(releaseAssembly ?? "", /original workflow run/);
+	assert.match(releaseAssembly ?? "", /releaseRunId: candidate\.releaseRunId/);
 
 	for (const [name, workflow] of parsed)
 		for (const job of Object.values(workflow.jobs))
@@ -445,11 +446,6 @@ test("release workflows are valid npm-only gates", async () => {
 	const runtimeQemu = runtime.jobs.build.steps?.find((step) =>
 		step.uses?.startsWith("docker/setup-qemu-action@"),
 	);
-	const securityQemu = parsed
-		.get("security.yml")!
-		.jobs.image.steps?.find((step) =>
-			step.uses?.startsWith("docker/setup-qemu-action@"),
-		);
 	assert.match(
 		runtimeLock.build.qemu,
 		/:qemu-v\d+\.\d+\.\d+.*@sha256:[0-9a-f]{64}$/,
@@ -461,14 +457,9 @@ test("release workflows are valid npm-only gates", async () => {
 		false,
 	);
 	assert.ok(runtimeQemu, "runtime-image.yml setup-qemu step");
-	assert.ok(securityQemu, "security.yml setup-qemu step");
 	assert.equal(
 		runtimeQemu.with?.image,
 		"${{ needs.source.outputs.qemu_image }}",
-	);
-	assert.equal(
-		securityQemu.with?.image,
-		"${{ steps.runtime-lock.outputs.qemu_image }}",
 	);
 	assert.match(
 		runtimeText,
@@ -628,6 +619,9 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.match(releaseText, /docker\/image-lock\.json/);
 	assert.match(releaseText, /verify-production-runtime\.mjs/);
 	assert.match(releaseText, /gh attestation verify/);
+	assert.match(releaseText, /runtime\/runtime-image-receipt\.json/);
+	assert.match(releaseText, /runtime\/evidence\/\*/);
+	assert.match(releaseText, /verify-github-attestations\.mjs/);
 	assert.doesNotMatch(releaseText, /candidate-image\.oci\.tar/);
 	assert.doesNotMatch(releaseText, /docker\/build-push-action/);
 	for (const artifact of ["macos-arm64", "ubuntu-amd64-kvm", "ubuntu-arm64-kvm"])
@@ -651,7 +645,7 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.deepEqual(pkg.pi.extensions, [
 		"./extensions/docker-sandboxes/index.ts",
 	]);
-	assert.equal(pkg.engines.node, ">=22.19.0 <25");
+	assert.equal(pkg.engines.node, "^22.19.0 || ^24.12.0");
 	for (const peer of [
 		"@earendil-works/pi-agent-core",
 		"@earendil-works/pi-ai",

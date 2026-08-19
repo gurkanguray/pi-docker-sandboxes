@@ -100,6 +100,11 @@ jobs:
           const npmProvenance = JSON.parse(await readFile(
             "release-assets/npm-provenance/verified-provenance.json",
           ));
+          if (candidate.releaseRunId !== Number(process.env.GITHUB_RUN_ID))
+            throw new Error(
+              "GitHub Release resume is limited to retries of the " +
+                "original workflow run",
+            );
           if (candidate.sourceSha !== process.env.SOURCE_SHA ||
               candidate.tag !== process.env.TAG ||
               candidate.e2eReceipts?.length !== 3 ||
@@ -122,6 +127,7 @@ jobs:
             throw new Error("release evidence is incomplete");
           await writeFile("release-assets/release-provenance.json",
             `${JSON.stringify({
+              releaseRunId: candidate.releaseRunId,
               sourceSha: candidate.sourceSha,
               tag: candidate.tag,
               packageIntegrity: candidate.tarballIntegrity,

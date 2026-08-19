@@ -95,6 +95,16 @@ try {
 			fail("Passing Linux KVM receipt requires a character device opened r+");
 	}
 
+	const dockerVersion = required(values, "docker-version");
+	const dockerMajor = Number(
+		dockerVersion.match(/^(\d+)(?:\.\d+){1,3}(?:[-+].*)?$/)?.[1],
+	);
+	if (!Number.isSafeInteger(dockerMajor) || dockerMajor < 29)
+		fail(`Docker 29 or newer is required; got ${dockerVersion}`);
+	const sbxVersion = required(values, "sbx-version");
+	if (!/^0\.38\.\d+(?:[-+].*)?$/.test(sbxVersion))
+		fail(`Docker SBX 0.38.x is required; got ${sbxVersion}`);
+
 	const expectedImageDigest = required(values, "image-digest");
 	const selectedImage = optional(values, "selected-image");
 	const selectedImageId = optional(values, "selected-image-id");
@@ -192,7 +202,8 @@ try {
 		hostVersion: required(values, "host-version"),
 		architecture: process.arch,
 		kvm,
-		sbxVersion: optional(values, "sbx-version"),
+		dockerVersion,
+		sbxVersion,
 		piVersion,
 		imageLockPiVersion,
 		packageVersion,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, statfs, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, type statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -58,7 +58,7 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 		now: new Date("2026-08-18T00:00:00.000Z"),
 		platform: "darwin",
 		arch: "arm64",
-		nodeVersion: "v24.12.0",
+		nodeVersion: "v22.19.0",
 		certifyPlatform: () =>
 			Promise.resolve({
 				os: "darwin",
@@ -67,7 +67,7 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 			}),
 		runCommand: async (command, args) =>
 			command === "pi"
-				? IMAGE_LOCK.piVersion
+				? "0.84.2"
 				: args[0] === "info"
 					? cwd
 					: `27.0.0-${secret}`,
@@ -80,6 +80,15 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 		[...receipt.checks.map((entry) => entry.id)].sort(),
 	);
 	assert.equal(JSON.stringify(receipt).includes(secret), false);
+	assert.equal(JSON.stringify(receipt).includes(cwd), false);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "node")?.data?.expectedRange,
+		"^22.19.0 || ^24.12.0",
+	);
+	assert.equal(
+		receipt.checks.find((entry) => entry.id === "pi")?.data?.expectedRange,
+		">=0.84.1 <0.85.0",
+	);
 	assert.equal(
 		receipt.checks.some((entry) => entry.id === "image"),
 		true,

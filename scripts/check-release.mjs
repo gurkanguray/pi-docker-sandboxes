@@ -146,7 +146,8 @@ try {
 		fail(`Image lock Pi ${imageLock.piVersion} must satisfy ${piRange}`);
 	if (
 		(!compatibility.includes("| Host Pi |") &&
-			!compatibility.includes("| Host Pi peer range |")) ||
+			!compatibility.includes("| Host Pi peer range |") &&
+			!compatibility.includes("| Host Pi requirement |")) ||
 		!compatibility.includes(piRange)
 	)
 		fail(`COMPATIBILITY Pi range must match ${piRange}`);
@@ -185,11 +186,16 @@ try {
 		!trivyExceptions ||
 		Array.isArray(trivyExceptions) ||
 		JSON.stringify(Object.keys(trivyExceptions).sort()) !==
-			JSON.stringify(["vulnerabilities"])
+			JSON.stringify([
+				"authorization", "schemaVersion", "variant", "vulnerabilities",
+			]) ||
+		trivyExceptions.schemaVersion !== 1 ||
+		trivyExceptions.authorization !== "none" ||
+		trivyExceptions.variant !== "legacy-docker-unpublished"
 	)
-		fail("Trivy exceptions must contain only a vulnerabilities array");
+		fail("Legacy Docker risk records must be schema 1 and non-authorizing");
 	if (!Array.isArray(trivyExceptions.vulnerabilities))
-		fail("Trivy exceptions vulnerabilities must be an array");
+		fail("Legacy Docker risk record vulnerabilities must be an array");
 	const exceptionIds = new Set();
 	const exceptionPaths = new Set();
 	const today = new Date().toISOString().slice(0, 10);

@@ -4,7 +4,7 @@ Run Pi in an isolated Docker Sandboxes microVM while the host checkout remains u
 
 ## Requirements
 
-Supported hosts are macOS 14+ on Apple Silicon and Ubuntu 24.04+ on amd64 or arm64 with KVM. Install Pi `>=0.84.1 <0.85.0`, Node.js `>=22.19.0 <25`, Docker 29+, and Docker Sandboxes 0.38.x. See [Compatibility](COMPATIBILITY.md) for the exact contract and Windows status.
+Supported hosts are macOS 14+ on Apple Silicon and Ubuntu 24.04+ on amd64 or arm64 with KVM. Install Pi `>=0.84.1 <0.85.0`, Node.js `^22.19.0 || ^24.12.0`, Docker 29+, and Docker Sandboxes 0.38.x. See [Compatibility](COMPATIBILITY.md) for the exact contract and Windows status.
 
 ## Install 1.0.0
 

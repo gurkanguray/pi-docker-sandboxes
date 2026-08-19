@@ -172,9 +172,23 @@ jobs:
             docker/image-lock.json docker/runtime-release-lock.json \
             runtime/runtime-image-receipt.json runtime/evidence \
             runtime/production-runtime-verification.json
+          mkdir runtime/attestations
           gh attestation verify "oci://$RUNTIME_REFERENCE" \
             --repo "$GITHUB_REPOSITORY" --format json \
-            > runtime/runtime-provenance.json
+            > runtime/attestations/index.json
+          verification_files=(runtime/attestations/index.json)
+          counter=0
+          for subject in runtime/runtime-image-receipt.json \
+            runtime/evidence/*; do
+            output="runtime/attestations/file-$counter.json"
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" --format json > "$output"
+            verification_files+=("$output")
+            counter=$((counter + 1))
+          done
+          node scripts/verify-github-attestations.mjs \
+            docker/runtime-release-lock.json \
+            runtime/runtime-provenance.json "${verification_files[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: production-runtime-${{ needs.metadata.outputs.sha }}
@@ -203,6 +217,10 @@ jobs:
       actions: read
       contents: read
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.metadata.outputs.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: npm-package-${{ needs.metadata.outputs.sha }}
@@ -285,7 +303,6 @@ jobs:
               runtimeReceipt.candidateReference !==
                 expected.RUNTIME_REFERENCE ||
               packageReceipt.binVersion !== expected.VERSION ||
-              imageLock.piVersion !== "0.84.1" ||
               freshInstallReceipt.sourceSha !== expected.SOURCE_SHA ||
               freshInstallReceipt.version !== expected.VERSION ||
               freshInstallReceipt.integrity !== packageReceipt.integrity ||
@@ -295,6 +312,9 @@ jobs:
               e2eReceipt.packageVersion !== expected.VERSION ||
               e2eReceipts.some((e2e) => {
                 const facts = expectedHosts[e2e.host];
+                const dockerMajor = Number(
+                  (e2e.dockerVersion ?? "").match(/^(\d+)\./)?.[1],
+                );
                 return !facts ||
                   e2e.platform !== facts.platform ||
                   e2e.architecture !== facts.architecture ||
@@ -302,6 +322,10 @@ jobs:
                   (facts.kvm &&
                     (!e2e.kvm?.characterDevice || !e2e.kvm?.opened ||
                       e2e.kvm?.openMode !== "r+")) ||
+                  typeof e2e.hostVersion !== "string" ||
+                  !e2e.hostVersion.trim() ||
+                  !Number.isSafeInteger(dockerMajor) || dockerMajor < 29 ||
+                  !/^0\.38\./.test(e2e.sbxVersion ?? "") ||
                   e2e.sourceSha !== expected.SOURCE_SHA ||
                   e2e.candidateDigest !== expected.IMAGE_DIGEST ||
                   e2e.packageVersion !== expected.VERSION ||
@@ -316,6 +340,7 @@ jobs:
               "candidate evidence does not bind to one candidate",
             );
           const receipt = {
+            releaseRunId: Number(expected.GITHUB_RUN_ID),
             sourceSha: expected.SOURCE_SHA,
             tag: expected.TAG,
             version: expected.VERSION,

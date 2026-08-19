@@ -179,6 +179,43 @@ test("production launch resolves the published runtime before SBX preflight", as
 	assert.equal(created, false);
 });
 
+test("Linux KVM preflight precedes repository and sandbox mutation", async () => {
+	let inspected = false;
+	let opened = false;
+	await assert.rejects(
+		launch({
+			cwd: "/not-inspected",
+			client: launchClient,
+			config: launchConfig,
+			certifyPlatform: async () => ({
+				os: "linux",
+				arch: "x64",
+				runtimePlatform: "linux/amd64",
+			}),
+			kvmPreflight: {
+				statKvm: async () => ({ isCharacterDevice: () => true }),
+				openKvm: async () => {
+					opened = true;
+					throw new Error("KVM O_RDWR denied");
+				},
+			},
+			inspectRepository: async (...args) => {
+				inspected = true;
+				return inspectRepository(...args);
+			},
+		}),
+		(error: unknown) => {
+			assert.equal(
+				(error as { detail?: string }).detail,
+				"KVM O_RDWR denied",
+			);
+			return true;
+		},
+	);
+	assert.equal(opened, true);
+	assert.equal(inspected, false);
+});
+
 test("host certification rejection precedes repository inspection", async () => {
 	let inspected = false;
 	await assert.rejects(
@@ -199,7 +236,7 @@ test("host certification rejection precedes repository inspection", async () => 
 		(error: unknown) => {
 			assert.equal(
 				(error as { operation?: string }).operation,
-				"certify host platform",
+				"certify host platform and virtualization",
 			);
 			assert.match(
 				(error as { detail?: string }).detail ?? "",

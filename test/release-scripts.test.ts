@@ -73,9 +73,11 @@ test("public package metadata and packed CLI are release-ready", async () => {
 		assert.equal(pkg.peerDependencies[peer], ">=0.84.1 <0.85.0");
 	assert.equal(pkg.peerDependencies.typebox, "*");
 
-	const { stdout } = await exec("npm", ["pack", "--dry-run", "--json"], {
-		cwd: packageRoot,
-	});
+	const { stdout } = await exec(
+		"npm",
+		["pack", "--dry-run", "--json", "--ignore-scripts"],
+		{ cwd: packageRoot },
+	);
 	const packed = JSON.parse(stdout)[0];
 	const bin = packed.files.find(
 		(file: { path: string }) => file.path === "bin/pi-dsbx.mjs",

@@ -20,4 +20,4 @@ Changed or uninspectable work is preserved on ambiguity. `--yes` never authorize
 
 Isolation does not make repository instructions, dependencies, allowed destinations, tools, or model output trustworthy. See the [threat model](THREAT_MODEL.md).
 
-The signed release binds the package and immutable public runtime digest to checksums, SBOMs, scans, GitHub OIDC provenance, compatibility evidence, and hardware receipts.
+The signed release binds the package and immutable public runtime digest to checksums, SBOMs, scans, GitHub OIDC provenance, compatibility evidence, and hardware receipts. `.trivyignore.yaml` is a schema-checked inventory for the unpublished legacy Docker variant only; its `authorization: none` records never suppress or authorize a standard-runtime finding.

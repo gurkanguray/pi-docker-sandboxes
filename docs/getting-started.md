@@ -6,7 +6,7 @@
 | --- | --- |
 | Host | macOS 14+ on Apple Silicon; Ubuntu 24.04+ on amd64 or arm64 with KVM |
 | Pi | `>=0.84.1 <0.85.0` |
-| Node.js | `>=22.19.0 <25` |
+| Node.js | `^22.19.0 || ^24.12.0` |
 | Docker | 29+ |
 | Docker Sandboxes | 0.38.x |
 

@@ -5,27 +5,10 @@ on:
     branches: [main]
   schedule:
     - cron: "17 5 * * 1"
-  workflow_call:
-    inputs:
-      source_sha:
-        required: true
-        type: string
-      image_artifact:
-        required: true
-        type: string
-      image_digest:
-        required: true
-        type: string
-    outputs:
-      scan_ref:
-        value: ${{ jobs.candidate-image.outputs.scan_ref }}
-      sbom_ref:
-        value: ${{ jobs.candidate-image.outputs.sbom_ref }}
 permissions:
   contents: read
 jobs:
   audit:
-    if: github.event_name != 'workflow_call'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -35,8 +18,8 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
+
   filesystem:
-    if: github.event_name != 'workflow_call'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,189 +45,115 @@ jobs:
         with:
           sarif_file: trivy-filesystem.sarif
           category: trivy-filesystem
-  image:
-    if: github.event_name != 'workflow_call'
+
+  public-runtime:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - id: runtime-lock
-        run: >-
-          node scripts/runtime-build-args.mjs --github-output
-          >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 24.12.0
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Validate image exception policy
-        run: >-
-          node scripts/check-release.mjs --allow-unreleased
-          --tag "v$(node -p 'require("./package.json").version')"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-        with:
-          image: ${{ steps.runtime-lock.outputs.qemu_image }}
-          platforms: arm64
-      - name: Set up Docker Buildx
-        uses: >-
-          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-        with:
-          version: ${{ steps.runtime-lock.outputs.buildx_version }}
-          driver-opts: image=${{ steps.runtime-lock.outputs.buildkit_driver }}
-      - name: Build and load scan candidate
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: docker
-          platforms: linux/arm64
-          target: standard
-          load: true
-          push: false
-          tags: pi-docker-sandboxes:${{ github.sha }}
-          build-args: |
-            SOURCE_SHA=${{ github.sha }}
-            STANDARD_BASE=${{ steps.runtime-lock.outputs.standard_base }}
-            DOCKER_BASE=${{ steps.runtime-lock.outputs.docker_base }}
-            PI_VERSION=${{ steps.runtime-lock.outputs.pi_version }}
-            RUNTIME_VERSION=${{ steps.runtime-lock.outputs.runtime_version }}
-            FD_VERSION=${{ steps.runtime-lock.outputs.fd_version }}
-            FD_AMD64_NAME=${{ steps.runtime-lock.outputs.fd_amd64_name }}
-            FD_AMD64_SHA256=${{ steps.runtime-lock.outputs.fd_amd64_sha256 }}
-            FD_ARM64_NAME=${{ steps.runtime-lock.outputs.fd_arm64_name }}
-            FD_ARM64_SHA256=${{ steps.runtime-lock.outputs.fd_arm64_sha256 }}
-          cache-from: type=gha,scope=runtime-standard-arm64
-      - name: Scan candidate image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
-        with:
-          version: v0.74.0
-          image-ref: pi-docker-sandboxes:${{ github.sha }}
-          format: sarif
-          output: trivy-image.sarif
-          severity: HIGH,CRITICAL
-          limit-severities-for-sarif: true
-          ignore-unfixed: false
-          trivyignores: .trivyignore.yaml
-          exit-code: "1"
-      - name: Upload image scan
-        if: always()
-        uses: >-
-          github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
-        with:
-          sarif_file: trivy-image.sarif
-          category: trivy-image
-      - name: Generate CycloneDX SBOM
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
-        with:
-          version: v0.74.0
-          image-ref: pi-docker-sandboxes:${{ github.sha }}
-          format: cyclonedx
-          output: candidate-image.cdx.json
-      - name: Upload SBOM
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: image-sbom-${{ github.sha }}
-          path: candidate-image.cdx.json
-          if-no-files-found: error
-          retention-days: 14
-  candidate-image:
-    if: github.event_name == 'workflow_call'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     permissions:
       actions: read
+      attestations: read
       contents: read
+      packages: read
       security-events: write
-    outputs:
-      scan_ref: ${{ steps.refs.outputs.scan_ref }}
-      sbom_ref: ${{ steps.refs.outputs.sbom_ref }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.source_sha }}
-      - name: Validate image exception policy
-        run: >-
-          node scripts/check-release.mjs --allow-unreleased
-          --tag "v$(node -p 'require("./package.json").version')"
+          persist-credentials: false
+      - id: runtime
+        name: Read exact published standard runtime lock
+        run: |
+          node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
+          import { readFile } from "node:fs/promises";
+          const image = JSON.parse(
+            await readFile("docker/image-lock.json"),
+          ).images?.standard;
+          const evidence = JSON.parse(
+            await readFile("docker/runtime-release-lock.json"),
+          );
+          if (image?.status !== "published" || evidence?.version !== 1)
+            throw new Error("public standard runtime is not locked");
+          console.log(`reference=${image.reference}`);
+          console.log(`run_id=${evidence.runId}`);
+          console.log(`receipt_artifact=${evidence.receiptArtifact}`);
+          console.log(
+            `security_pattern=security-*-standard-${evidence.runId}-${evidence.runAttempt}`,
+          );
+          NODE
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.image_artifact }}
-          path: candidate
-      - name: Import and bind the candidate archive
+          name: ${{ steps.runtime.outputs.receipt_artifact }}
+          path: runtime
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runtime.outputs.run_id }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ${{ steps.runtime.outputs.security_pattern }}
+          path: runtime/evidence
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.runtime.outputs.run_id }}
+      - name: Verify locked receipts and raw publication evidence
         env:
-          IMAGE_ARTIFACT: ${{ inputs.image_artifact }}
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
         run: |
           set -euo pipefail
-          expected_artifact="oci-candidate-$SOURCE_SHA"
-          test "$IMAGE_ARTIFACT" = "$expected_artifact"
-          test -s candidate/candidate-image.oci.tar
-          test -s candidate/image-verification.json
-          mkdir oci
-          tar -xf candidate/candidate-image.oci.tar -C oci index.json
-          test "$(node -p 'require("./oci/index.json").manifests[0].digest')" \
-            = "$IMAGE_DIGEST"
-          node --input-type=module <<'NODE'
-          import { readFile } from "node:fs/promises";
-          const receipt = JSON.parse(
-            await readFile("candidate/image-verification.json"),
-          );
-          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
-              receipt.ociDigest !== process.env.IMAGE_DIGEST)
-            throw new Error("candidate image receipt mismatch");
-          NODE
-          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
-          docker run --rm --volume "$PWD/candidate:/candidate:ro" \
-            --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
-            oci-archive:/candidate/candidate-image.oci.tar:candidate \
-            "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
-      - name: Scan exact candidate image
+          node scripts/verify-production-runtime.mjs \
+            docker/image-lock.json docker/runtime-release-lock.json \
+            runtime/runtime-image-receipt.json runtime/evidence \
+            runtime/production-runtime-verification.json
+          gh attestation verify "oci://$RUNTIME_REFERENCE" \
+            --repo "$GITHUB_REPOSITORY"
+      - name: Pull exact public platform manifest
+        env:
+          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
+          RUNTIME_PLATFORM: linux/${{ matrix.arch }}
+        run: docker pull --platform "$RUNTIME_PLATFORM" "$RUNTIME_REFERENCE"
+      - id: scan
+        name: Scan exact public standard runtime
+        continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          image-ref: pi-docker-sandboxes:${{ inputs.source_sha }}
+          image-ref: ${{ steps.runtime.outputs.reference }}
           format: sarif
-          output: candidate-image.sarif
+          output: runtime-standard-${{ matrix.arch }}.sarif
           severity: HIGH,CRITICAL
           limit-severities-for-sarif: true
           ignore-unfixed: false
-          trivyignores: .trivyignore.yaml
           exit-code: "1"
-      - name: Generate exact candidate CycloneDX SBOM
+      - name: Generate exact public standard runtime CycloneDX SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          image-ref: pi-docker-sandboxes:${{ inputs.source_sha }}
+          image-ref: ${{ steps.runtime.outputs.reference }}
           format: cyclonedx
-          output: candidate-image.cdx.json
-      - name: Upload candidate scan
-        if: always()
+          output: runtime-standard-${{ matrix.arch }}.cdx.json
+      - name: Upload public runtime scan
+        if: always() && steps.scan.outcome != 'cancelled'
         uses: >-
           github/codeql-action/upload-sarif@c3400c2f38909e0dcf3c3a41f2030a8217be5d3e
         with:
-          sarif_file: candidate-image.sarif
-          category: release-candidate-image
-      - id: refs
-        env:
-          REPOSITORY: ${{ github.repository }}
-          SERVER_URL: ${{ github.server_url }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        run: |
-          echo "scan_ref=$SERVER_URL/$REPOSITORY/security/code-scanning" \
-            >> "$GITHUB_OUTPUT"
-          echo "sbom_ref=image-security-$SOURCE_SHA/candidate-image.cdx.json" \
-            >> "$GITHUB_OUTPUT"
+          sarif_file: runtime-standard-${{ matrix.arch }}.sarif
+          category: public-runtime-standard-${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && steps.scan.outcome != 'cancelled'
         with:
-          name: image-security-${{ inputs.source_sha }}
+          name: public-runtime-security-${{ matrix.arch }}-${{ github.sha }}
           path: |
-            candidate-image.sarif
-            candidate-image.cdx.json
+            runtime-standard-${{ matrix.arch }}.sarif
+            runtime-standard-${{ matrix.arch }}.cdx.json
+            runtime/production-runtime-verification.json
           if-no-files-found: error
           retention-days: 90
+      - name: Enforce exact public runtime scan
+        if: steps.scan.outcome == 'failure'
+        run: exit 1
 
   codeql:
-    if: github.event_name != 'workflow_call'
     runs-on: ubuntu-latest
     permissions:
       contents: read
