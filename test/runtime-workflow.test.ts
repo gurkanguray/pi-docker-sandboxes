@@ -197,6 +197,17 @@ function validateRuntimeWorkflow(workflow: RuntimeWorkflow) {
 
 	assert.equal(receipt.if, "needs.source.outputs.variant == 'standard'");
 	assert.deepEqual(needs(receipt), ["source", "build", "security"]);
+	const receiptUpload = receipt.steps?.find(
+		(step) =>
+			String(step.uses ?? "").startsWith("actions/upload-artifact@") &&
+			String(step.with?.name ?? "").startsWith("receipt-standard-"),
+	);
+	assert.ok(receiptUpload, "approval receipt must be uploaded separately");
+	const receiptPaths = String(receiptUpload.with?.path ?? "");
+	assert.match(receiptPaths, /runtime-image-receipt\.json/);
+	assert.match(receiptPaths, /\.evidence\.json/);
+	assert.doesNotMatch(receiptPaths, /runtime\.oci\.tar/);
+	assert.equal(receiptUpload.with?.["if-no-files-found"], "error");
 	assert.equal(
 		publish.if,
 		"github.event_name == 'workflow_dispatch' && needs.source.outputs.variant == 'standard'",

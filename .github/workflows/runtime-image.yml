@@ -319,6 +319,15 @@ jobs:
           path: runtime
           if-no-files-found: error
           retention-days: 90
+      - name: Upload approval receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: receipt-standard-${{ needs.source.outputs.run_identity }}
+          path: |
+            runtime/runtime-image-receipt.json
+            runtime/evidence/*.evidence.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish:
     if: >-
