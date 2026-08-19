@@ -28,6 +28,8 @@ RUN set -eux; \
     test "$(dpkg-query -W -f='${Version}' fd-find)" = "${FD_DEBIAN_VERSION}"; \
     test "$(dpkg-query -W -f='${Version}' ripgrep)" = "${RG_DEBIAN_VERSION}"; \
     test "$(dpkg-query -W -f='${Version}' git)" = "${GIT_DEBIAN_VERSION}"; \
+    rm -f /usr/libexec/docker/cli-plugins/docker-buildx; \
+    test ! -e /usr/libexec/docker/cli-plugins/docker-buildx; \
     fd --version; \
     fdfind --version; \
     rg --version; \
