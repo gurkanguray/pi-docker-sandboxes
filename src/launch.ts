@@ -15,6 +15,7 @@ import {
 	sanitizeDetail,
 	type OperationPhase,
 } from "./errors.ts";
+import { LauncherExitCode } from "./exit-codes.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import {
 	buildKitSpec,
@@ -39,7 +40,12 @@ import {
 import { certifyHostPlatform, type SupportedHost } from "./platform.ts";
 import { providerSetupGuidance } from "./preflight.ts";
 import { resolveAvailableServices } from "./providers.ts";
-import { SbxClient, SbxCommandError } from "./sbx/client.ts";
+import {
+	CommandCancelledError,
+	CommandTimeoutError,
+	SbxClient,
+	SbxCommandError,
+} from "./sbx/client.ts";
 import { backupSessions, restoreSessions } from "./sessions.ts";
 import {
 	createEmptyInitialCommit,
@@ -188,8 +194,14 @@ export interface LaunchLifecycle {
 	cleanupWarnings: string[];
 }
 
+export type CustodyOutcome = "preserved" | "released" | "uncertain";
+
 export interface LaunchResult {
+	/** @deprecated Use agentExitCode and launcherExitCode separately. */
 	exitCode: number;
+	agentExitCode: number;
+	launcherExitCode: LauncherExitCode;
+	custody: CustodyOutcome;
 	name: string;
 	state?: SandboxStateV2;
 	warnings: string[];
@@ -644,6 +656,8 @@ async function launchWithLease(context: {
 	};
 	const temp = await mkdtemp(join(tmpdir(), "pi-docker-sandboxes-"));
 	let exitCode: number | undefined;
+	let launcherExitCode: LauncherExitCode = LauncherExitCode.Success;
+	let custodyOverride: CustodyOutcome | undefined;
 	let result: LaunchResult | undefined;
 	let primaryError: unknown;
 	let stagingCleaned = false;
@@ -670,6 +684,40 @@ async function launchWithLease(context: {
 			: phase === "remove-or-keep"
 				? [`sbx inspect ${shellArg(name)}`]
 				: [`sbx exec ${shellArg(name)} git status --porcelain=v1`];
+	const markInterruptedState = async (
+		cause: unknown,
+		phase: OperationPhase,
+	): Promise<void> => {
+		if (
+			!state ||
+			(!(cause instanceof CommandTimeoutError) &&
+				!(cause instanceof CommandCancelledError))
+		)
+			return;
+		const category =
+			phase === "create"
+				? "create"
+				: phase === "export-or-preserve"
+					? "export"
+					: phase === "remove-or-keep"
+						? "remove"
+						: "reconcile";
+		state.phase = "failed";
+		state.updatedAt = new Date().toISOString();
+		state.lastOperationError = { category, at: state.updatedAt };
+		await (options.saveState ?? saveSandboxState)(state);
+	};
+	const makeResult = (): LaunchResult => ({
+		exitCode: exitCode!,
+		agentExitCode: exitCode!,
+		launcherExitCode,
+		custody:
+			custodyOverride ?? (lifecycle.preserved ? "preserved" : "released"),
+		name,
+		state,
+		warnings,
+		lifecycle,
+	});
 	const finalize = async (
 		phase: OperationPhase,
 		operation: string,
@@ -680,6 +728,14 @@ async function launchWithLease(context: {
 			await action();
 			return true;
 		} catch (cause) {
+			await markInterruptedState(cause, phase);
+			if (exitCode !== undefined) {
+				launcherExitCode = LauncherExitCode.CustodyFailure;
+				if (phase === "inspect-exit" && operation.includes("existence"))
+					custodyOverride = "uncertain";
+				if (phase === "remove-or-keep" && lifecycle.preserved)
+					custodyOverride = "uncertain";
+			}
 			if (cause instanceof OperationError && cause.phase === phase) {
 				if (exitCode !== undefined) {
 					warnings.push(formatError(cause));
@@ -1003,7 +1059,7 @@ async function launchWithLease(context: {
 			lifecycle.changed = "unknown";
 			lifecycle.preserved = true;
 			warnCustody();
-			result = { exitCode, name, state, warnings, lifecycle };
+			result = makeResult();
 			throw finalizationStopped;
 		}
 		if (!present) lifecycle.preserved = false;
@@ -1034,8 +1090,9 @@ async function launchWithLease(context: {
 					],
 				);
 				warnings.push(formatError(error));
+				launcherExitCode = LauncherExitCode.CustodyFailure;
 				warnCustody();
-				result = { exitCode, name, state, warnings, lifecycle };
+				result = makeResult();
 				throw finalizationStopped;
 			}
 		}
@@ -1096,8 +1153,9 @@ async function launchWithLease(context: {
 				if (!cleanup.ok) {
 					lifecycle.cleanupWarnings.push(cleanup.detail);
 					warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
+					launcherExitCode = LauncherExitCode.CustodyFailure;
 					warnCustody();
-					result = { exitCode, name, state, warnings, lifecycle };
+					result = makeResult();
 					throw finalizationStopped;
 				}
 				const removed = await finalize(
@@ -1124,7 +1182,7 @@ async function launchWithLease(context: {
 				);
 				if (!removed) {
 					warnCustody();
-					result = { exitCode, name, state, warnings, lifecycle };
+					result = makeResult();
 					throw finalizationStopped;
 				}
 				lifecycle.preserved = false;
@@ -1146,9 +1204,10 @@ async function launchWithLease(context: {
 				}
 			}
 		}
-		result = { exitCode, name, state, warnings, lifecycle };
+		result = makeResult();
 	} catch (error) {
-		if (error !== finalizationStopped)
+		if (error !== finalizationStopped) {
+			await markInterruptedState(error, primaryPhase);
 			primaryError =
 				error instanceof OperationError
 					? error
@@ -1160,6 +1219,7 @@ async function launchWithLease(context: {
 							errorDetail(error),
 							recovery(primaryPhase),
 						);
+		}
 	}
 
 	const cleanup = stagingCleaned
@@ -1167,7 +1227,10 @@ async function launchWithLease(context: {
 		: await cleanupHostStaging(temp, options.cleanup);
 	if (!cleanup.ok) {
 		lifecycle.cleanupWarnings.push(cleanup.detail);
-		if (result) warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
+		if (result) {
+			launcherExitCode = LauncherExitCode.CustodyFailure;
+			warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
+		}
 		else if (primaryError) {
 			const operationError = primaryError as OperationError;
 			primaryError = new LaunchOperationError(
@@ -1190,5 +1253,5 @@ async function launchWithLease(context: {
 			);
 	}
 	if (primaryError) throw primaryError;
-	return result!;
+	return makeResult();
 }

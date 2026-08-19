@@ -13,7 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { createLaunchReporter, createPausedConfirm, main } from "../src/cli.ts";
+import {
+	createLaunchReporter,
+	createPausedConfirm,
+	launchProcessExitCode,
+	main,
+} from "../src/cli.ts";
+import { LauncherExitCode } from "../src/exit-codes.ts";
 import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
 import {
 	inspectRepository,
@@ -28,6 +34,23 @@ const exec = promisify(execFile);
 const cli = new URL("../src/cli.ts", import.meta.url).pathname;
 
 const fixtureImage = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
+
+test("launcher custody status is primary only after a successful agent", () => {
+	assert.equal(
+		launchProcessExitCode({
+			agentExitCode: 0,
+			launcherExitCode: LauncherExitCode.CustodyFailure,
+		}),
+		LauncherExitCode.CustodyFailure,
+	);
+	assert.equal(
+		launchProcessExitCode({
+			agentExitCode: 17,
+			launcherExitCode: LauncherExitCode.CustodyFailure,
+		}),
+		17,
+	);
+});
 
 async function fixture(
 	options: { git?: boolean; state?: boolean; phase?: SandboxPhase } = {

@@ -15,12 +15,17 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { OperationError } from "../src/errors.ts";
+import { LauncherExitCode } from "../src/exit-codes.ts";
 import { acquireSandboxLease } from "../src/lease.ts";
 import {
 	launch as productionLaunch,
 	type LaunchResult,
 } from "../src/launch.ts";
-import { SbxCommandError, type SbxClient } from "../src/sbx/client.ts";
+import {
+	CommandTimeoutError,
+	SbxCommandError,
+	type SbxClient,
+} from "../src/sbx/client.ts";
 import { sessionBackupRoot } from "../src/sessions.ts";
 import {
 	inspectRepository,
@@ -875,6 +880,9 @@ test("export failure preserves sandbox and remains the primary error", async () 
 	});
 	const result = await subject.operation;
 	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
+	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
+	assert.equal(result.custody, "preserved");
 	assertLifecycle(result, { exported: false, preserved: true });
 	assert.match(result.warnings.join("\n"), /injected export failure/);
 	assert.deepEqual(subject.log, [
@@ -904,6 +912,9 @@ test("host cleanup failure retains Pi exit code and reports warning", async () =
 	});
 	const result = await subject.operation;
 	assert.equal(result.exitCode, 17);
+	assert.equal(result.agentExitCode, 17);
+	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
+	assert.equal(result.custody, "preserved");
 	assertLifecycle(result, {
 		changed: false,
 		preserved: true,
@@ -962,6 +973,22 @@ test("create failure preserves the durable creating intent", async () => {
 		(await loadSandboxState(subject.fixture.root, subject.fixture.name)).phase,
 		"creating",
 	);
+});
+
+test("timed out sandbox mutation transitions durable state to recoverable failed", async () => {
+	const subject = await runCase({
+		launchError: new CommandTimeoutError("sbx", 100),
+	});
+	await assert.rejects(
+		subject.operation,
+		(error: unknown) =>
+			error instanceof OperationError &&
+			error.cause instanceof CommandTimeoutError,
+	);
+	const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+	assert.equal(state.phase, "failed");
+	assert.equal(state.lastOperationError?.category, "create");
+	assert.equal(subject.fake.present(), false);
 });
 
 test("nonzero Pi exit survives final existence failure", async () => {
@@ -1153,6 +1180,9 @@ test("zero-exit state unlink failure reports warning without masking exit", asyn
 	});
 	const result = await subject.operation;
 	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
+	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
+	assert.equal(result.custody, "released");
 	assertLifecycle(result, { preserved: false });
 	assert.match(
 		result.warnings.join("\n"),

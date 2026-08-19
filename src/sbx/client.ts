@@ -1,11 +1,17 @@
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
 import { sanitizeDetail } from "../errors.ts";
 import { runInherited, SbxNotInstalledError } from "./inherited-runner.mjs";
+import {
+	CommandOutputLimitError,
+	superviseCommand,
+	type CommandPolicy,
+} from "./supervisor.ts";
 
 export { runInherited, SbxNotInstalledError };
-
-const execFileAsync = promisify(execFile);
+export {
+	CommandCancelledError,
+	CommandTimeoutError,
+	type CommandPolicy,
+} from "./supervisor.ts";
 
 export interface CommandResult {
 	stdout: string;
@@ -14,14 +20,15 @@ export interface CommandResult {
 }
 
 export interface CommandOptions {
+	policy: CommandPolicy;
 	env?: NodeJS.ProcessEnv;
 	input?: string;
-	timeoutMs?: number;
+	maxBuffer?: number;
 }
 export type CommandRunner = (
 	command: string,
 	args: readonly string[],
-	options?: CommandOptions,
+	options: CommandOptions,
 ) => Promise<CommandResult>;
 export type InheritedRunner = (
 	command: string,
@@ -77,73 +84,52 @@ export class SbxCommandError extends Error {
 	}
 }
 
-function runPipedCommand(
+async function runCommand(
 	command: string,
 	args: readonly string[],
 	options: CommandOptions,
 ): Promise<CommandResult> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(command, [...args], {
-			env: options.env,
-			stdio: ["pipe", "pipe", "pipe"],
-		});
-		let stdout = "";
-		let stderr = "";
-		const timer =
-			options.timeoutMs === undefined
-				? undefined
-				: setTimeout(() => {
-						child.kill("SIGKILL");
-					}, options.timeoutMs);
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-		child.stdout.on("data", (chunk) => {
-			stdout += chunk;
-		});
-		child.stderr.on("data", (chunk) => {
-			stderr += chunk;
-		});
-		child.on("error", (error) => {
-			if (timer) clearTimeout(timer);
-			if ((error as NodeJS.ErrnoException).code === "ENOENT")
-				reject(new SbxNotInstalledError(command));
-			else reject(error);
-		});
-		child.on("close", (code) => {
-			if (timer) clearTimeout(timer);
-			resolve({ stdout, stderr, code: code ?? 1 });
-		});
-		child.stdin.end(options.input ?? "");
-	});
+	try {
+		const result = await superviseCommand(command, args, options);
+		return {
+			stdout: result.stdout.toString("utf8"),
+			stderr: result.stderr.toString("utf8"),
+			code: result.code,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT")
+			throw new SbxNotInstalledError(command);
+		throw error;
+	}
 }
 
-async function runCommand(
-	command: string,
-	args: readonly string[],
-	options: CommandOptions = {},
-): Promise<CommandResult> {
-	if (options.input !== undefined)
-		return runPipedCommand(command, args, options);
-	try {
-		const result = await execFileAsync(command, [...args], {
-			encoding: "utf8",
-			maxBuffer: 16 * 1024 * 1024,
-			timeout: options.timeoutMs,
-			...(options.env !== undefined ? { env: options.env } : {}),
-		});
-		return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-	} catch (cause) {
-		const error = cause as NodeJS.ErrnoException & {
-			stdout?: string;
-			stderr?: string;
-		};
-		if (error.code === "ENOENT") throw new SbxNotInstalledError(command);
-		return {
-			stdout: error.stdout ?? "",
-			stderr: error.stderr ?? "",
-			code: typeof error.code === "number" ? error.code : 1,
-		};
-	}
+export type SbxCommandPhase =
+	| "discovery"
+	| "create"
+	| "exec"
+	| "copy"
+	| "remove"
+	| "secret"
+	| "kit"
+	| "policy";
+
+const KILL_GRACE_MS = 5_000;
+export const SBX_COMMAND_POLICIES: Readonly<
+	Record<SbxCommandPhase, CommandPolicy>
+> = Object.freeze({
+	discovery: { timeoutMs: 30_000, killGraceMs: KILL_GRACE_MS },
+	create: { timeoutMs: 10 * 60_000, killGraceMs: KILL_GRACE_MS },
+	exec: { timeoutMs: 5 * 60_000, killGraceMs: KILL_GRACE_MS },
+	copy: { timeoutMs: 5 * 60_000, killGraceMs: KILL_GRACE_MS },
+	remove: { timeoutMs: 2 * 60_000, killGraceMs: KILL_GRACE_MS },
+	secret: { timeoutMs: 30_000, killGraceMs: KILL_GRACE_MS },
+	kit: { timeoutMs: 60_000, killGraceMs: KILL_GRACE_MS },
+	policy: { timeoutMs: 30_000, killGraceMs: KILL_GRACE_MS },
+});
+
+export interface SbxClientOptions {
+	signal?: AbortSignal;
+	policies?: Partial<Record<SbxCommandPhase, CommandPolicy>>;
 }
 
 const SERVICE_ID = /^[a-z0-9][a-z0-9-]*$/;
@@ -234,23 +220,38 @@ export class SbxClient {
 	readonly executable: string;
 	private readonly runner: CommandRunner;
 	private readonly inheritedRunner: InheritedRunner;
+	private readonly options: SbxClientOptions;
 
 	constructor(
 		executable = "sbx",
 		runner: CommandRunner = runCommand,
 		inheritedRunner: InheritedRunner = runInherited,
+		options: SbxClientOptions = {},
 	) {
 		this.executable = executable;
 		this.runner = runner;
 		this.inheritedRunner = inheritedRunner;
+		this.options = options;
+	}
+
+	private policy(phase: SbxCommandPhase): CommandPolicy {
+		const selected = this.options.policies?.[phase] ?? SBX_COMMAND_POLICIES[phase];
+		return {
+			...selected,
+			...(this.options.signal ? { signal: this.options.signal } : {}),
+		};
 	}
 
 	private async execute(
 		args: readonly string[],
+		phase: SbxCommandPhase,
 		allowFailure = false,
-		options?: CommandOptions,
+		options: Omit<CommandOptions, "policy"> & { policy?: CommandPolicy } = {},
 	): Promise<CommandResult> {
-		const result = await this.runner(this.executable, args, options);
+		const result = await this.runner(this.executable, args, {
+			...options,
+			policy: options.policy ?? this.policy(phase),
+		});
 		if (!allowFailure && result.code !== 0)
 			throw new SbxCommandError(args, result.code, result.stderr);
 		return result;
@@ -260,7 +261,7 @@ export class SbxClient {
 		args: readonly string[],
 		flag: string,
 	): Promise<boolean> {
-		const result = await this.execute(args, true);
+		const result = await this.execute(args, "discovery", true);
 		const output = `${result.stdout}\n${result.stderr}`;
 		return (
 			result.code === 0 ||
@@ -269,7 +270,7 @@ export class SbxClient {
 	}
 
 	async version(): Promise<SbxVersion> {
-		const { stdout } = await this.execute(["version"]);
+		const { stdout } = await this.execute(["version"], "discovery");
 		const match = stdout.match(
 			/sbx version:\s*v?(\d+\.\d+\.\d+)(?:\s+([0-9a-f]+))?/i,
 		);
@@ -278,7 +279,7 @@ export class SbxClient {
 	}
 
 	async list(): Promise<SandboxSummary[]> {
-		const { stdout } = await this.execute(["list", "--json"]);
+		const { stdout } = await this.execute(["list", "--json"], "discovery");
 		const parsed = parseObject(stdout, "list");
 		if (!Array.isArray(parsed.sandboxes))
 			throw new Error("sbx list returned no sandboxes array");
@@ -287,7 +288,10 @@ export class SbxClient {
 
 	async inspect(name: string): Promise<SandboxInspection> {
 		validateSandboxName(name);
-		const { stdout } = await this.execute(["inspect", name, "--json"]);
+		const { stdout } = await this.execute(
+			["inspect", name, "--json"],
+			"discovery",
+		);
 		return parseObject(stdout, "inspect");
 	}
 
@@ -299,10 +303,13 @@ export class SbxClient {
 	async capabilities(): Promise<SbxCapabilities> {
 		const [create, kit, inspect, policy, noShareSkills, credentialServices] =
 			await Promise.all([
-				this.execute(["create", "--help"]),
-				this.execute(["kit", "--help"]),
-				this.execute(["inspect", "--help"]),
-				this.execute(["policy", "check", "network", "--help"]),
+				this.execute(["create", "--help"], "discovery"),
+				this.execute(["kit", "--help"], "discovery"),
+				this.execute(["inspect", "--help"], "discovery"),
+				this.execute(
+					["policy", "check", "network", "--help"],
+					"discovery",
+				),
 				this.acceptsFlag(["create", "--no-share-skills"], "no-share-skills"),
 				this.credentialServices(),
 			]);
@@ -319,13 +326,17 @@ export class SbxClient {
 	}
 
 	async credentialServices(): Promise<string[]> {
-		const result = await this.execute(["secret", "set", "--help"], true);
+		const result = await this.execute(
+			["secret", "set", "--help"],
+			"discovery",
+			true,
+		);
 		if (result.code !== 0) return [];
 		return parseCredentialServices(`${result.stdout}\n${result.stderr}`);
 	}
 
 	async secretServices(): Promise<Set<string>> {
-		const { stdout } = await this.execute(["secret", "ls"]);
+		const { stdout } = await this.execute(["secret", "ls"], "secret");
 		try {
 			return parseSecretServices(stdout);
 		} catch {
@@ -341,9 +352,9 @@ export class SbxClient {
 		if (!SERVICE_ID.test(id)) throw new TypeError(`Invalid credential service: ${id}`);
 		if (!value || /[\0\r\n]/.test(value) || value.trim() !== value)
 			throw new TypeError("Invalid secret value");
-		await this.execute(["secret", "set", id], false, {
+		await this.execute(["secret", "set", id], "secret", false, {
 			input: `${value}\n`,
-			timeoutMs,
+			policy: { ...this.policy("secret"), timeoutMs },
 		});
 	}
 
@@ -373,7 +384,7 @@ export class SbxClient {
 	}
 
 	async create(request: LaunchRequest): Promise<void> {
-		await this.execute(this.createArgs(request), false, {
+		await this.execute(this.createArgs(request), "create", false, {
 			env: request.env ?? {},
 		});
 	}
@@ -418,7 +429,7 @@ export class SbxClient {
 		argv: readonly string[],
 		options: { workdir?: string; env?: Record<string, string>; user?: string } = {},
 	): Promise<ExecResult> {
-		return this.execute(this.execArgs(name, argv, options));
+		return this.execute(this.execArgs(name, argv, options), "exec");
 	}
 
 	async execBytes(
@@ -432,38 +443,35 @@ export class SbxClient {
 	): Promise<ExecBytesResult> {
 		const args = this.execArgs(name, argv, options);
 		try {
-			const result = await execFileAsync(this.executable, args, {
-				encoding: "buffer",
+			const result = await superviseCommand(this.executable, args, {
+				policy: this.policy("exec"),
 				maxBuffer: options.maxBuffer,
 			});
+			if (result.code !== 0)
+				throw new SbxCommandError(
+					args,
+					result.code,
+					result.stderr.toString("utf8"),
+				);
 			return {
 				stdout: result.stdout,
 				stderr: result.stderr.toString("utf8"),
-				code: 0,
+				code: result.code,
 			};
-		} catch (cause) {
-			const error = cause as NodeJS.ErrnoException & {
-				stdout?: Buffer;
-				stderr?: Buffer;
-			};
-			if (error.code === "ENOENT")
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT")
 				throw new SbxNotInstalledError(this.executable);
-			if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+			if (error instanceof CommandOutputLimitError)
 				throw new Error("sandbox command output exceeded the allowed size", {
-					cause,
+					cause: error,
 				});
-			throw new SbxCommandError(
-				args,
-				typeof error.code === "number" ? error.code : 1,
-				error.stderr?.toString("utf8") ??
-					"sandbox command output exceeded the allowed size",
-			);
+			throw error;
 		}
 	}
 
 	async validateKit(path: string): Promise<void> {
 		validatePath(path, "Kit path");
-		await this.execute(["kit", "validate", path]);
+		await this.execute(["kit", "validate", path], "kit");
 	}
 	async policyCheckNetwork(
 		target: string,
@@ -477,7 +485,7 @@ export class SbxClient {
 			args.push("--sandbox", sandbox);
 		}
 		args.push(target);
-		const result = await this.execute(args, true);
+		const result = await this.execute(args, "policy", true);
 		const parsed = parseObject(result.stdout, "policy check network");
 		if (typeof parsed.allowed !== "boolean")
 			throw new Error("sbx policy check returned no allowed decision");
@@ -492,7 +500,10 @@ export class SbxClient {
 
 	async remove(name: string, force = false): Promise<void> {
 		validateSandboxName(name);
-		await this.execute(["rm", ...(force ? ["--force"] : []), name]);
+		await this.execute(
+			["rm", ...(force ? ["--force"] : []), name],
+			"remove",
+		);
 	}
 	async copyFrom(
 		name: string,
@@ -502,7 +513,7 @@ export class SbxClient {
 		validateSandboxName(name);
 		validatePath(source, "sandbox source path");
 		validatePath(destination, "host destination path");
-		await this.execute(["cp", `${name}:${source}`, destination]);
+		await this.execute(["cp", `${name}:${source}`, destination], "copy");
 	}
 	async copyTo(
 		name: string,
@@ -512,6 +523,6 @@ export class SbxClient {
 		validateSandboxName(name);
 		validatePath(source, "host source path");
 		validatePath(destination, "sandbox destination path");
-		await this.execute(["cp", source, `${name}:${destination}`]);
+		await this.execute(["cp", source, `${name}:${destination}`], "copy");
 	}
 }

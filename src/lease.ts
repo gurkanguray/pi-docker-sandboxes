@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { LauncherExitCode } from "./exit-codes.ts";
 import { validateSandboxName } from "./sbx/client.ts";
 
 export type SandboxLeaseOperation = "run" | "export" | "apply" | "destroy";
@@ -38,7 +39,7 @@ export interface SandboxLease {
 	release(): Promise<void>;
 }
 
-export const LEASE_BUSY_EXIT_CODE = 75;
+export const LEASE_BUSY_EXIT_CODE = LauncherExitCode.Busy;
 const MAX_LEASE_BYTES = 4096;
 const OPERATIONS = new Set<SandboxLeaseOperation>([
 	"run",

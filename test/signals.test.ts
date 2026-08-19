@@ -3,7 +3,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import test, { type TestContext } from "node:test";
 import { runInherited, SbxNotInstalledError } from "../src/sbx/client.ts";
-import type { InheritedRuntime } from "../src/sbx/inherited-runner.mjs";
+import {
+	INHERITED_GRACE_MS,
+	type InheritedRuntime,
+} from "../src/sbx/inherited-runner.mjs";
 
 const moduleUrl = new URL("../src/sbx/client.ts", import.meta.url).href;
 const isWindows = process.platform === "win32";
@@ -247,6 +250,11 @@ test("process-group teardown rejects non-ESRCH probe errors and cleans listeners
 		assert.equal(process.listenerCount(signal), before[signal]);
 });
 
+test("inherited attach uses production grace measured in seconds", () => {
+	assert.ok(INHERITED_GRACE_MS.termGraceMs >= 1_000);
+	assert.ok(INHERITED_GRACE_MS.killGraceMs >= 1_000);
+});
+
 test("process-group teardown rejects boundedly when the group remains after KILL", {
 	skip: isWindows,
 	timeout: 2_000,
@@ -266,7 +274,11 @@ test("process-group teardown rejects boundedly when the group remains after KILL
 	};
 	const started = Date.now();
 	await assert.rejects(
-		() => runInherited("unused", [], undefined, runtime),
+		() =>
+			runInherited("unused", [], undefined, runtime, {
+				termGraceMs: 50,
+				killGraceMs: 50,
+			}),
 		/Process group 4321 remained after SIGKILL/,
 	);
 	assert.ok(Date.now() - started < 1_500);

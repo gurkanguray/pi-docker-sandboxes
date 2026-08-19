@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	CommandTimeoutError,
 	parseSecretRowPrefix,
 	runInherited,
 	SbxClient,
@@ -224,7 +225,7 @@ test("setSecret times out instead of hanging on an interactive helper", async ()
 	const started = Date.now();
 	await assert.rejects(
 		() => client.setSecret("openai", "host-api-key-value", 200),
-		/failed/,
+		CommandTimeoutError,
 	);
 	assert.ok(Date.now() - started < 20_000);
 	await rm(directory, { recursive: true, force: true });
@@ -366,6 +367,8 @@ test("constructs separate create and attach argv with the exact request environm
 		command: string;
 		args: readonly string[];
 		env?: NodeJS.ProcessEnv;
+		timeoutMs: number;
+		killGraceMs: number;
 	}> = [];
 	const inheritedCalls: Array<{
 		command: string;
@@ -375,7 +378,13 @@ test("constructs separate create and attach argv with the exact request environm
 	const client = new SbxClient(
 		"sbx",
 		async (command, args, options) => {
-			commandCalls.push({ command, args, env: options?.env });
+			commandCalls.push({
+				command,
+				args,
+				env: options.env,
+				timeoutMs: options.policy.timeoutMs,
+				killGraceMs: options.policy.killGraceMs,
+			});
 			return { stdout: "", stderr: "", code: 0 };
 		},
 		async (command, args, env) => {
@@ -423,11 +432,15 @@ test("constructs separate create and attach argv with the exact request environm
 			command: "sbx",
 			args: client.createArgs(request),
 			env: request.env,
+			timeoutMs: 600_000,
+			killGraceMs: 5_000,
 		},
 		{
 			command: "sbx",
 			args: client.createArgs(requestWithoutEnvironment),
 			env: {},
+			timeoutMs: 600_000,
+			killGraceMs: 5_000,
 		},
 	]);
 	assert.deepEqual(inheritedCalls, [

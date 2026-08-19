@@ -2,8 +2,10 @@ import { spawn } from "node:child_process";
 import { constants } from "node:os";
 
 const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
-const termGraceMs = 500;
-const killGraceMs = 500;
+export const INHERITED_GRACE_MS = Object.freeze({
+	termGraceMs: 2_000,
+	killGraceMs: 2_000,
+});
 
 export class SbxNotInstalledError extends Error {
 	constructor(executable) {
@@ -17,6 +19,7 @@ export function runInherited(
 	args,
 	env,
 	runtime = { spawn, kill: process.kill.bind(process) },
+	grace = INHERITED_GRACE_MS,
 ) {
 	if (process.platform === "win32")
 		return Promise.reject(
@@ -101,7 +104,7 @@ export function runInherited(
 				reject(error);
 				return;
 			}
-			let deadline = Date.now() + termGraceMs;
+			let deadline = Date.now() + grace.termGraceMs;
 			let killed = false;
 			const verify = () => {
 				try {
@@ -122,7 +125,7 @@ export function runInherited(
 							finish();
 							return;
 						}
-						deadline = Date.now() + killGraceMs;
+						deadline = Date.now() + grace.killGraceMs;
 					}
 					setTimeout(verify, 10);
 				} catch (error) {

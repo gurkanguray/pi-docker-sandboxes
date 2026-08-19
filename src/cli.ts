@@ -11,10 +11,11 @@ import {
 } from "./config.ts";
 import { decideDisposition } from "./disposition.ts";
 import { formatError, OperationError } from "./errors.ts";
+import { LauncherExitCode } from "./exit-codes.ts";
 import { IMAGE_LOCK } from "./image-lock.ts";
 import { buildLocalImage } from "./image.ts";
 import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
-import { launch } from "./launch.ts";
+import { launch, type LaunchResult } from "./launch.ts";
 import { SandboxLeaseBusyError, withSandboxLease } from "./lease.ts";
 import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
@@ -269,6 +270,14 @@ function option(args: string[], name: string): string | undefined {
 	return take(args, index, name);
 }
 
+export function launchProcessExitCode(
+	result: Pick<LaunchResult, "agentExitCode" | "launcherExitCode">,
+): number {
+	return result.agentExitCode !== 0
+		? result.agentExitCode
+		: result.launcherExitCode;
+}
+
 export async function main(
 	argv = process.argv.slice(2),
 	dependencies: { removeState?: (path: string) => Promise<void> } = {},
@@ -316,7 +325,7 @@ export async function main(
 					),
 			});
 			reporter.reportRemaining(result.warnings);
-			return result.exitCode;
+			return launchProcessExitCode(result);
 		} finally {
 			reporter.stop();
 		}
@@ -530,6 +539,8 @@ if (
 		.catch((error: unknown) => {
 			console.error(`Error: ${formatError(error)}`);
 			process.exitCode =
-				error instanceof SandboxLeaseBusyError ? error.exitCode : 1;
+				error instanceof SandboxLeaseBusyError
+					? LauncherExitCode.Busy
+					: LauncherExitCode.Failure;
 		});
 }
