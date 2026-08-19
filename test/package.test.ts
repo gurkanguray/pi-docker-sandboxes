@@ -10,7 +10,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -19,7 +19,11 @@ const execNpm = (
 	args: string[],
 	options: { cwd: string | URL },
 ): Promise<{ stdout: string; stderr: string }> => {
-	const npmCli = process.env.npm_execpath;
+	const npmCli =
+		process.env.npm_execpath ??
+		(process.platform === "win32"
+			? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+			: undefined);
 	const command = npmCli ? process.execPath : "npm";
 	const commandArgs = npmCli ? [npmCli, ...args] : args;
 	return exec(command, commandArgs, {

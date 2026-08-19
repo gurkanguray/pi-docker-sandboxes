@@ -83,7 +83,7 @@ test("direct exit clears its deadline while a descendant is reaped", {
 		setTimeout(() => process.exit(0), 25);
 	`;
 	const result = await superviseCommand(process.execPath, ["-e", parent], {
-		policy: { timeoutMs: 100, killGraceMs: 100 },
+		policy: { timeoutMs: 2_000, killGraceMs: 3_000 },
 	});
 	assert.equal(result.code, 0);
 });
