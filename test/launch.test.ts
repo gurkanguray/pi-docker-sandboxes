@@ -818,7 +818,8 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 						packageExecUsers.push(options?.user);
 						const packageSpec = argv.at(-1)!;
 						if (
-							packageSpec === lockedGit("git:github.com/example/failing-package") ||
+							packageSpec ===
+								lockedGit("git:github.com/example/failing-package") ||
 							packageSpec === "npm:context-mode@1.0.0"
 						)
 							return { stdout: "", stderr: "npm ERR secret-value", code: 1 };
@@ -1230,7 +1231,8 @@ test("launch does not warn for copied oauth host providers", async () => {
 		);
 		assert.ok(
 			result.warnings.some(
-				(warning) => warning.includes("VM-readable") && warning.includes("persist"),
+				(warning) =>
+					warning.includes("VM-readable") && warning.includes("persist"),
 			),
 		);
 	} finally {

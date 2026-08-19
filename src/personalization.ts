@@ -535,7 +535,9 @@ function sanitizeCost(value: unknown): Record<string, unknown> | undefined {
 	return output;
 }
 
-function sanitizeModelEntry(value: unknown): Record<string, unknown> | undefined {
+function sanitizeModelEntry(
+	value: unknown,
+): Record<string, unknown> | undefined {
 	if (!plainObject(value)) return undefined;
 	const output: Record<string, unknown> = {};
 	for (const key of MODEL_STRING_KEYS)
@@ -549,7 +551,8 @@ function sanitizeModelEntry(value: unknown): Record<string, unknown> | undefined
 	if (baseUrl) output.baseUrl = baseUrl;
 	if (Array.isArray(value.input)) {
 		const input = value.input.filter(
-			(entry): entry is "text" | "image" => entry === "text" || entry === "image",
+			(entry): entry is "text" | "image" =>
+				entry === "text" || entry === "image",
 		);
 		if (input.length > 0) output.input = [...new Set(input)];
 	}
@@ -618,7 +621,11 @@ export function sanitizeModels(
 					return entry && typeof entry.id === "string" ? [entry] : [];
 				});
 			output[id] = sanitized;
-			if (Object.keys(provider).some((key) => key !== "checkedAt" && key !== "models"))
+			if (
+				Object.keys(provider).some(
+					(key) => key !== "checkedAt" && key !== "models",
+				)
+			)
 				dropped = true;
 		}
 	}
@@ -627,7 +634,9 @@ export function sanitizeModels(
 	if (serializedInput !== serializedOutput) dropped = true;
 	return {
 		value: output,
-		warnings: dropped ? ["model metadata outside the production allowlist was not imported"] : [],
+		warnings: dropped
+			? ["model metadata outside the production allowlist was not imported"]
+			: [],
 	};
 }
 
@@ -953,7 +962,8 @@ async function isPiExtensionEntry(
 	} catch {
 		return false;
 	}
-	const pi = plainObject(manifest) && plainObject(manifest.pi) ? manifest.pi : {};
+	const pi =
+		plainObject(manifest) && plainObject(manifest.pi) ? manifest.pi : {};
 	const candidates =
 		Array.isArray(pi.extensions) &&
 		pi.extensions.every(
@@ -1378,22 +1388,22 @@ export async function createPersonalizationSnapshot(
 			: undefined;
 		if (hostAuth !== undefined && plainObject(hostAuth)) {
 			const oauthAuth: Record<string, unknown> = {};
-				for (const [id, entry] of Object.entries(hostAuth)) {
-					if (!isCopyEligibleOAuthEntry(entry)) continue;
-					if (options.availableProviders && !options.availableProviders.has(id))
-						continue;
-					oauthAuth[id] = {
-						type: "oauth",
-						access: entry.access,
-						refresh: entry.refresh,
-						...(typeof entry.expires === "number"
-							? { expires: entry.expires }
-							: {}),
-						...(typeof entry.accountId === "string"
-							? { accountId: entry.accountId }
-							: {}),
-					};
-				}
+			for (const [id, entry] of Object.entries(hostAuth)) {
+				if (!isCopyEligibleOAuthEntry(entry)) continue;
+				if (options.availableProviders && !options.availableProviders.has(id))
+					continue;
+				oauthAuth[id] = {
+					type: "oauth",
+					access: entry.access,
+					refresh: entry.refresh,
+					...(typeof entry.expires === "number"
+						? { expires: entry.expires }
+						: {}),
+					...(typeof entry.accountId === "string"
+						? { accountId: entry.accountId }
+						: {}),
+				};
+			}
 			if (Object.keys(oauthAuth).length > 0) {
 				const authPath = join(destination, "auth.json");
 				await ownedStage(authPath, () =>

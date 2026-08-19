@@ -164,10 +164,7 @@ export async function syncHostProviderSecrets(
 	if (!setSecret) return { requested, synced, warnings };
 	const services =
 		options.services ??
-		resolveAvailableServices(
-			options.proxyIds ?? requested,
-			requested,
-		).services;
+		resolveAvailableServices(options.proxyIds ?? requested, requested).services;
 	const byId = new Map(services.map((service) => [service.id, service]));
 	const hostIdsForService = (serviceId: string): string[] => {
 		const ids = (options.hostProviderIds ?? []).filter(

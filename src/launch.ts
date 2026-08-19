@@ -806,7 +806,9 @@ async function launchWithLease(context: {
 			{
 				availableProviders: new Set([
 					...configuredServices,
-					...(config.auth.mode === "proxy" ? resolvedProviders.services.map((service) => service.id) : []),
+					...(config.auth.mode === "proxy"
+						? resolvedProviders.services.map((service) => service.id)
+						: []),
 					...oauthHostIds,
 				]),
 				copyOAuth: oauthCopyRequested,

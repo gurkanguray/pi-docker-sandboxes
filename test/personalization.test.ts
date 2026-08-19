@@ -1331,8 +1331,14 @@ test("extension sync skips runtime state that Pi cannot auto-discover", async ()
 	const log = join(runtimeState, "logs", "permission-review.jsonl");
 	await writeFile(log, "x");
 	await truncate(log, MAX_RESOURCE_FILE_BYTES + 1);
-	await writeFile(join(validExtension, "index.ts"), "export default () => {};\n");
-	await writeFile(join(extensions, "top-level.js"), "export default () => {};\n");
+	await writeFile(
+		join(validExtension, "index.ts"),
+		"export default () => {};\n",
+	);
+	await writeFile(
+		join(extensions, "top-level.js"),
+		"export default () => {};\n",
+	);
 	await writeFile(
 		join(packagedExtension, "package.json"),
 		JSON.stringify({ pi: { extensions: ["src/index.ts"] } }),
@@ -1374,7 +1380,10 @@ test("extension sync skips runtime state that Pi cannot auto-discover", async ()
 		false,
 	);
 	assert.equal(
-		await readFile(join(root, "snapshot", "extensions", "valid", "index.ts"), "utf8"),
+		await readFile(
+			join(root, "snapshot", "extensions", "valid", "index.ts"),
+			"utf8",
+		),
 		"export default () => {};\n",
 	);
 	assert.equal(
@@ -1458,10 +1467,7 @@ test("extension sync rejects entrypoints removed after classification", async ()
 							| "afterExtensionClassification",
 						path: string,
 					) => {
-						if (
-							boundary === "afterExtensionClassification" &&
-							path === "raced"
-						)
+						if (boundary === "afterExtensionClassification" && path === "raced")
 							await rm(join(extension, "index.ts"));
 					},
 				},

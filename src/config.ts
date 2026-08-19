@@ -236,7 +236,9 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 				`${source}.auth.providers`,
 			).map((provider) => {
 				if (!AUTH_PROVIDER.test(provider))
-					throw new TypeError(`${source}.auth.providers contains an invalid id`);
+					throw new TypeError(
+						`${source}.auth.providers contains an invalid id`,
+					);
 				return provider;
 			});
 	}
