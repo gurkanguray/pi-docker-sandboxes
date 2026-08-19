@@ -140,6 +140,7 @@ export interface LaunchOptions {
 	confirmInitialCommit?: (root: string) => Promise<boolean>;
 	confirmResourceCopy?: (summary: string) => Promise<boolean>;
 	confirmNativePackages?: (packages: readonly string[]) => Promise<boolean>;
+	confirmOAuthCopy?: (question: string) => Promise<boolean>;
 	onStatus?: (line: string) => void;
 	onWarning?: (warning: string) => void;
 	/** @internal Test-only image resolver injection. */
@@ -152,6 +153,8 @@ export interface LaunchOptions {
 	inspectRepository?: typeof inspectRepository;
 	/** @internal Test-only host API-key printer. */
 	printApiKey?: (id: string) => Promise<string | undefined>;
+	/** @internal Test-only host OAuth-provider listing. */
+	listHostOAuthProviders?: (ids: readonly string[]) => Promise<Set<string>>;
 	/** @internal Test-only host provider listing. */
 	listHostProviders?: () => Promise<string[]>;
 	/** @internal Deterministic process-crash hook. */
@@ -600,10 +603,22 @@ async function launchWithLease(context: {
 	};
 	const hostProviderIds =
 		config.auth.mode === "none" ? [] : config.auth.providers;
-	const oauthHostIds =
-		config.auth.mode === "oauth-copy" && !options.noHostAuth
-			? await listHostOAuthProviderIds(hostProviderIds)
-			: new Set<string>();
+	const oauthCopyRequested =
+		config.auth.mode === "oauth-copy" &&
+		!options.noHostAuth &&
+		hostProviderIds.length > 0;
+	if (
+		oauthCopyRequested &&
+		(await options.confirmOAuthCopy?.(
+			`Copy OAuth refresh tokens for ${hostProviderIds.join(", ")} into sandbox ${name}? They become VM-readable and persist until the sandbox is removed.`,
+		)) !== true
+	)
+		throw new Error("OAuth credential copy was not approved for this sandbox");
+	const oauthHostIds = oauthCopyRequested
+		? await (options.listHostOAuthProviders ?? listHostOAuthProviderIds)(
+				hostProviderIds,
+			)
+		: new Set<string>();
 	const mapped = classifyHostProviders(
 		hostProviderIds,
 		capabilities.credentialServices,
@@ -611,7 +626,7 @@ async function launchWithLease(context: {
 	);
 	const resolvedProviders = resolveAvailableServices(
 		capabilities.credentialServices,
-		mapped.requested,
+		config.auth.mode === "proxy" ? mapped.requested : [],
 	);
 	for (const id of mapped.unmatched)
 		pushProviderWarning(
@@ -791,9 +806,10 @@ async function launchWithLease(context: {
 			{
 				availableProviders: new Set([
 					...configuredServices,
-					...(options.noHostAuth ? [] : hostProviderIds),
+					...(config.auth.mode === "proxy" ? resolvedProviders.services.map((service) => service.id) : []),
+					...oauthHostIds,
 				]),
-				copyOAuth: !options.noHostAuth,
+				copyOAuth: oauthCopyRequested,
 				deferAllPackages: !existing,
 			},
 		);
@@ -806,6 +822,10 @@ async function launchWithLease(context: {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			oauthAuthPath = undefined;
 		}
+		if (oauthAuthPath)
+			pushProviderWarning(
+				`OAuth refresh tokens copied into sandbox ${name} are VM-readable and persist until the sandbox is removed`,
+			);
 		const nativePackagesToInstall = allowNativePackages
 			? snapshot.nativePackages.filter((packageSpec) =>
 					consentedNativePackages.has(packageSpec),
@@ -845,6 +865,7 @@ async function launchWithLease(context: {
 		if (resolvedProviders.services.length > 0) {
 			if (typeof client.setSecret === "function") {
 				const synced = await syncHostProviderSecrets({
+					mode: config.auth.mode,
 					services: resolvedProviders.services,
 					hostProviderIds,
 					configured: configuredServices,

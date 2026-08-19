@@ -13,9 +13,30 @@ import { BUILTIN_SERVICES } from "../src/providers.ts";
 const openai = BUILTIN_SERVICES.openai!;
 const hostKey = "host-api-key-value";
 
+test("auth none never reads or stores a host credential", async () => {
+	let reads = 0;
+	let writes = 0;
+	const result = await syncHostProviderSecrets({
+		mode: "none",
+		services: [openai],
+		configured: new Set(),
+		printApiKey: async () => {
+			reads++;
+			return hostKey;
+		},
+		setSecret: async () => {
+			writes++;
+		},
+	});
+	assert.deepEqual(result, { requested: [], synced: [], warnings: [] });
+	assert.equal(reads, 0);
+	assert.equal(writes, 0);
+});
+
 test("syncs a missing host API key to sbx through stdin only", async () => {
 	const calls: Array<{ id: string; key: string }> = [];
 	const result = await syncHostProviderSecrets({
+		mode: "proxy",
 		services: [openai],
 		configured: new Set(),
 		printApiKey: async () => hostKey,
@@ -27,7 +48,7 @@ test("syncs a missing host API key to sbx through stdin only", async () => {
 	assert.deepEqual(result.requested, ["openai"]);
 	assert.ok(
 		result.warnings.some((warning) =>
-			warning.includes("Storing host credential for openai"),
+			warning.includes("persists in SBX secret storage"),
 		),
 	);
 	assert.equal(calls.length, 1);
@@ -54,6 +75,7 @@ test("rejects empty, multiline, or control-bearing keys", async () => {
 	for (const key of ["", "   ", "one\ntwo", "key\0value", "key\rvalue"]) {
 		let set = 0;
 		const result = await syncHostProviderSecrets({
+			mode: "proxy",
 			services: [openai],
 			configured: new Set(),
 			printApiKey: async () => key,
@@ -75,6 +97,7 @@ test("rejects empty, multiline, or control-bearing keys", async () => {
 test("missing host API key stays fail-open and suggests oauth when needed", async () => {
 	let set = 0;
 	const result = await syncHostProviderSecrets({
+		mode: "proxy",
 		services: [openai],
 		configured: new Set(),
 		printApiKey: async () => undefined,
@@ -91,6 +114,7 @@ test("missing host API key stays fail-open and suggests oauth when needed", asyn
 
 test("setSecret failure does not throw and does not leak the key", async () => {
 	const result = await syncHostProviderSecrets({
+		mode: "proxy",
 		services: [openai],
 		configured: new Set(),
 		printApiKey: async () => hostKey,
@@ -105,6 +129,7 @@ test("setSecret failure does not throw and does not leak the key", async () => {
 
 test("oauth host ids are not unmatched", async () => {
 	const result = await syncHostProviderSecrets({
+		mode: "proxy",
 		hostProviderIds: ["openai-codex", "qwen-token-plan", "xai"],
 		proxyIds: ["openai", "openrouter", "xai"],
 		configured: new Set(),
@@ -127,6 +152,7 @@ test("does not map openai-codex onto openai", async () => {
 	const printed: string[] = [];
 	const stored: string[] = [];
 	const result = await syncHostProviderSecrets({
+		mode: "proxy",
 		hostProviderIds: ["openai-codex", "qwen-token-plan", "xai"],
 		proxyIds: ["openai", "openrouter", "xai"],
 		configured: new Set(),

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import test from "node:test";
 import {
 	access,
@@ -22,6 +23,7 @@ import {
 	createPersonalizationSnapshot,
 	hashTree,
 	MAX_RESOURCE_FILE_BYTES,
+	resolvePackageLocks,
 	resolvePackageSpecs,
 	sanitizeModels,
 	sanitizeSettings,
@@ -30,6 +32,13 @@ import {
 } from "../src/personalization.ts";
 
 const exec = promisify(execFile);
+const packageIntegrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+const packageCommit = "a".repeat(40);
+const lockedNpm = (name: string) => ({
+	source: `npm:${name}@1.0.0`,
+	integrity: packageIntegrity,
+});
+const lockedGit = (source: string) => `${source}@${packageCommit}`;
 
 const resourcePolicy = {
 	settings: false,
@@ -83,6 +92,66 @@ async function createNativePackage(
 	);
 	return packageRoot;
 }
+
+test("model metadata is a strict allowlist for arbitrary opaque properties", () => {
+	for (let index = 0; index < 50; index++) {
+		const key = `unknown_${randomBytes(8).toString("hex")}`;
+		const secret = randomBytes(48).toString("base64url");
+		const result = sanitizeModels({
+			providers: {
+				test: {
+					name: "Test provider",
+					baseUrl: "https://api.example.com/v1",
+					models: [{ id: "safe-model", name: "Safe model", [key]: secret }],
+					[key]: secret,
+					headers: { Authorization: secret },
+					cookies: secret,
+					certificate: secret,
+					env: { SECRET: secret },
+				},
+			},
+		});
+		const serialized = JSON.stringify(result);
+		assert.equal(serialized.includes(secret), false);
+		assert.equal(serialized.includes(key), false);
+	}
+});
+
+test("package mirroring accepts only immutable receipt-bearing specs", () => {
+	const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+	const commit = "a".repeat(40);
+	assert.deepEqual(
+		resolvePackageLocks([
+			{ source: "npm:@scope/name@1.2.3", integrity },
+			`git:github.com/owner/repo@${commit}`,
+		]).value,
+		[
+			{
+				source: "npm:@scope/name@1.2.3",
+				kind: "npm",
+				integrity,
+			},
+			{
+				source: `git:github.com/owner/repo@${commit}`,
+				kind: "git",
+				commit,
+			},
+		],
+	);
+	for (const source of [
+		"npm:name",
+		"npm:name@^1.2.3",
+		"npm:name@1.x",
+		"npm:name@latest",
+		"git:github.com/owner/repo",
+		"git:github.com/owner/repo@main",
+	])
+		assert.throws(() => resolvePackageLocks([source]), /immutable package/i);
+	assert.throws(
+		() => resolvePackageLocks([{ source: "npm:name@1.2.3" }]),
+		/sha512 integrity/i,
+	);
+});
 
 test("npm and git package specs cross the platform boundary", () => {
 	const result = resolvePackageSpecs([
@@ -336,7 +405,7 @@ test("snapshot collapses settings-key and host-path skips", async () => {
 			theme: "dark",
 			subagents: {},
 			lastChangelogVersion: "1",
-			packages: ["npm:pi-subagents", "../../host-project/local-package"],
+			packages: [lockedNpm("pi-subagents"), "../../host-project/local-package"],
 		}),
 	);
 	const snapshot = await createPersonalizationSnapshot(
@@ -431,9 +500,9 @@ test("mirror skips native npm packages and copies their skills", async () => {
 		JSON.stringify({
 			theme: "dark",
 			packages: [
-				"npm:context-mode",
-				"npm:pi-subagents",
-				"git:github.com/obra/superpowers",
+				lockedNpm("context-mode"),
+				lockedNpm("pi-subagents"),
+				lockedGit("git:github.com/obra/superpowers"),
 			],
 		}),
 	);
@@ -446,8 +515,8 @@ test("mirror skips native npm packages and copies their skills", async () => {
 		await readFile(join(destination, "settings.json"), "utf8"),
 	);
 	assert.deepEqual(settings.packages, [
-		"npm:pi-subagents",
-		"git:github.com/obra/superpowers",
+		"npm:pi-subagents@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
 	]);
 	assert.equal(settings.theme, "dark");
 	assert.equal(
@@ -503,7 +572,7 @@ test("mirror merges ordinary host skills with native fallback skills", async () 
 	);
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: ["npm:context-mode"] }),
+		JSON.stringify({ packages: [lockedNpm("context-mode")] }),
 	);
 
 	await createPersonalizationSnapshot(agent, destination, "mirror");
@@ -556,7 +625,7 @@ test("native fallback skill collisions fail closed", async () => {
 	await writeFile(
 		join(agent, "settings.json"),
 		JSON.stringify({
-			packages: ["npm:first-native", "npm:second-native"],
+			packages: [lockedNpm("first-native"), lockedNpm("second-native")],
 		}),
 	);
 
@@ -586,7 +655,7 @@ test("native fallback skill symlinks fail closed", async () => {
 		}
 		await writeFile(
 			join(agent, "settings.json"),
-			JSON.stringify({ packages: ["npm:linked-native"] }),
+			JSON.stringify({ packages: [lockedNpm("linked-native")] }),
 		);
 
 		await assert.rejects(
@@ -605,7 +674,7 @@ test("native fallback skills root must be a directory", async () => {
 	await writeFile(join(packageRoot, "skills"), "not a directory\n");
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: ["npm:file-skills-native"] }),
+		JSON.stringify({ packages: [lockedNpm("file-skills-native")] }),
 	);
 
 	await assert.rejects(
@@ -624,7 +693,7 @@ test("native package without fallback skills remains allowed", async () => {
 		join(agent, "settings.json"),
 		JSON.stringify({
 			theme: "dark",
-			packages: ["npm:no-skills-native"],
+			packages: [lockedNpm("no-skills-native")],
 		}),
 	);
 
@@ -633,7 +702,7 @@ test("native package without fallback skills remains allowed", async () => {
 		join(root, "snapshot"),
 		"mirror",
 	);
-	assert.deepEqual(snapshot.nativePackages, ["npm:no-skills-native"]);
+	assert.deepEqual(snapshot.nativePackages, ["npm:no-skills-native@1.0.0"]);
 	assert.equal(await exists(join(root, "snapshot", "skills")), false);
 	await rm(root, { recursive: true, force: true });
 });
@@ -670,9 +739,9 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
-				"git:github.com/obra/superpowers",
-				"npm:pi-subagents",
+				lockedNpm("context-mode"),
+				lockedGit("git:github.com/obra/superpowers"),
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -687,11 +756,11 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 		await readFile(join(destination, "settings.json"), "utf8"),
 	);
 	assert.deepEqual(settings.packages, [
-		"npm:context-mode",
-		"git:github.com/obra/superpowers",
-		"npm:pi-subagents",
+		"npm:context-mode@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
+		"npm:pi-subagents@1.0.0",
 	]);
-	assert.deepEqual(snapshot.nativePackages, ["npm:context-mode"]);
+	assert.deepEqual(snapshot.nativePackages, ["npm:context-mode@1.0.0"]);
 	assert.equal(
 		snapshot.warnings.some((warning) => /context-mode.*native/.test(warning)),
 		false,
@@ -709,11 +778,11 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 	);
 	assert.equal(deferredSettings.packages, undefined);
 	assert.deepEqual(deferred.packageSpecs, [
-		"npm:context-mode",
-		"git:github.com/obra/superpowers",
-		"npm:pi-subagents",
+		"npm:context-mode@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
+		"npm:pi-subagents@1.0.0",
 	]);
-	assert.deepEqual(deferred.nativePackages, ["npm:context-mode"]);
+	assert.deepEqual(deferred.nativePackages, ["npm:context-mode@1.0.0"]);
 	assert.equal(
 		deferred.warnings.some((warning) => /native packages/.test(warning)),
 		false,
@@ -872,7 +941,7 @@ test("settings keep only enabledModels whose provider exists in sbx", () => {
 	assert.equal(result.value.defaultModel, "gpt-5.6-sol");
 });
 
-test("models sanitizer handles normalized credentials without overbroad token rejection", () => {
+test("models sanitizer drops credentials, headers, environment references, and unknown fields", () => {
 	const credentialKeys = [
 		"clientSecret",
 		"secret_access_key",
@@ -941,14 +1010,10 @@ test("models sanitizer handles normalized credentials without overbroad token re
 	assert.equal(serialized.includes("ghp_1234567890abcdef"), false);
 	assert.deepEqual((result.value.providers as any).safe, {
 		baseUrl: "https://api.example.com/v1",
-		...environmentCredentials,
 		maxTokens: 100,
-		inputTokens: 20,
-		outputTokens: 80,
-		tokenBudget: 100,
 		models: [{ id: "m" }],
 	});
-	assert.equal((result.value.providers as any).headers.headers["x-safe"], "ok");
+	assert.deepEqual((result.value.providers as any).headers, {});
 	assert.ok(result.warnings.every((warning) => !warning.includes(fake)));
 });
 
@@ -1130,7 +1195,6 @@ test("models-store sync sanitizes nested credentials and preserves catalog metad
 					id: "grok-4.6",
 					name: "Grok 4.6",
 					contextWindow: 128_000,
-					metadata: {},
 				},
 			],
 		},
@@ -1140,8 +1204,8 @@ test("models-store sync sanitizes nested credentials and preserves catalog metad
 		assert.ok(snapshot.warnings.every((warning) => !warning.includes(secret)));
 	}
 	assert.ok(
-		snapshot.warnings.some((warning) =>
-		warning.includes("credential-bearing URL not imported"),
+		snapshot.warnings.includes(
+			"model metadata outside the production allowlist was not imported",
 		),
 	);
 	await rm(root, { recursive: true, force: true });

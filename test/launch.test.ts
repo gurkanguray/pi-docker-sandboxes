@@ -38,6 +38,13 @@ import {
 } from "../src/sbx/client.ts";
 
 const exec = promisify(execFile);
+const packageIntegrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+const packageCommit = "a".repeat(40);
+const lockedNpm = (name: string) => ({
+	source: `npm:${name}@1.0.0`,
+	integrity: packageIntegrity,
+});
+const lockedGit = (source: string) => `${source}@${packageCommit}`;
 async function git(cwd: string, ...args: string[]): Promise<string> {
 	return (await exec("git", args, { cwd, encoding: "utf8" })).stdout.trim();
 }
@@ -217,11 +224,11 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 	const root = await committedRepository();
 	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-ponytail-"));
 	const agent = join(home, ".pi", "agent");
-	const ponytail = "git:github.com/DietrichGebert/ponytail";
+	const ponytail = lockedGit("git:github.com/DietrichGebert/ponytail");
 	await mkdir(agent, { recursive: true });
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: [ponytail, "npm:pi-subagents"] }),
+		JSON.stringify({ packages: [ponytail, lockedNpm("pi-subagents")] }),
 	);
 	const oldHome = process.env.HOME;
 	process.env.HOME = home;
@@ -250,7 +257,7 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 		assert.deepEqual(events, [
 			"create",
 			`install:${ponytail}`,
-			"install:npm:pi-subagents",
+			"install:npm:pi-subagents@1.0.0",
 			"attach",
 		]);
 		assert.equal(
@@ -260,6 +267,38 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+	}
+});
+
+test("mutable package inputs fail before sandbox mutation", async () => {
+	const root = await committedRepository();
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-mutable-package-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: ["npm:mutable@latest"] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	let created = 0;
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					create: async () => {
+						created++;
+					},
+				} as unknown as SbxClient,
+				config: { ...launchConfig, syncProfile: "mirror" },
+			}),
+			/immutable package source required/,
+		);
+		assert.equal(created, 0);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 	}
 });
 
@@ -423,7 +462,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
+				lockedNpm("context-mode"),
 				"NPM:pi-subagents",
 				"git:example.com/owner/...git",
 				"git:https://999.999/owner/repo",
@@ -435,7 +474,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 				"git:https://www.github.com/owner/repo",
 				"git:example.com/owner/repo#secret-ref",
 				"git:gitlab.com/owner/repo@feature/main",
-				"npm:pi-subagents",
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -484,7 +523,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 							}
 						: async (packages) => {
 								events.push("prompt");
-								assert.deepEqual(packages, ["npm:context-mode"]);
+								assert.deepEqual(packages, ["npm:context-mode@1.0.0"]);
 								return mode === "yes";
 							},
 				onStatus: (status) => statuses.push(status),
@@ -543,8 +582,8 @@ test("native packages prompt once and install a compiler only after yes", async 
 					2,
 				);
 				assert.deepEqual(execs.slice(1), [
-					["agent", "pi", "install", "npm:context-mode"],
-					["agent", "pi", "install", "npm:pi-subagents"],
+					["agent", "pi", "install", "npm:context-mode@1.0.0"],
+					["agent", "pi", "install", "npm:pi-subagents@1.0.0"],
 				]);
 				assert.deepEqual(statuses, [
 					"checking Docker Sandboxes",
@@ -552,8 +591,8 @@ test("native packages prompt once and install a compiler only after yes", async 
 					"copying host profile",
 					"creating sandbox",
 					"installing compiler",
-					"installing npm:context-mode",
-					"installing npm:pi-subagents",
+					"installing npm:context-mode@1.0.0",
+					"installing npm:pi-subagents@1.0.0",
 					"starting Pi",
 				]);
 				assert.deepEqual(kitAllow, [
@@ -568,7 +607,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 				]);
 			} else {
 				assert.deepEqual(execs, [
-					["agent", "pi", "install", "npm:pi-subagents"],
+					["agent", "pi", "install", "npm:pi-subagents@1.0.0"],
 				]);
 				assert.deepEqual(kitAllow, []);
 				if (mode === "no") assert.ok(events.includes("prompt"));
@@ -604,7 +643,9 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 	const settingsPath = join(agent, "settings.json");
 	await writeFile(
 		settingsPath,
-		JSON.stringify({ packages: ["npm:context-mode", "npm:pi-hermes-memory"] }),
+		JSON.stringify({
+			packages: [lockedNpm("context-mode"), lockedNpm("pi-hermes-memory")],
+		}),
 	);
 	const oldHome = process.env.HOME;
 	process.env.HOME = home;
@@ -638,23 +679,26 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 			config: { ...launchConfig, syncProfile: "mirror" },
 			confirmNativePackages: async (packages) => {
 				assert.deepEqual(packages, [
-					"npm:context-mode",
-					"npm:pi-hermes-memory",
+					"npm:context-mode@1.0.0",
+					"npm:pi-hermes-memory@1.0.0",
 				]);
 				await writeFile(
 					settingsPath,
 					JSON.stringify({
 						packages: [
-							"npm:new-native",
-							"npm:pi-hermes-memory",
-							"npm:context-mode",
+							lockedNpm("new-native"),
+							lockedNpm("pi-hermes-memory"),
+							lockedNpm("context-mode"),
 						],
 					}),
 				);
 				return true;
 			},
 		});
-		assert.deepEqual(installs, ["npm:pi-hermes-memory", "npm:context-mode"]);
+		assert.deepEqual(installs, [
+			"npm:pi-hermes-memory@1.0.0",
+			"npm:context-mode@1.0.0",
+		]);
 		assert.equal(newNativeSkillCopied, true);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -689,10 +733,10 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
-				"git:github.com/example/failing-package",
-				"npm:pi-hermes-memory",
-				"npm:pi-subagents",
+				lockedNpm("context-mode"),
+				lockedGit("git:github.com/example/failing-package"),
+				lockedNpm("pi-hermes-memory"),
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -774,8 +818,8 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 						packageExecUsers.push(options?.user);
 						const packageSpec = argv.at(-1)!;
 						if (
-							packageSpec === "git:github.com/example/failing-package" ||
-							packageSpec === "npm:context-mode"
+							packageSpec === lockedGit("git:github.com/example/failing-package") ||
+							packageSpec === "npm:context-mode@1.0.0"
 						)
 							return { stdout: "", stderr: "npm ERR secret-value", code: 1 };
 						const settings = JSON.parse(
@@ -803,20 +847,23 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 			assert.deepEqual(
 				attachedSettings?.packages,
 				failure === "compiler"
-					? ["npm:pi-subagents"]
-					: ["npm:pi-hermes-memory", "npm:pi-subagents"],
+					? ["npm:pi-subagents@1.0.0"]
+					: ["npm:pi-hermes-memory@1.0.0", "npm:pi-subagents@1.0.0"],
 			);
 			assert.deepEqual(
 				execs
 					.filter((argv) => argv[0] === "pi" && argv[1] === "install")
 					.map((argv) => argv[2]),
 				failure === "compiler"
-					? ["git:github.com/example/failing-package", "npm:pi-subagents"]
+					? [
+							lockedGit("git:github.com/example/failing-package"),
+							"npm:pi-subagents@1.0.0",
+						]
 					: [
-							"npm:context-mode",
-							"git:github.com/example/failing-package",
-							"npm:pi-hermes-memory",
-							"npm:pi-subagents",
+							"npm:context-mode@1.0.0",
+							lockedGit("git:github.com/example/failing-package"),
+							"npm:pi-hermes-memory@1.0.0",
+							"npm:pi-subagents@1.0.0",
 						],
 			);
 			assert.deepEqual(
@@ -828,11 +875,11 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 				failure === "compiler"
 					? [
 							"Could not install compiler; native packages were skipped",
-							"Could not install git:github.com/example/failing-package; package was skipped",
+							`Could not install ${lockedGit("git:github.com/example/failing-package")}; package was skipped`,
 						]
 					: [
-							"Could not install npm:context-mode; skills were copied instead",
-							"Could not install git:github.com/example/failing-package; package was skipped",
+							"Could not install npm:context-mode@1.0.0; skills were copied instead",
+							`Could not install ${lockedGit("git:github.com/example/failing-package")}; package was skipped`,
 						],
 			);
 			assert.equal(
@@ -861,7 +908,9 @@ test("native compiler and package interruption aborts before ready transition", 
 	);
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: ["npm:context-mode", "npm:pi-subagents"] }),
+		JSON.stringify({
+			packages: [lockedNpm("context-mode"), lockedNpm("pi-subagents")],
+		}),
 	);
 	const previousHome = process.env.HOME;
 	process.env.HOME = home;
@@ -963,19 +1012,69 @@ test("reattach does not prompt for or install native packages", async () => {
 	assert.equal(installs, 0);
 });
 
-test("safe default needs no resource confirmation", async () => {
+test("safe default needs no resource or credential access", async () => {
 	const root = await committedRepository();
-	let confirmations = 0;
+	let resourceConfirmations = 0;
+	let authReads = 0;
+	let secretReads = 0;
+	let secretWrites = 0;
+	const client = {
+		...launchClient,
+		setSecret: async () => {
+			secretWrites++;
+		},
+	} as unknown as SbxClient;
 	await launch({
 		cwd: root,
-		client: launchClient,
+		client,
 		config: launchConfig,
 		confirmResourceCopy: async () => {
-			confirmations++;
+			resourceConfirmations++;
 			return false;
 		},
+		listHostOAuthProviders: async () => {
+			authReads++;
+			return new Set(["openai-codex"]);
+		},
+		printApiKey: async () => {
+			secretReads++;
+			return "opaque-host-secret";
+		},
 	});
-	assert.equal(confirmations, 0);
+	assert.equal(resourceConfirmations, 0);
+	assert.equal(authReads, 0);
+	assert.equal(secretReads, 0);
+	assert.equal(secretWrites, 0);
+});
+
+test("oauth-copy requires sandbox-specific consent even with --yes", async () => {
+	const root = await committedRepository();
+	let authReads = 0;
+	let created = 0;
+	const client = {
+		...launchClient,
+		create: async () => {
+			created++;
+		},
+	} as unknown as SbxClient;
+	await assert.rejects(
+		launch({
+			cwd: root,
+			client,
+			config: {
+				...launchConfig,
+				auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+			},
+			yes: true,
+			listHostOAuthProviders: async () => {
+				authReads++;
+				return new Set(["openai-codex"]);
+			},
+		}),
+		/OAuth credential copy.*not approved/i,
+	);
+	assert.equal(authReads, 0);
+	assert.equal(created, 0);
 });
 
 test("missing proxy credentials are optional and guidance precedes launch", async () => {
@@ -1102,6 +1201,7 @@ test("launch does not warn for copied oauth host providers", async () => {
 				sync: { models: true },
 			},
 			listHostProviders: async () => ["openai-codex"],
+			confirmOAuthCopy: async () => true,
 			yes: true,
 		});
 		assert.equal(kitAuth, undefined);
@@ -1127,6 +1227,11 @@ test("launch does not warn for copied oauth host providers", async () => {
 		assert.equal(
 			result.warnings.some((warning) => warning.includes("openai-codex")),
 			false,
+		);
+		assert.ok(
+			result.warnings.some(
+				(warning) => warning.includes("VM-readable") && warning.includes("persist"),
+			),
 		);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -1245,6 +1350,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 						sync: { models: true },
 					},
 					listHostProviders: async () => ["openai-codex"],
+					confirmOAuthCopy: async () => true,
 					yes: true,
 				}),
 				new RegExp(`${failure} failed`),
@@ -1288,7 +1394,11 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 			);
 			const result = await launch({
 				cwd: root,
-				client: launchClient,
+				client: {
+					...launchClient,
+					copyTo: async () => undefined,
+					exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+				} as unknown as SbxClient,
 				config:
 					scenario === "malformed"
 						? {
@@ -1319,6 +1429,7 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 								},
 							},
 				listHostProviders: async () => ["openai-codex"],
+				confirmOAuthCopy: async () => true,
 				yes: true,
 			});
 			assert.equal(

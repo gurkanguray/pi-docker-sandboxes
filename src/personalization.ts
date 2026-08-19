@@ -79,7 +79,7 @@ export function sanitizeSettings(
 			warnings.push(`settings.${key}: absolute host path not imported`);
 			continue;
 		}
-		const sanitized = sanitizeModelValue(
+		const sanitized = sanitizeSettingValue(
 			entry,
 			`settings.${key}`,
 			key,
@@ -110,7 +110,11 @@ export function sanitizeSettings(
 
 const PACKAGE_CONTROLS = /\p{C}/u;
 const NPM_PACKAGE =
+	/^npm:((?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)@((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/i;
+const NPM_PACKAGE_LEGACY =
 	/^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[a-z0-9*^~<>=|.+_-]+)?$/i;
+const NPM_INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const GIT_COMMIT = /^[0-9a-f]{40}$/i;
 const GIT_HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const GIT_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const GIT_REF_SEGMENT = /^[a-z0-9._-]+$/i;
@@ -146,7 +150,7 @@ function safeGitPath(
 	return { path, ref };
 }
 
-function safeRemotePackage(source: string): boolean {
+function safeRemotePackage(source: string, immutable = true): boolean {
 	if (
 		PACKAGE_CONTROLS.test(source) ||
 		/\s/u.test(source) ||
@@ -155,7 +159,8 @@ function safeRemotePackage(source: string): boolean {
 		source.includes("\\")
 	)
 		return false;
-	if (source.startsWith("npm:") && NPM_PACKAGE.test(source)) return true;
+	if (source.startsWith("npm:"))
+		return (immutable ? NPM_PACKAGE : NPM_PACKAGE_LEGACY).test(source);
 	if (!source.startsWith("git:") || source.includes("%")) return false;
 	const spec = source.slice(4);
 	const protocol = /^(https?|git|ssh):\/\//.exec(spec);
@@ -164,7 +169,13 @@ function safeRemotePackage(source: string): boolean {
 		const slash = remainder.indexOf("/");
 		const rawHost = remainder.slice(0, slash);
 		const rawPath = safeGitPath(remainder.slice(slash + 1));
-		if (slash <= 0 || !safeGitHost(rawHost) || !rawPath) return false;
+		if (
+			slash <= 0 ||
+			!safeGitHost(rawHost) ||
+			!rawPath ||
+			(immutable && !GIT_COMMIT.test(rawPath.ref ?? ""))
+		)
+			return false;
 		try {
 			const parsed = new URL(spec);
 			const parsedPath = safeGitPath(parsed.pathname.replace(/^\/+/, ""));
@@ -186,18 +197,75 @@ function safeRemotePackage(source: string): boolean {
 	}
 	if (spec.startsWith("git@")) {
 		const colon = spec.indexOf(":", 4);
+		const path = safeGitPath(spec.slice(colon + 1));
 		return (
 			colon > 4 &&
 			safeGitHost(spec.slice(4, colon)) &&
-			Boolean(safeGitPath(spec.slice(colon + 1)))
+			Boolean(path) &&
+			(!immutable || GIT_COMMIT.test(path?.ref ?? ""))
 		);
 	}
 	const slash = spec.indexOf("/");
+	const path = safeGitPath(spec.slice(slash + 1));
 	return (
 		slash > 0 &&
 		safeGitHost(spec.slice(0, slash)) &&
-		Boolean(safeGitPath(spec.slice(slash + 1)))
+		Boolean(path) &&
+		(!immutable || GIT_COMMIT.test(path?.ref ?? ""))
 	);
+}
+
+export interface ImmutablePackageLock {
+	source: string;
+	kind: "npm" | "git";
+	integrity?: string;
+	commit?: string;
+}
+
+export function resolvePackageLocks(
+	value: unknown,
+): Sanitized<ImmutablePackageLock[]> {
+	if (value === undefined) return { value: [], warnings: [] };
+	if (!Array.isArray(value))
+		throw new TypeError("settings.packages must be an array");
+	const locks = new Map<string, ImmutablePackageLock>();
+	const warnings: string[] = [];
+	for (const [index, entry] of value.entries()) {
+		const source =
+			typeof entry === "string"
+				? entry
+				: plainObject(entry) && typeof entry.source === "string"
+					? entry.source
+					: undefined;
+		if (!source || !/^(?:npm|git):/.test(source)) {
+			warnings.push(
+				`settings.packages[${index}]: host path package specs are not imported`,
+			);
+			continue;
+		}
+		if (!safeRemotePackage(source)) {
+			if (safeRemotePackage(source, false))
+				throw new TypeError(
+					`settings.packages[${index}]: immutable package source required`,
+				);
+			warnings.push(
+				`settings.packages[${index}]: unsafe remote package spec not imported`,
+			);
+			continue;
+		}
+		if (source.startsWith("npm:")) {
+			const integrity = plainObject(entry) ? entry.integrity : undefined;
+			if (typeof integrity !== "string" || !NPM_INTEGRITY.test(integrity))
+				throw new TypeError(
+					`settings.packages[${index}]: exact npm package requires sha512 integrity`,
+				);
+			locks.set(source, { source, kind: "npm", integrity });
+			continue;
+		}
+		const commit = source.match(/@([0-9a-f]{40})$/i)?.[1];
+		locks.set(source, { source, kind: "git", commit });
+	}
+	return { value: [...locks.values()], warnings };
 }
 
 export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
@@ -213,7 +281,7 @@ export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
 				: plainObject(entry) && typeof entry.source === "string"
 					? entry.source
 					: undefined;
-		if (!source || !safeRemotePackage(source)) {
+		if (!source || !safeRemotePackage(source, false)) {
 			warnings.push(
 				source && /^(?:npm|git):/i.test(source)
 					? `settings.packages[${index}]: unsafe remote package spec not imported`
@@ -331,7 +399,7 @@ function credentialKey(key: string): boolean {
 	);
 }
 
-function sanitizeModelValue(
+function sanitizeSettingValue(
 	value: unknown,
 	path: string,
 	key: string,
@@ -382,7 +450,7 @@ function sanitizeModelValue(
 	if (Array.isArray(value)) {
 		return value
 			.map((entry, index) =>
-				sanitizeModelValue(
+				sanitizeSettingValue(
 					entry,
 					`${path}[${index}]`,
 					key,
@@ -395,7 +463,7 @@ function sanitizeModelValue(
 	if (plainObject(value)) {
 		const output: Record<string, unknown> = {};
 		for (const [childKey, child] of Object.entries(value)) {
-			const sanitized = sanitizeModelValue(
+			const sanitized = sanitizeSettingValue(
 				child,
 				`${path}.${childKey}`,
 				childKey,
@@ -409,18 +477,157 @@ function sanitizeModelValue(
 	return value;
 }
 
+export type SanitizedModelMetadata = Record<string, unknown>;
+
+const MODEL_STRING_KEYS = new Set(["id", "name", "api"]);
+const MODEL_NUMBER_KEYS = new Set(["contextWindow", "maxTokens"]);
+const THINKING_LEVEL_KEYS = new Set([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+const COST_KEYS = new Set([
+	"input",
+	"output",
+	"cacheRead",
+	"cacheWrite",
+	"inputTokensAbove",
+]);
+
+function safeMetadataUrl(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const url = new URL(value);
+		return (url.protocol === "https:" || url.protocol === "http:") &&
+			!url.username &&
+			!url.password &&
+			!url.search &&
+			!url.hash
+			? value
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+function sanitizeCost(value: unknown): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output: Record<string, unknown> = {};
+	for (const key of COST_KEYS) {
+		const number = finiteNumber(value[key]);
+		if (number !== undefined) output[key] = number;
+	}
+	if (Array.isArray(value.tiers))
+		output.tiers = value.tiers.flatMap((tier) => {
+			const sanitized = sanitizeCost(tier);
+			return sanitized ? [sanitized] : [];
+		});
+	return output;
+}
+
+function sanitizeModelEntry(value: unknown): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output: Record<string, unknown> = {};
+	for (const key of MODEL_STRING_KEYS)
+		if (typeof value[key] === "string") output[key] = value[key];
+	for (const key of MODEL_NUMBER_KEYS) {
+		const number = finiteNumber(value[key]);
+		if (number !== undefined) output[key] = number;
+	}
+	if (typeof value.reasoning === "boolean") output.reasoning = value.reasoning;
+	const baseUrl = safeMetadataUrl(value.baseUrl);
+	if (baseUrl) output.baseUrl = baseUrl;
+	if (Array.isArray(value.input)) {
+		const input = value.input.filter(
+			(entry): entry is "text" | "image" => entry === "text" || entry === "image",
+		);
+		if (input.length > 0) output.input = [...new Set(input)];
+	}
+	if (plainObject(value.thinkingLevelMap)) {
+		const levels: Record<string, unknown> = {};
+		for (const key of THINKING_LEVEL_KEYS) {
+			const level = value.thinkingLevelMap[key];
+			if (typeof level === "string" || level === null) levels[key] = level;
+		}
+		output.thinkingLevelMap = levels;
+	}
+	const cost = sanitizeCost(value.cost);
+	if (cost) output.cost = cost;
+	return output;
+}
+
+function sanitizeProvider(value: unknown): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output = sanitizeModelEntry(value)!;
+	if (Array.isArray(value.models))
+		output.models = value.models.flatMap((model) => {
+			const sanitized = sanitizeModelEntry(model);
+			return sanitized && typeof sanitized.id === "string" ? [sanitized] : [];
+		});
+	if (plainObject(value.modelOverrides)) {
+		const overrides: Record<string, unknown> = {};
+		for (const [id, override] of Object.entries(value.modelOverrides)) {
+			const sanitized = sanitizeModelEntry(override);
+			if (sanitized) overrides[id] = sanitized;
+		}
+		output.modelOverrides = overrides;
+	}
+	return output;
+}
+
 export function sanitizeModels(
 	value: unknown,
-): Sanitized<Record<string, unknown>> {
+	kind: "models" | "store" = "models",
+): Sanitized<SanitizedModelMetadata> {
 	if (!plainObject(value))
 		throw new TypeError("models.json must contain an object");
-	const warnings: string[] = [];
+	const output: SanitizedModelMetadata = {};
+	let dropped = false;
+	if (kind === "models") {
+		if (plainObject(value.providers)) {
+			const providers: Record<string, unknown> = {};
+			for (const [id, provider] of Object.entries(value.providers)) {
+				const sanitized = sanitizeProvider(provider);
+				if (sanitized) providers[id] = sanitized;
+			}
+			output.providers = providers;
+		}
+		dropped = Object.keys(value).some((key) => key !== "providers");
+	} else {
+		for (const [id, provider] of Object.entries(value)) {
+			if (!plainObject(provider)) {
+				dropped = true;
+				continue;
+			}
+			const sanitized: Record<string, unknown> = {};
+			const checkedAt = finiteNumber(provider.checkedAt);
+			if (checkedAt !== undefined) sanitized.checkedAt = checkedAt;
+			if (Array.isArray(provider.models))
+				sanitized.models = provider.models.flatMap((model) => {
+					const entry = sanitizeModelEntry(model);
+					return entry && typeof entry.id === "string" ? [entry] : [];
+				});
+			output[id] = sanitized;
+			if (Object.keys(provider).some((key) => key !== "checkedAt" && key !== "models"))
+				dropped = true;
+		}
+	}
+	const serializedInput = JSON.stringify(value);
+	const serializedOutput = JSON.stringify(output);
+	if (serializedInput !== serializedOutput) dropped = true;
 	return {
-		value: sanitizeModelValue(value, "models", "models", warnings) as Record<
-			string,
-			unknown
-		>,
-		warnings,
+		value: output,
+		warnings: dropped ? ["model metadata outside the production allowlist was not imported"] : [],
 	};
 }
 
@@ -904,6 +1111,7 @@ export interface PersonalizationSnapshot {
 	warnings: string[];
 	directory: string;
 	manifest: ResourceManifestEntry[];
+	packageLocks: ImmutablePackageLock[];
 	packageSpecs: string[];
 	nativePackages: string[];
 }
@@ -993,6 +1201,7 @@ export async function createPersonalizationSnapshot(
 			throw destinationOwnershipChanged();
 		const warnings: string[] = [];
 		const manifest: ResourceManifestEntry[] = [];
+		const packageLocks: ImmutablePackageLock[] = [];
 		const packageSpecs: string[] = [];
 		const nativePackages: string[] = [];
 		let nativeSkillsDestinationCreated = false;
@@ -1005,13 +1214,14 @@ export async function createPersonalizationSnapshot(
 					: { value: {}, warnings: [] };
 				warnings.push(...sanitized.warnings);
 				if (policy.packages) {
-					const packages = resolvePackageSpecs(
+					const packages = resolvePackageLocks(
 						plainObject(settings) ? settings.packages : undefined,
 					);
 					warnings.push(...packages.warnings);
-					packageSpecs.push(...packages.value);
+					packageLocks.push(...packages.value);
+					packageSpecs.push(...packages.value.map((entry) => entry.source));
 					const installable: string[] = [];
-					for (const source of packages.value) {
+					for (const { source } of packages.value) {
 						const installed = await readInstalledNpmPackage(agentDir, source);
 						if (installed && packageHasNativeDeps(installed)) {
 							nativePackages.push(source);
@@ -1151,7 +1361,7 @@ export async function createPersonalizationSnapshot(
 			}
 			const store = await readJson(agentDir, "models-store.json", options);
 			if (store !== undefined && plainObject(store)) {
-				const sanitized = sanitizeModels(store);
+				const sanitized = sanitizeModels(store, "store");
 				warnings.push(...sanitized.warnings);
 				const storePath = join(destination, "models-store.json");
 				await ownedStage(storePath, () =>
@@ -1162,11 +1372,12 @@ export async function createPersonalizationSnapshot(
 					),
 				);
 			}
-			const hostAuth = options.copyOAuth
-				? await readJson(agentDir, "auth.json", options)
-				: undefined;
-			if (hostAuth !== undefined && plainObject(hostAuth)) {
-				const oauthAuth: Record<string, unknown> = {};
+		}
+		const hostAuth = options.copyOAuth
+			? await readJson(agentDir, "auth.json", options)
+			: undefined;
+		if (hostAuth !== undefined && plainObject(hostAuth)) {
+			const oauthAuth: Record<string, unknown> = {};
 				for (const [id, entry] of Object.entries(hostAuth)) {
 					if (!isCopyEligibleOAuthEntry(entry)) continue;
 					if (options.availableProviders && !options.availableProviders.has(id))
@@ -1183,14 +1394,13 @@ export async function createPersonalizationSnapshot(
 							: {}),
 					};
 				}
-				if (Object.keys(oauthAuth).length > 0) {
-					const authPath = join(destination, "auth.json");
-					await ownedStage(authPath, () =>
-						writeFile(authPath, `${JSON.stringify(oauthAuth, null, 2)}\n`, {
-							mode: 0o600,
-						}),
-					);
-				}
+			if (Object.keys(oauthAuth).length > 0) {
+				const authPath = join(destination, "auth.json");
+				await ownedStage(authPath, () =>
+					writeFile(authPath, `${JSON.stringify(oauthAuth, null, 2)}\n`, {
+						mode: 0o600,
+					}),
+				);
 			}
 		}
 		const resources = (
@@ -1377,7 +1587,7 @@ export async function createPersonalizationSnapshot(
 		await ownedStage(profilePath, () =>
 			writeFile(
 				profilePath,
-				`${JSON.stringify({ hash, profile, policy, warnings, manifest }, null, 2)}\n`,
+				`${JSON.stringify({ hash, profile, policy, warnings, manifest, packageLocks }, null, 2)}\n`,
 				{ mode: 0o600 },
 			),
 		);
@@ -1386,6 +1596,7 @@ export async function createPersonalizationSnapshot(
 			warnings,
 			directory: destination,
 			manifest,
+			packageLocks,
 			packageSpecs,
 			nativePackages,
 		};

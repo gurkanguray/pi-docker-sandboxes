@@ -301,6 +301,11 @@ export async function main(
 			confirm,
 			"copying host profile",
 		);
+		const oauthConfirm = createPausedConfirm(
+			reporter,
+			confirm,
+			"syncing host credentials",
+		);
 		try {
 			const result = await launch({
 				cwd: parsed.cwd,
@@ -313,6 +318,7 @@ export async function main(
 				piArgs: parsed.piArgs,
 				confirm: checkingConfirm,
 				confirmResourceCopy: copyingConfirm,
+				confirmOAuthCopy: oauthConfirm,
 				confirmNativePackages: (packages) =>
 					pausedConfirm(
 						`${packages.length} packages need a compiler in this sandbox (${packages.join(", ")}).\nInstall toolchain here? ~1–2 min, not saved.`,

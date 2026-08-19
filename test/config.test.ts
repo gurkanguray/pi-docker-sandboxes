@@ -83,6 +83,22 @@ test("config is strict and merges nested fields", () => {
 		() => parseConfig({ auth: { mode: "automatic" } }),
 		/unsupported/,
 	);
+	assert.throws(
+		() => mergeConfig(parseConfig({ auth: { providers: ["openai"] } })),
+		/auth\.mode none cannot list providers/,
+	);
+	assert.throws(
+		() => mergeConfig(parseConfig({ auth: { mode: "proxy" } })),
+		/requires at least one explicit provider/,
+	);
+	assert.throws(
+		() => parseConfig({ auth: { providers: ["openai\nother"] } }),
+		/forbidden control characters/,
+	);
+	assert.throws(
+		() => parseConfig({ auth: { providers: ["openai/other"] } }),
+		/invalid id/,
+	);
 });
 
 test("network profiles control egress only", () => {

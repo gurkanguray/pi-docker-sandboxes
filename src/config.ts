@@ -86,6 +86,7 @@ const SYNC_KEYS = new Set([
 const EXPORT_KEYS = new Set(["onExit", "directory"]);
 const AUTH_KEYS = new Set(["mode", "providers"]);
 const AUTH_MODES = new Set<AuthMode>(["none", "proxy", "oauth-copy"]);
+const AUTH_PROVIDER = /^[a-z0-9][a-z0-9-]*$/;
 const PROFILES = new Set<SecurityProfile>(["hardened", "development"]);
 const SYNC_PROFILES = new Set<SyncProfile>(["clean", "mirror", "custom"]);
 
@@ -233,7 +234,11 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.auth.providers = strings(
 				auth.providers,
 				`${source}.auth.providers`,
-			);
+			).map((provider) => {
+				if (!AUTH_PROVIDER.test(provider))
+					throw new TypeError(`${source}.auth.providers contains an invalid id`);
+				return provider;
+			});
 	}
 	if (input.sandbox !== undefined) {
 		const sandbox = object(input.sandbox, `${source}.sandbox`);
@@ -291,7 +296,7 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 }
 
 export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
-	return values.reduce<DockerSandboxConfig>(
+	const config = values.reduce<DockerSandboxConfig>(
 		(result, value) => ({
 			...result,
 			...value,
@@ -303,6 +308,13 @@ export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
 		}),
 		structuredClone(DEFAULT_CONFIG),
 	);
+	if (config.auth.mode === "none" && config.auth.providers.length > 0)
+		throw new TypeError("auth.mode none cannot list providers");
+	if (config.auth.mode !== "none" && config.auth.providers.length === 0)
+		throw new TypeError(
+			`auth.mode ${config.auth.mode} requires at least one explicit provider`,
+		);
+	return config;
 }
 
 export interface LoadedConfig {
