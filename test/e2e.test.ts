@@ -28,10 +28,24 @@ if (enabled && !runtimeReceiptPath)
 
 const [launchLoaded, clientLoaded, inheritedLoaded, workspaceLoaded] =
 	await Promise.all([
-		importControllerModule(installedPackageRoot, "dist/launch.js"),
-		importControllerModule(installedPackageRoot, "dist/sbx/client.js"),
-		importControllerModule(installedPackageRoot, "dist/sbx/inherited-runner.mjs"),
-		importControllerModule(installedPackageRoot, "dist/workspace.js"),
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/launch.js" : "src/launch.ts",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/sbx/client.js" : "src/sbx/client.ts",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled
+				? "dist/sbx/inherited-runner.mjs"
+				: "src/sbx/inherited-runner.mjs",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/workspace.js" : "src/workspace.ts",
+		),
 	]);
 const { launch } = launchLoaded.module as typeof import("../src/launch.ts");
 const { SbxClient } =
