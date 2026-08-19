@@ -54,6 +54,7 @@ test("all mutating commands certify the host before mutation", async () => {
 		["destroy", "--name", "fixture", "--yes"],
 	]) {
 		let certifications = 0;
+		let inspected = false;
 		let launched = false;
 		await assert.rejects(
 			() =>
@@ -66,11 +67,16 @@ test("all mutating commands certify the host before mutation", async () => {
 						launched = true;
 						assert.fail("launch must not run before host certification");
 					},
+					inspectRepository: async () => {
+						inspected = true;
+						assert.fail("repository inspection must follow host certification");
+					},
 				}),
 			/unsupported host fixture/,
 			argv.join(" "),
 		);
 		assert.equal(certifications, 1, argv.join(" "));
+		assert.equal(inspected, false, argv.join(" "));
 		assert.equal(launched, false, argv.join(" "));
 	}
 });

@@ -132,10 +132,8 @@ jobs:
               tag: candidate.tag,
               packageIntegrity: candidate.tarballIntegrity,
               runtimeReference: candidate.runtimeReference,
-              packageProvenance:
-                "npm-provenance/verified-provenance.json",
-              runtimeProvenance:
-                "runtime/runtime-provenance.json",
+              packageProvenance: "verified-provenance.json",
+              runtimeProvenance: "runtime-provenance.json",
             }, null, 2)}\n`);
           NODE
           declare -A release_asset_names=()

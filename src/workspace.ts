@@ -84,6 +84,7 @@ async function runGit(
 	try {
 		const result = await execFileAsync("git", [...SAFE_GIT_CONFIG, ...args], {
 			cwd,
+			env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
 			encoding: "utf8",
 			maxBuffer: 32 * 1024 * 1024,
 		});

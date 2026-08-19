@@ -301,6 +301,8 @@ export async function main(
 		launch?: typeof launch;
 		/** @internal Test-only host certification boundary. */
 		certifyHost?: typeof certifyHostPlatform;
+		/** @internal Test-only repository inspection boundary. */
+		inspectRepository?: typeof inspectRepository;
 	} = {},
 ): Promise<number> {
 	const [command = "run", ...args] = argv;
@@ -392,13 +394,15 @@ export async function main(
 	}
 	if (command === "unlock") {
 		const root = resolve(cwd);
-		const repository = await inspectRepository(root);
 		const name = option(args, "--name");
 		const yes = booleanOption(args, "--yes");
 		if (!name) throw new TypeError("unlock requires --name NAME");
 		if (!yes) throw new TypeError("unlock requires explicit --yes authority");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
 		await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(root);
 		const record = await unlockSandboxLease(repository.root, name, true);
 		console.log(
 			`Unlocked abandoned ${record.operation} lease for sandbox ${record.sandbox}`,
@@ -409,19 +413,28 @@ export async function main(
 		const action = args.shift();
 		if (action !== "list" && action !== "restore" && action !== "delete")
 			throw new TypeError("sessions requires list, restore, or delete");
-		const repository = await inspectRepository(resolve(cwd));
-		const config = await loadConfig(cwd);
-		const name =
-			option(args, "--name") ??
-			config.sandbox.name ??
-			sandboxName(repository.root);
+		const requestedName = option(args, "--name");
 		const yes = booleanOption(args, "--yes");
 		const backupId = args.shift();
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (action === "list" && (backupId || yes))
+			throw new TypeError("sessions list accepts only --name NAME");
+		if (action === "restore" && yes)
+			throw new TypeError("--yes is not valid for sessions restore");
+		if (action === "delete" && !backupId)
+			throw new TypeError("sessions delete requires BACKUP");
+		if (action === "delete" && !yes)
+			throw new TypeError("sessions delete requires explicit --yes authority");
+		if (action !== "list")
+			await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(resolve(cwd));
+		const config = await loadConfig(cwd);
+		const name =
+			requestedName ?? config.sandbox.name ?? sandboxName(repository.root);
 		const agentDir = join(homedir(), ".pi", "agent");
 		if (action === "list") {
-			if (backupId || yes)
-				throw new TypeError("sessions list accepts only --name NAME");
 			console.log(
 				JSON.stringify(
 					await listSessionBackups(agentDir, repository.identity, name),
@@ -432,8 +445,6 @@ export async function main(
 			return 0;
 		}
 		if (action === "restore") {
-			if (yes) throw new TypeError("--yes is not valid for sessions restore");
-			await (dependencies.certifyHost ?? certifyHostPlatform)();
 			return withSandboxLease(
 				repository.root,
 				name,
@@ -506,16 +517,12 @@ export async function main(
 				},
 			);
 		}
-		if (!backupId) throw new TypeError("sessions delete requires BACKUP");
-		if (!yes)
-			throw new TypeError("sessions delete requires explicit --yes authority");
-		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		return withSandboxLease(
 			repository.root,
 			name,
 			"sessions-delete",
 			async () => {
-				await deleteSessionBackup(agentDir, repository.identity, name, backupId);
+				await deleteSessionBackup(agentDir, repository.identity, name, backupId!);
 				console.log(`Deleted session backup ${backupId}`);
 				return 0;
 			},
@@ -523,8 +530,7 @@ export async function main(
 	}
 	if (command === "export" || command === "apply" || command === "destroy") {
 		const root = resolve(cwd);
-		const repository = await inspectRepository(root);
-		const name = option(args, "--name") ?? sandboxName(repository.root);
+		const requestedName = option(args, "--name");
 		const yes = booleanOption(args, "--yes");
 		const discardChanges = booleanOption(args, "--discard-changes");
 		if (discardChanges && command !== "destroy")
@@ -534,6 +540,10 @@ export async function main(
 			throw new TypeError("apply requires a patch path");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
 		await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(root);
+		const name = requestedName ?? sandboxName(repository.root);
 		return withSandboxLease(repository.root, name, command, async () => {
 			const hasState = await sandboxStateExists(repository.root, name);
 			const state = hasState

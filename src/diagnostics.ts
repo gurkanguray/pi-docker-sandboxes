@@ -19,11 +19,10 @@ import {
 import { resolveAvailableServices } from "./providers.ts";
 import { reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
-import { listSessionBackups, reconcileSessionStaging } from "./sessions.ts";
+import { listSessionBackups } from "./sessions.ts";
 import {
 	inspectRepository,
 	loadSandboxState,
-	reconcileOwnedHostStaging,
 	sandboxName,
 	sandboxStateExists,
 } from "./workspace.ts";
@@ -237,17 +236,6 @@ export async function buildDoctorReceipt(
 	const agentDir = options.agentDir ?? join(homedir(), ".pi", "agent");
 	const runCommand = options.runCommand ?? defaultCommand;
 	const checks: DiagnosticCheck[] = [];
-
-	try {
-		const removed = await reconcileOwnedHostStaging(tmpdir());
-		checks.push(
-			check("staging", "pass", "Owned host staging inspected", {
-				staleStagingRemoved: removed.length,
-			}),
-		);
-	} catch (cause) {
-		checks.push(failure("staging", cause));
-	}
 
 	let host: SupportedHost | undefined;
 	let detectedHost: SupportedHost | undefined;
@@ -486,11 +474,6 @@ export async function buildDoctorReceipt(
 			),
 		);
 		try {
-			const removed = await reconcileSessionStaging(
-				agentDir,
-				repository.identity,
-				name,
-			);
 			const backups = await listSessionBackups(
 				agentDir,
 				repository.identity,
@@ -512,7 +495,7 @@ export async function buildDoctorReceipt(
 						? "pass"
 						: "warning",
 					"Managed session backups inspected",
-					{ count: backups.length, bytes, staleStagingRemoved: removed.length },
+					{ count: backups.length, bytes },
 				),
 			);
 		} catch (cause) {

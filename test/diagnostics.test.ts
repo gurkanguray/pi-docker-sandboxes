@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, type statfs, writeFile } from "node:fs/promises";
+import {
+	access,
+	mkdir,
+	mkdtemp,
+	rm,
+	type statfs,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +19,7 @@ import {
 } from "../src/diagnostics.ts";
 import { IMAGE_LOCK } from "../src/image-lock.ts";
 import type { SbxClient } from "../src/sbx/client.ts";
+import { createOwnedHostStaging } from "../src/workspace.ts";
 
 const exec = promisify(execFile);
 
@@ -102,6 +110,34 @@ test("doctor JSON receipt is schema-versioned, ordered, deterministic, and redac
 		true,
 	);
 	assert.equal(diagnosticsExitCode(receipt), 0);
+});
+
+test("doctor is observational and preserves abandoned host staging", async () => {
+	const cwd = await repository();
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-dsbx-agent-"));
+	const staging = await createOwnedHostStaging(tmpdir(), {
+		pid: 2_147_483_647,
+	});
+	try {
+		await buildDoctorReceipt({
+			cwd,
+			agentDir,
+			client: client(),
+			platform: "darwin",
+			arch: "arm64",
+			certifyPlatform: () =>
+				Promise.resolve({
+					os: "darwin",
+					arch: "arm64",
+					runtimePlatform: "linux/arm64",
+				}),
+			runCommand: async (command, args) =>
+				command === "pi" ? "0.84.2" : args[0] === "info" ? cwd : "27.0.0",
+		});
+		await access(staging);
+	} finally {
+		await rm(staging, { recursive: true, force: true });
+	}
 });
 
 test("doctor rejects prerelease Node and Pi versions for stable ranges", async () => {
