@@ -100,6 +100,7 @@ async function pathExists(path: string): Promise<boolean> {
 interface FakeOptions {
 	existed?: boolean;
 	inspection?: Record<string, unknown>;
+	inspectionError?: Error;
 	status?: string;
 	statusError?: Error;
 	launchError?: Error;
@@ -145,6 +146,7 @@ function fakeClient(log: string[], options: FakeOptions = {}) {
 		},
 		inspect: async () => {
 			log.push("inspect");
+			if (options.inspectionError) throw options.inspectionError;
 			return options.inspection ?? { image: fixtureImage };
 		},
 		attach: async () => {
@@ -215,6 +217,7 @@ async function runCase(
 		imageAttestation?: SandboxState["imageAttestation"];
 		persistedPhase?: SandboxPhase;
 		saveStateErrorAfter?: number;
+		saveStateErrorWhen?: (state: SandboxState, call: number) => boolean;
 		onSaveState?: (state: SandboxState) => void;
 		repositoryInspectionErrorAfter?: number;
 		sessionBackup?: boolean;
@@ -296,7 +299,9 @@ async function runCase(
 		...(options.resolvedImage
 			? { resolveImage: async () => options.resolvedImage! }
 			: {}),
-		...(options.saveStateErrorAfter || options.onSaveState
+		...(options.saveStateErrorAfter ||
+		options.saveStateErrorWhen ||
+		options.onSaveState
 			? {
 					saveState: async (state: SandboxState) => {
 						saveStateCalls++;
@@ -305,7 +310,10 @@ async function runCase(
 								`save:${state.phase}:${state.imageAttestation?.status ?? "none"}`,
 							);
 						options.onSaveState?.(structuredClone(state));
-						if (saveStateCalls >= (options.saveStateErrorAfter ?? Infinity))
+						if (
+							saveStateCalls >= (options.saveStateErrorAfter ?? Infinity) ||
+							options.saveStateErrorWhen?.(state, saveStateCalls)
+						)
 							throw new Error("injected attestation state save failure");
 						await saveSandboxState(state);
 					},
@@ -879,8 +887,8 @@ test("export failure preserves sandbox and remains the primary error", async () 
 		cleanupError: new Error("injected cleanup failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
 	assert.equal(result.agentExitCode, 0);
+	assert.equal("exitCode" in result, false);
 	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
 	assert.equal(result.custody, "preserved");
 	assertLifecycle(result, { exported: false, preserved: true });
@@ -911,7 +919,6 @@ test("host cleanup failure retains Pi exit code and reports warning", async () =
 		cleanupError: new Error("injected cleanup failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 17);
 	assert.equal(result.agentExitCode, 17);
 	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
 	assert.equal(result.custody, "preserved");
@@ -942,7 +949,7 @@ test("failed cleanup never triggers sandbox removal", async () => {
 		cleanupError: new Error("injected pre-remove cleanup failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 31);
+	assert.equal(result.agentExitCode, 31);
 	assertLifecycle(result, { changed: false, preserved: true });
 	assert.equal(subject.log.includes("remove"), false);
 	assert.equal(subject.fake.present(), true);
@@ -994,13 +1001,61 @@ test("timed out sandbox mutation transitions durable state to recoverable failed
 	assert.equal(subject.fake.present(), false);
 });
 
+test("timeout state-mark save failure preserves the timeout and runs staging cleanup", async () => {
+	const timeout = new CommandTimeoutError("sbx", 100);
+	const subject = await runCase({
+		launchError: timeout,
+		saveStateErrorWhen: (state) => state.version === 2 && state.phase === "failed",
+	});
+	await assert.rejects(subject.operation, (error: unknown) => {
+		assert.ok(error instanceof OperationError);
+		assert.equal(error.cause, timeout);
+		assert.match(error.detail ?? "", /injected attestation state save failure/);
+		return true;
+	});
+	assert.equal(subject.log.at(-1), "cleanup");
+});
+
+test("finalization timeout state-mark failure remains a companion result", async () => {
+	for (const agentExitCode of [0, 23]) {
+		const subject = await runCase({
+			exitCode: agentExitCode,
+			finalExistsError: new CommandTimeoutError("sbx", 100),
+			saveStateErrorWhen: (state) =>
+				state.version === 2 && state.phase === "failed",
+		});
+		const result = await subject.operation;
+		assert.equal(result.agentExitCode, agentExitCode);
+		assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
+		assert.match(
+			result.warnings.join("\n"),
+			/injected attestation state save failure/,
+		);
+		assert.equal(subject.log.at(-1), "cleanup");
+	}
+});
+
+test("image inspection timeout retains its specific failed category", async () => {
+	const subject = await runCase({
+		inspectionError: new CommandTimeoutError("sbx", 100),
+	});
+	await assert.rejects(subject.operation, (error: unknown) => {
+		assert.ok(error instanceof OperationError);
+		assert.ok(error.cause instanceof CommandTimeoutError);
+		return true;
+	});
+	const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+	assert.equal(state.phase, "failed");
+	assert.equal(state.lastOperationError?.category, "image");
+});
+
 test("nonzero Pi exit survives final existence failure", async () => {
 	const subject = await runCase({
 		exitCode: 19,
 		finalExistsError: new Error("injected final exists failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 19);
+	assert.equal(result.agentExitCode, 19);
 	assertLifecycle(result, { changed: "unknown", preserved: true });
 	assert.match(
 		result.warnings.join("\n"),
@@ -1024,7 +1079,7 @@ test("zero Pi exit turns final existence failure into phased error", async () =>
 		finalExistsError: new Error("injected final exists failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assertLifecycle(result, { changed: "unknown", preserved: true });
 	assert.match(result.warnings.join("\n"), /injected final exists failure/);
 	assert.equal(subject.fake.present(), true);
@@ -1038,7 +1093,7 @@ test("remove failure preserves sandbox and state after nonzero Pi exit", async (
 		removeError: new Error("injected remove failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 23);
+	assert.equal(result.agentExitCode, 23);
 	assertLifecycle(result, { changed: false, preserved: true });
 	assert.match(
 		result.warnings.join("\n"),
@@ -1086,7 +1141,7 @@ test("state unlink failure reports stale state after successful remove", async (
 		stateCleanupError: new Error("injected state unlink failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 29);
+	assert.equal(result.agentExitCode, 29);
 	assertLifecycle(result, { changed: false, preserved: false });
 	assert.match(
 		result.warnings.join("\n"),
@@ -1129,7 +1184,7 @@ test("cleanup warnings and errors redact secret-shaped detail", async () => {
 		cleanupError: new Error(`token=${secret}`),
 	});
 	const zeroResult = await zero.operation;
-	assert.equal(zeroResult.exitCode, 0);
+	assert.equal(zeroResult.agentExitCode, 0);
 	assert.equal(zeroResult.warnings.join("\n").includes(secret), false);
 });
 
@@ -1142,7 +1197,7 @@ test("undefined and null cleanup throws are failures on zero and nonzero exits",
 			cleanupError: cause,
 		});
 		const result = await nonzero.operation;
-		assert.equal(result.exitCode, 47);
+		assert.equal(result.agentExitCode, 47);
 		assertLifecycle(result, {
 			preserved: true,
 			cleanupWarnings: ["Unknown cleanup failure"],
@@ -1156,7 +1211,7 @@ test("undefined and null cleanup throws are failures on zero and nonzero exits",
 
 		const zero = await runCase({ keep: true, cleanupError: cause });
 		const zeroResult = await zero.operation;
-		assert.equal(zeroResult.exitCode, 0);
+		assert.equal(zeroResult.agentExitCode, 0);
 		assert.deepEqual(zeroResult.lifecycle.cleanupWarnings, [
 			"Unknown cleanup failure",
 		]);
@@ -1170,7 +1225,7 @@ test("zero-exit host cleanup failure preserves exit code and custody", async () 
 		cleanupError: new Error("injected cleanup-only failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assert.match(result.warnings.join("\n"), /injected cleanup-only failure/);
 	assert.equal(subject.fake.present(), true);
 });
@@ -1182,7 +1237,6 @@ test("zero-exit state unlink failure reports warning without masking exit", asyn
 		stateCleanupError: new Error("injected zero-exit state unlink failure"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
 	assert.equal(result.agentExitCode, 0);
 	assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
 	assert.equal(result.custody, "released");
@@ -1204,7 +1258,7 @@ test("cleanup warning is rendered without losing primary export cause", async ()
 		cleanupError: new Error("injected cleanup companion"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assert.match(result.warnings.join("\n"), /injected export primary/);
 	assert.match(result.warnings.join("\n"), /injected cleanup companion/);
 	assert.equal(subject.fake.present(), true);
@@ -1218,7 +1272,7 @@ test("missing managed sessions continue through clean inspection and removal", a
 		missingSessions: true,
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assertLifecycle(result, { changed: false, preserved: false });
 	assert.deepEqual(subject.log.slice(5), [
 		"exists",
@@ -1249,7 +1303,7 @@ test("managed session backup failure preserves sandbox and state", async () => {
 				backupError: cause,
 			});
 			const result = await subject.operation;
-			assert.equal(result.exitCode, exitCode);
+			assert.equal(result.agentExitCode, exitCode);
 			assertLifecycle(result, { preserved: true });
 			const backupWarnings = result.warnings.filter((warning) =>
 				/managed session backup/i.test(warning),
@@ -1279,6 +1333,31 @@ test("managed session backup failure preserves sandbox and state", async () => {
 	}
 });
 
+test("managed backup timeout persists failed export custody state", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-backup-timeout-home-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		await mkdir(join(home, ".pi", "agent"), { recursive: true });
+		const subject = await runCase({
+			existed: true,
+			status: "",
+			managedSessions: true,
+			backupError: new CommandTimeoutError("sbx", 100),
+		});
+		const result = await subject.operation;
+		assert.equal(result.agentExitCode, 0);
+		assert.equal(result.launcherExitCode, LauncherExitCode.CustodyFailure);
+		const state = await loadSandboxState(subject.fixture.root, subject.fixture.name);
+		assert.equal(state.phase, "failed");
+		assert.equal(state.lastOperationError?.category, "export");
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
 test("combined cleanup detail is sanitized while retaining primary cause", async () => {
 	const primary = new Error("injected export primary");
 	const secret = "sk-companion-1234567890abcdef";
@@ -1290,7 +1369,7 @@ test("combined cleanup detail is sanitized while retaining primary cause", async
 		cleanupError: new Error(`token=${secret}`),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assert.equal(result.warnings.join("\n").includes(secret), false);
 	assert.match(result.warnings.join("\n"), /injected export primary/);
 });
@@ -1301,7 +1380,7 @@ test("interrupted run with unknown dirty state is preserved", async () => {
 		statusError: new Error("sandbox unavailable"),
 	});
 	const result = await subject.operation;
-	assert.equal(result.exitCode, 130);
+	assert.equal(result.agentExitCode, 130);
 	assert.deepEqual(subject.log, [
 		"capabilities",
 		"exists",

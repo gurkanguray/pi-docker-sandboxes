@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	CommandCancelledError,
+	CommandOutputLimitError,
 	CommandTimeoutError,
 	superviseCommand,
 } from "../src/sbx/supervisor.ts";
@@ -70,16 +71,55 @@ test("timeout is specific, bounded, and kills a TERM-resistant descendant", {
 	);
 });
 
-test("AbortSignal cancels a real Python child after process cleanup", {
+test("direct exit clears its deadline while a descendant is reaped", {
 	skip: isWindows,
 	timeout: 10_000,
 }, async () => {
+	const descendant =
+		"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+	const parent = `
+		const {spawn} = require("node:child_process");
+		spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], {stdio: "ignore"});
+		setTimeout(() => process.exit(0), 25);
+	`;
+	const result = await superviseCommand(process.execPath, ["-e", parent], {
+		policy: { timeoutMs: 100, killGraceMs: 100 },
+	});
+	assert.equal(result.code, 0);
+});
+
+test("maxBuffer is finite and nonnegative and real overflow is bounded", async () => {
+	for (const maxBuffer of [-1, Number.NaN, Number.POSITIVE_INFINITY])
+		assert.throws(
+			() =>
+				superviseCommand(process.execPath, ["-e", ""], {
+					policy: { timeoutMs: 1_000, killGraceMs: 100 },
+					maxBuffer,
+				}),
+			/maxBuffer must be a nonnegative finite number/,
+		);
+	await assert.rejects(
+		superviseCommand(process.execPath, ["-e", "process.stdout.write('xx')"], {
+			policy: { timeoutMs: 1_000, killGraceMs: 100 },
+			maxBuffer: 1,
+		}),
+		CommandOutputLimitError,
+	);
+});
+
+test("AbortSignal cancels a started Python process group after cleanup", {
+	skip: isWindows,
+	timeout: 10_000,
+}, async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cancel-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const pidPath = join(directory, "python.pid");
 	const controller = new AbortController();
 	const operation = superviseCommand(
 		"python3",
 		[
 			"-c",
-			"import signal,time; signal.signal(signal.SIGTERM, lambda *_: exit(0)); print('ready', flush=True); time.sleep(60)",
+			`import os,signal,time; open(${JSON.stringify(pidPath)}, 'w').write(str(os.getpid())); signal.signal(signal.SIGTERM, lambda *_: exit(0)); time.sleep(60)`,
 		],
 		{
 			policy: {
@@ -89,6 +129,15 @@ test("AbortSignal cancels a real Python child after process cleanup", {
 			},
 		},
 	);
-	setTimeout(() => controller.abort(), 100);
+	const pid = await waitForPid(pidPath);
+	controller.abort();
 	await assert.rejects(operation, CommandCancelledError);
+	assert.throws(
+		() => process.kill(pid, 0),
+		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
+	);
+	assert.throws(
+		() => process.kill(-pid, 0),
+		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
+	);
 });

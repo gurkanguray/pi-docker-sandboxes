@@ -11,6 +11,7 @@ export interface SupervisedCommandOptions {
 	policy: CommandPolicy;
 	env?: NodeJS.ProcessEnv;
 	input?: string | Buffer;
+	/** Combined stdout/stderr byte limit; zero permits no output. */
 	maxBuffer?: number;
 }
 
@@ -49,6 +50,11 @@ function positive(value: number, name: string): void {
 		throw new TypeError(`${name} must be a positive finite number`);
 }
 
+function nonnegative(value: number, name: string): void {
+	if (!Number.isFinite(value) || value < 0)
+		throw new TypeError(`${name} must be a nonnegative finite number`);
+}
+
 /** Run a bounded non-interactive command and reap its POSIX process group. */
 export function superviseCommand(
 	command: string,
@@ -57,6 +63,7 @@ export function superviseCommand(
 ): Promise<SupervisedCommandResult> {
 	positive(options.policy.timeoutMs, "timeoutMs");
 	positive(options.policy.killGraceMs, "killGraceMs");
+	if (options.maxBuffer !== undefined) nonnegative(options.maxBuffer, "maxBuffer");
 	if (options.policy.signal?.aborted)
 		return Promise.reject(new CommandCancelledError(command));
 
@@ -196,6 +203,8 @@ export function superviseCommand(
 			reject(error);
 		});
 		child.once("exit", (code, signal) => {
+			if (timeoutTimer) clearTimeout(timeoutTimer);
+			timeoutTimer = undefined;
 			exitCode = code;
 			exitSignal = signal;
 			if (!terminationError) {

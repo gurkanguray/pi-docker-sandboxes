@@ -98,7 +98,7 @@ sandboxTest(
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
+			assert.equal(launched.agentExitCode, 0);
 			assert.ok(launched.state);
 			const stagingProbe = join(root, "host-staging-probe");
 			const cleanupProbe = await e2eLaunch({
@@ -119,7 +119,7 @@ sandboxTest(
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(cleanupProbe.exitCode, 0);
+			assert.equal(cleanupProbe.agentExitCode, 0);
 			const stagingPath = await readFile(stagingProbe, "utf8");
 			await assert.rejects(() => lstat(stagingPath));
 			await rm(stagingProbe);
@@ -439,7 +439,7 @@ sandboxTest(
 				config: { syncProfile: "clean", sandbox: { name, keep: true } },
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
+			assert.equal(launched.agentExitCode, 0);
 			assert.equal(
 				await host("git", ["rev-list", "--count", "HEAD"], root),
 				"1",
@@ -576,7 +576,7 @@ sandboxTest(
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
+			assert.equal(launched.agentExitCode, 0);
 			const environment = (
 				await client.exec(name, ["sh", "-c", 'printf %s "$PI_PROXY_E2E_KEY"'])
 			).stdout;

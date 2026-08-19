@@ -5,6 +5,7 @@ import {
 	mkdir,
 	mkdtemp,
 	readFile,
+	rm,
 	realpath,
 	writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { parseRunArgs } from "../src/cli.ts";
+import { OperationError } from "../src/errors.ts";
 import { acquireSandboxLease } from "../src/lease.ts";
 import {
 	launch as productionLaunch,
@@ -22,11 +24,14 @@ import {
 import { buildReexecArguments } from "../src/reexec.ts";
 import {
 	inspectRepository,
+	loadSandboxState,
 	sandboxName,
 	saveSandboxState,
 	statePath,
 } from "../src/workspace.ts";
 import {
+	CommandCancelledError,
+	CommandTimeoutError,
 	SbxClient,
 	SbxCommandError,
 	type CommandRunner,
@@ -355,7 +360,7 @@ test("explicit mirror sync does not wait for a second resource prompt", async ()
 			},
 		});
 		assert.equal(confirmed, false);
-		assert.equal(result.exitCode, 0);
+		assert.equal(result.agentExitCode, 0);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
@@ -484,7 +489,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 							},
 				onStatus: (status) => statuses.push(status),
 			});
-			assert.equal(result.exitCode, 0);
+			assert.equal(result.agentExitCode, 0);
 			const rejected = [
 				"NPM:pi-subagents",
 				"git:example.com/owner/...git",
@@ -793,7 +798,7 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 				confirmNativePackages: async () => true,
 				onWarning: (warning) => delivered.push(warning),
 			});
-			assert.equal(result.exitCode, 0);
+			assert.equal(result.agentExitCode, 0);
 			assert.equal(skillsPresent, true);
 			assert.deepEqual(
 				attachedSettings?.packages,
@@ -841,6 +846,84 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 	}
 });
 
+test("native compiler and package interruption aborts before ready transition", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-native-timeout-"));
+	const agent = join(home, ".pi", "agent");
+	await mkdir(join(agent, "npm", "node_modules", "context-mode"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(agent, "npm", "node_modules", "context-mode", "package.json"),
+		JSON.stringify({
+			name: "context-mode",
+			dependencies: { "better-sqlite3": "^12.0.0" },
+		}),
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({ packages: ["npm:context-mode", "npm:pi-subagents"] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		for (const [failure, interruption] of [
+			["compiler", "timeout"],
+			["compiler", "cancel"],
+			["package", "timeout"],
+			["package", "cancel"],
+		] as const) {
+			const root = await committedRepository();
+			let attached = false;
+			let cleaned = false;
+			const cause =
+				interruption === "timeout"
+					? new CommandTimeoutError("sbx", 100)
+					: new CommandCancelledError("sbx");
+			const client = {
+				...launchClient,
+				attach: async () => {
+					attached = true;
+					return 0;
+				},
+				exec: async (_name: string, argv: string[]) => {
+					if (
+						(failure === "compiler" &&
+							argv.some((arg) => arg.includes("build-essential"))) ||
+						(failure === "package" && argv[0] === "pi")
+					)
+						throw cause;
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
+			await assert.rejects(
+				launch({
+					cwd: root,
+					client,
+					config: { ...launchConfig, syncProfile: "mirror" },
+					confirmNativePackages: async () => true,
+					cleanup: {
+						removeTemp: async (path) => {
+							cleaned = true;
+							await rm(path, { recursive: true, force: true });
+						},
+					},
+				}),
+				(error: unknown) =>
+					error instanceof OperationError && error.cause === cause,
+			);
+			assert.equal(attached, false);
+			assert.equal(cleaned, true);
+			const state = await loadSandboxState(root, sandboxName(root));
+			assert.equal(state.phase, "failed");
+			assert.equal(state.lastOperationError?.category, "create");
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
 test("reattach does not prompt for or install native packages", async () => {
 	const root = await committedRepository();
 	const repository = await inspectRepository(root);
@@ -875,7 +958,7 @@ test("reattach does not prompt for or install native packages", async () => {
 			return true;
 		},
 	});
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assert.equal(prompts, 0);
 	assert.equal(installs, 0);
 });

@@ -438,6 +438,45 @@ test("forwarded TERM reaps a resistant grandchild before preserving the direct-c
 	);
 });
 
+test("forwarded TERM boundedly kills a resistant direct child and descendant", {
+	skip: isWindows,
+	timeout: 10_000,
+}, async (t) => {
+	const grandchild = `
+		process.on("SIGTERM", () => console.log("resistant-grandchild-ignored"));
+		process.send("ready");
+		setInterval(() => {}, 1000);
+	`;
+	const child = `
+		import { spawn } from "node:child_process";
+		const grandchild = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchild)}], {
+			stdio: ["ignore", "inherit", "inherit", "ipc"],
+		});
+		process.on("SIGTERM", () => console.log("resistant-direct-ignored"));
+		grandchild.once("message", () => console.log("resistant-grandchild:" + grandchild.pid));
+	`;
+	const wrapper = spawnWrapped(t, child);
+	await wrapper.waitForLine("resistant-grandchild:");
+	wrapper.child.kill("SIGTERM");
+	await wrapper.waitForLine("resistant-direct-ignored");
+	await wrapper.waitForLine("resistant-grandchild-ignored");
+	assert.deepEqual(
+		await wrapper.exit,
+		{ code: 137, signal: null },
+		wrapper.output,
+	);
+	for (const pid of [
+		Number(wrapper.output.match(/process-group:(\d+)/)?.[1]),
+		Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]),
+	]) {
+		assert.ok(pid > 0);
+		assert.throws(
+			() => process.kill(pid, 0),
+			(error: NodeJS.ErrnoException) => error.code === "ESRCH",
+		);
+	}
+});
+
 test("inherited runner preserves a child-defined SIGINT exit", {
 	skip: isWindows,
 	timeout: 10_000,

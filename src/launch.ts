@@ -197,8 +197,6 @@ export interface LaunchLifecycle {
 export type CustodyOutcome = "preserved" | "released" | "uncertain";
 
 export interface LaunchResult {
-	/** @deprecated Use agentExitCode and launcherExitCode separately. */
-	exitCode: number;
 	agentExitCode: number;
 	launcherExitCode: LauncherExitCode;
 	custody: CustodyOutcome;
@@ -655,7 +653,7 @@ async function launchWithLease(context: {
 		cleanupWarnings: [],
 	};
 	const temp = await mkdtemp(join(tmpdir(), "pi-docker-sandboxes-"));
-	let exitCode: number | undefined;
+	let agentExitCode: number | undefined;
 	let launcherExitCode: LauncherExitCode = LauncherExitCode.Success;
 	let custodyOverride: CustodyOutcome | undefined;
 	let result: LaunchResult | undefined;
@@ -684,16 +682,30 @@ async function launchWithLease(context: {
 			: phase === "remove-or-keep"
 				? [`sbx inspect ${shellArg(name)}`]
 				: [`sbx exec ${shellArg(name)} git status --porcelain=v1`];
+	const stateMarkFailures: unknown[] = [];
+	const interrupted = (cause: unknown): boolean =>
+		cause instanceof CommandTimeoutError || cause instanceof CommandCancelledError;
+	const persistFailedState = async (
+		category: "create" | "image" | "export" | "remove" | "reconcile",
+	): Promise<unknown | undefined> => {
+		if (!state || (state.phase === "failed" && state.lastOperationError))
+			return undefined;
+		state.phase = "failed";
+		state.updatedAt = new Date().toISOString();
+		state.lastOperationError = { category, at: state.updatedAt };
+		try {
+			await (options.saveState ?? saveSandboxState)(state);
+			return undefined;
+		} catch (cause) {
+			stateMarkFailures.push(cause);
+			return cause;
+		}
+	};
 	const markInterruptedState = async (
 		cause: unknown,
 		phase: OperationPhase,
-	): Promise<void> => {
-		if (
-			!state ||
-			(!(cause instanceof CommandTimeoutError) &&
-				!(cause instanceof CommandCancelledError))
-		)
-			return;
+	): Promise<unknown | undefined> => {
+		if (!interrupted(cause)) return undefined;
 		const category =
 			phase === "create"
 				? "create"
@@ -702,14 +714,12 @@ async function launchWithLease(context: {
 					: phase === "remove-or-keep"
 						? "remove"
 						: "reconcile";
-		state.phase = "failed";
-		state.updatedAt = new Date().toISOString();
-		state.lastOperationError = { category, at: state.updatedAt };
-		await (options.saveState ?? saveSandboxState)(state);
+		return persistFailedState(category);
 	};
+	const stateMarkWarning = (cause: unknown): string =>
+		`Interrupted operation state persistence failed: ${errorDetail(cause)}`;
 	const makeResult = (): LaunchResult => ({
-		exitCode: exitCode!,
-		agentExitCode: exitCode!,
+		agentExitCode: agentExitCode!,
 		launcherExitCode,
 		custody:
 			custodyOverride ?? (lifecycle.preserved ? "preserved" : "released"),
@@ -728,8 +738,10 @@ async function launchWithLease(context: {
 			await action();
 			return true;
 		} catch (cause) {
-			await markInterruptedState(cause, phase);
-			if (exitCode !== undefined) {
+			const stateMarkFailure = await markInterruptedState(cause, phase);
+			if (stateMarkFailure && agentExitCode !== undefined)
+				warnings.push(stateMarkWarning(stateMarkFailure));
+			if (agentExitCode !== undefined) {
 				launcherExitCode = LauncherExitCode.CustodyFailure;
 				if (phase === "inspect-exit" && operation.includes("existence"))
 					custodyOverride = "uncertain";
@@ -737,7 +749,7 @@ async function launchWithLease(context: {
 					custodyOverride = "uncertain";
 			}
 			if (cause instanceof OperationError && cause.phase === phase) {
-				if (exitCode !== undefined) {
+				if (agentExitCode !== undefined) {
 					warnings.push(formatError(cause));
 					return false;
 				}
@@ -751,7 +763,7 @@ async function launchWithLease(context: {
 				errorDetail(cause),
 				operationRecovery,
 			);
-			if (exitCode !== undefined) {
+			if (agentExitCode !== undefined) {
 				warnings.push(formatError(error));
 				return false;
 			}
@@ -919,13 +931,7 @@ async function launchWithLease(context: {
 						: {}),
 				});
 			} catch (cause) {
-				state.phase = "failed";
-				state.updatedAt = new Date().toISOString();
-				state.lastOperationError = {
-					category: "image",
-					at: state.updatedAt,
-				};
-				await (options.saveState ?? saveSandboxState)(state);
+				await persistFailedState("image");
 				throw cause;
 			}
 			let compilerInstalled = nativePackagesToInstall.length === 0;
@@ -945,7 +951,9 @@ async function launchWithLease(context: {
 								{ user: "root" },
 							)
 						).code === 0;
-				} catch {
+				} catch (cause) {
+					if (interrupted(cause) || !(cause instanceof SbxCommandError))
+						throw cause;
 					compilerInstalled = false;
 				}
 				if (!compilerInstalled) {
@@ -973,7 +981,9 @@ async function launchWithLease(context: {
 								user: "agent",
 							})
 						).code === 0;
-				} catch {
+				} catch (cause) {
+					if (interrupted(cause) || !(cause instanceof SbxCommandError))
+						throw cause;
 					installed = false;
 				}
 				if (!installed) {
@@ -1044,7 +1054,7 @@ async function launchWithLease(context: {
 		primaryPhase = "run";
 		primaryOperation = "attach to sandbox";
 		options.onStatus?.("starting Pi");
-		exitCode = await client.attach(request);
+		agentExitCode = await client.attach(request);
 		lifecycle.preserved = true;
 
 		let present = false;
@@ -1073,6 +1083,11 @@ async function launchWithLease(context: {
 					name,
 				);
 			} catch (cause) {
+				const stateMarkFailure = await markInterruptedState(
+					cause,
+					"export-or-preserve",
+				);
+				if (stateMarkFailure) warnings.push(stateMarkWarning(stateMarkFailure));
 				lifecycle.preserved = true;
 				const error = new LaunchOperationError(
 					"export-or-preserve",
@@ -1208,17 +1223,25 @@ async function launchWithLease(context: {
 	} catch (error) {
 		if (error !== finalizationStopped) {
 			await markInterruptedState(error, primaryPhase);
-			primaryError =
-				error instanceof OperationError
-					? error
-					: new LaunchOperationError(
-							primaryPhase,
-							primaryOperation,
-							lifecycle,
-							error,
-							errorDetail(error),
-							recovery(primaryPhase),
-						);
+			const operationError =
+				error instanceof OperationError ? error : undefined;
+			if (operationError && stateMarkFailures.length === 0)
+				primaryError = operationError;
+			else {
+				const cause = operationError?.cause ?? error;
+				primaryError = new LaunchOperationError(
+					operationError?.phase ?? primaryPhase,
+					operationError?.operation ?? primaryOperation,
+					lifecycle,
+					cause,
+					errorDetail(cause),
+					operationError?.recovery ?? recovery(primaryPhase),
+					stateMarkFailures.map((failure) => ({
+						label: "interrupted state persistence warning",
+						detail: errorDetail(failure),
+					})),
+				);
+			}
 		}
 	}
 
@@ -1239,7 +1262,13 @@ async function launchWithLease(context: {
 				operationError.cause ?? operationError,
 				errorDetail(operationError.cause ?? operationError),
 				operationError.recovery,
-				[{ label: "host cleanup warning", detail: cleanup.detail }],
+				[
+					...stateMarkFailures.map((failure) => ({
+						label: "interrupted state persistence warning",
+						detail: errorDetail(failure),
+					})),
+					{ label: "host cleanup warning", detail: cleanup.detail },
+				],
 			);
 		} else
 			primaryError = new LaunchOperationError(

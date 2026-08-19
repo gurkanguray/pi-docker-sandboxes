@@ -28,30 +28,102 @@ export function runInherited(
 
 	return new Promise((resolve, reject) => {
 		let child;
+		let status;
+		let groupGone = false;
+		let childExited = false;
+		let teardownStarted = false;
+		let teardownTimer;
+		let teardownProbe;
+		let settled = false;
 		const pendingSignals = [];
-		let shuttingDown = false;
-		let forwardedTerm = false;
-		let cleanedUp = false;
 		const handlers = new Map();
 		const cleanup = () => {
-			if (cleanedUp) return;
-			cleanedUp = true;
+			if (teardownTimer) clearTimeout(teardownTimer);
 			for (const [signal, handler] of handlers) process.off(signal, handler);
 		};
-		const forward = (signal) => {
-			shuttingDown = true;
-			if (!child?.pid) {
-				pendingSignals.push(signal);
-				return true;
-			}
-			if (signal === "SIGTERM") forwardedTerm = true;
+		const rejectOnce = (error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		};
+		const finish = () => {
+			if (settled || status === undefined || !groupGone) return;
+			settled = true;
+			cleanup();
+			resolve(status);
+		};
+		const killGroup = (signal) => {
 			try {
 				runtime.kill(-child.pid, signal);
 				return true;
 			} catch (error) {
-				if (error?.code === "ESRCH") return true;
-				cleanup();
-				reject(error);
+				if (error?.code === "ESRCH") return false;
+				throw error;
+			}
+		};
+		const startTeardown = (sendTerm) => {
+			if (teardownStarted || settled) return;
+			teardownStarted = true;
+			let deadline = Date.now() + grace.termGraceMs;
+			let killed = false;
+			try {
+				if (sendTerm && !killGroup("SIGTERM")) {
+					groupGone = true;
+					finish();
+					return;
+				}
+			} catch (error) {
+				rejectOnce(error);
+				return;
+			}
+			const verify = () => {
+				if (settled) return;
+				if (!childExited && Date.now() < deadline) {
+					teardownTimer = setTimeout(verify, 10);
+					return;
+				}
+				try {
+					if (!killGroup(0)) {
+						groupGone = true;
+						finish();
+						return;
+					}
+					if (Date.now() >= deadline) {
+						if (killed) {
+							rejectOnce(
+								new Error(`Process group ${child.pid} remained after SIGKILL`),
+							);
+							return;
+						}
+						killed = true;
+						if (!killGroup("SIGKILL")) {
+							groupGone = true;
+							finish();
+							return;
+						}
+						deadline = Date.now() + grace.killGraceMs;
+					}
+					teardownTimer = setTimeout(verify, 10);
+				} catch (error) {
+					rejectOnce(error);
+				}
+			};
+			teardownProbe = verify;
+			verify();
+		};
+		const forward = (signal) => {
+			if (!child?.pid) {
+				pendingSignals.push(signal);
+				return true;
+			}
+			try {
+				if (!killGroup(signal)) groupGone = true;
+				else startTeardown(false);
+				finish();
+				return true;
+			} catch (error) {
+				rejectOnce(error);
 				return false;
 			}
 		};
@@ -67,72 +139,24 @@ export function runInherited(
 				detached: true,
 			});
 		} catch (error) {
-			cleanup();
-			reject(error);
+			rejectOnce(error);
 			return;
 		}
 		child.once("error", (error) => {
-			cleanup();
-			if (error.code === "ENOENT") reject(new SbxNotInstalledError(command));
-			else reject(error);
+			if (error.code === "ENOENT")
+				rejectOnce(new SbxNotInstalledError(command));
+			else rejectOnce(error);
 		});
 		child.once("exit", (code, signal) => {
-			const status = signal ? 128 + constants.signals[signal] : (code ?? 1);
-			const killGroup = (groupSignal) => {
-				try {
-					runtime.kill(-child.pid, groupSignal);
-					return true;
-				} catch (error) {
-					if (error?.code === "ESRCH") return false;
-					throw error;
-				}
-			};
-			const finish = () => {
-				cleanup();
-				resolve(status);
-			};
-			try {
-				if (!shuttingDown || !forwardedTerm) {
-					if (!killGroup("SIGTERM")) {
-						finish();
-						return;
-					}
-				}
-			} catch (error) {
-				cleanup();
-				reject(error);
-				return;
+			childExited = true;
+			status = signal ? 128 + constants.signals[signal] : (code ?? 1);
+			if (!teardownStarted) startTeardown(true);
+			else {
+				if (teardownTimer) clearTimeout(teardownTimer);
+				teardownTimer = undefined;
+				teardownProbe?.();
 			}
-			let deadline = Date.now() + grace.termGraceMs;
-			let killed = false;
-			const verify = () => {
-				try {
-					if (!killGroup(0)) {
-						finish();
-						return;
-					}
-					if (Date.now() >= deadline) {
-						if (killed) {
-							cleanup();
-							reject(
-								new Error(`Process group ${child.pid} remained after SIGKILL`),
-							);
-							return;
-						}
-						killed = true;
-						if (!killGroup("SIGKILL")) {
-							finish();
-							return;
-						}
-						deadline = Date.now() + grace.killGraceMs;
-					}
-					setTimeout(verify, 10);
-				} catch (error) {
-					cleanup();
-					reject(error);
-				}
-			};
-			verify();
+			finish();
 		});
 		if (child.pid) {
 			for (const signal of pendingSignals.splice(0))
