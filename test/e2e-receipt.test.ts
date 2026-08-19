@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { npmCommand } from "../scripts/npm-command.mjs";
 
 const exec = promisify(execFile);
 const script = new URL("../scripts/e2e-receipt.mjs", import.meta.url);
@@ -38,11 +39,11 @@ async function fixture(): Promise<Fixture> {
 		await exec("git", ["rev-parse", "HEAD"], { cwd: root })
 	).stdout.trim();
 	const packed = JSON.parse(
-		(await exec("npm", ["pack", "--json"], { cwd: root })).stdout,
+		(await exec(npmCommand, ["pack", "--json"], { cwd: root })).stdout,
 	)[0];
 	const tarball = join(root, packed.filename);
 	const prefix = join(root, "prefix");
-	await exec("npm", [
+	await exec(npmCommand, [
 		"install",
 		"--ignore-scripts",
 		"--prefix",

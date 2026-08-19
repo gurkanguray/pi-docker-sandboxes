@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { npmCommand } from "../scripts/npm-command.mjs";
 
 const exec = promisify(execFile);
 const root = new URL("..", import.meta.url);
@@ -33,7 +34,7 @@ test("packed CLI runs from node_modules", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-pack-"));
 	try {
 		const { stdout } = await exec(
-			"npm",
+			npmCommand,
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
@@ -93,7 +94,7 @@ test("npm package includes the image lock and standalone runtime contracts", asy
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-pack-"));
 	try {
 		const { stdout } = await exec(
-			"npm",
+			npmCommand,
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);

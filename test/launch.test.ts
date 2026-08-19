@@ -16,6 +16,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { parseRunArgs } from "../src/cli.ts";
 import { OperationError } from "../src/errors.ts";
+import { resolveKitImage } from "../src/kit.ts";
 import { acquireSandboxLease } from "../src/lease.ts";
 import {
 	launch as productionLaunch,
@@ -167,7 +168,12 @@ test("production launch resolves the published runtime before SBX preflight", as
 		},
 	} as unknown as SbxClient;
 	await assert.rejects(
-		productionLaunch({ cwd: root, client, config: launchConfig }),
+		launch({
+			cwd: root,
+			client,
+			config: launchConfig,
+			resolveImage: resolveKitImage,
+		}),
 		(error: unknown) => {
 			assert.equal(
 				(error as { detail?: string }).detail,

@@ -294,7 +294,11 @@ export function launchProcessExitCode(
 
 export async function main(
 	argv = process.argv.slice(2),
-	dependencies: { removeState?: (path: string) => Promise<void> } = {},
+	dependencies: {
+		removeState?: (path: string) => Promise<void>;
+		/** @internal Test-only launch boundary. */
+		launch?: typeof launch;
+	} = {},
 ): Promise<number> {
 	const [command = "run", ...args] = argv;
 	if (command === "help" || command === "--help" || command === "-h") {
@@ -321,7 +325,7 @@ export async function main(
 			"syncing host credentials",
 		);
 		try {
-			const result = await launch({
+			const result = await (dependencies.launch ?? launch)({
 				cwd: parsed.cwd,
 				config: parsed.override,
 				fresh: parsed.fresh,
@@ -674,19 +678,23 @@ export async function main(
 	throw new TypeError(`Unknown command: ${command}\n${usage()}`);
 }
 
+export async function run(
+	argv = process.argv.slice(2),
+	dependencies: Parameters<typeof main>[1] = {},
+): Promise<number> {
+	try {
+		return await main(argv, dependencies);
+	} catch (error) {
+		console.error(`Error: ${formatError(error)}`);
+		return error instanceof SandboxLeaseBusyError
+			? LauncherExitCode.Busy
+			: LauncherExitCode.Failure;
+	}
+}
+
 if (
 	process.argv[1] &&
 	import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
-	main()
-		.then((code) => {
-			process.exitCode = code;
-		})
-		.catch((error: unknown) => {
-			console.error(`Error: ${formatError(error)}`);
-			process.exitCode =
-				error instanceof SandboxLeaseBusyError
-					? LauncherExitCode.Busy
-					: LauncherExitCode.Failure;
-		});
+	process.exitCode = await run();
 }

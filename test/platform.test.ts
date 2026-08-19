@@ -69,6 +69,10 @@ test("production host certification enforces OS floors", async () => {
 	);
 });
 
-test("actual host passes production certification", async () => {
+test("actual host matches production certification", async () => {
+	if (process.platform === "win32") {
+		assert.throws(() => detectHostPlatform(), /not certified/i);
+		return;
+	}
 	await assert.doesNotReject(certifyHostPlatform(detectHostPlatform()));
 });

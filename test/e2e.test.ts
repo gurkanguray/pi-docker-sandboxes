@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { npmCommand } from "../scripts/npm-command.mjs";
 import { importControllerModule } from "./e2e-controller-modules.ts";
 
 const enabled = process.env.PI_DOCKER_SANDBOX_E2E === "1";
@@ -539,7 +540,7 @@ sandboxTest(
 			let installSource = packageSource;
 			if (packageSource.endsWith(".tgz")) {
 				const packagePrefix = join(root, "package");
-				await run("npm", [
+				await run(npmCommand, [
 					"install",
 					"--ignore-scripts",
 					"--prefix",

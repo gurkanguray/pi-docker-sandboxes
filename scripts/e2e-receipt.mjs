@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { lstat, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { npmCommand } from "./npm-command.mjs";
 
 const exec = promisify(execFile);
 
@@ -174,7 +175,7 @@ try {
 	) {
 		const packagePath = resolve(packageArgument);
 		const { stdout } = await exec(
-			"npm",
+			npmCommand,
 			["pack", "--dry-run", "--json", packagePath],
 			{ cwd: dirname(packagePath) },
 		);

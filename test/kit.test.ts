@@ -82,8 +82,10 @@ test("Kit v2 generation is deterministic and secret-free", () => {
 		"/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs",
 	]);
 	assert.deepEqual(spec.sandbox.command.interactive, []);
-	assert.ok(spec.permissions.network.allow.includes("api.openai.com"));
-	assert.ok(spec.permissions.network.allow.includes("docs.example.com"));
+	assert.deepEqual([...spec.permissions.network.allow].sort(), [
+		"api.openai.com",
+		"docs.example.com",
+	]);
 	assert.equal(JSON.stringify(spec).includes("API_KEY=sk-"), false);
 });
 

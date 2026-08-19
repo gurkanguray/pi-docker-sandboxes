@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { npmCommand } from "../scripts/npm-command.mjs";
 
 const exec = promisify(execFile);
 const script = new URL("../scripts/check-release.mjs", import.meta.url);
@@ -74,7 +75,7 @@ test("public package metadata and packed CLI are release-ready", async () => {
 	assert.equal(pkg.peerDependencies.typebox, "*");
 
 	const { stdout } = await exec(
-		"npm",
+		npmCommand,
 		["pack", "--dry-run", "--json", "--ignore-scripts"],
 		{ cwd: packageRoot },
 	);
@@ -320,7 +321,7 @@ async function packageFixture(
 		await chmod(bin, options.executable === false ? 0o644 : 0o755);
 	}
 
-	const { stdout } = await exec("npm", ["pack", "--json", source], {
+	const { stdout } = await exec(npmCommand, ["pack", "--json", source], {
 		cwd: directory,
 	});
 	const packed = JSON.parse(stdout)[0];
@@ -584,9 +585,11 @@ if (command === "doctor") process.exitCode = 1;
 `,
 		);
 		await chmod(bin, 0o755);
-		const { stdout: packOutput } = await exec("npm", ["pack", "--json", source], {
-			cwd: directory,
-		});
+		const { stdout: packOutput } = await exec(
+			npmCommand,
+			["pack", "--json", source],
+			{ cwd: directory },
+		);
 		const tarball = join(directory, JSON.parse(packOutput)[0].filename);
 		const { stdout, stderr } = await exec(
 			process.execPath,

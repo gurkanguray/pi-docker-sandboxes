@@ -19,10 +19,15 @@ import {
 	createPausedConfirm,
 	launchProcessExitCode,
 	main,
+	run,
 } from "../src/cli.ts";
 import { LauncherExitCode } from "../src/exit-codes.ts";
 import { IMAGE_LOCK } from "../src/image-lock.ts";
-import { acquireSandboxLease, LEASE_BUSY_EXIT_CODE } from "../src/lease.ts";
+import {
+	acquireSandboxLease,
+	LEASE_BUSY_EXIT_CODE,
+	SandboxLeaseBusyError,
+} from "../src/lease.ts";
 import { sessionBackupRoot } from "../src/sessions.ts";
 import {
 	inspectRepository,
@@ -37,6 +42,30 @@ const exec = promisify(execFile);
 const cli = new URL("../src/cli.ts", import.meta.url).pathname;
 
 const fixtureImage = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
+
+test("CLI run maps lease contention and ordinary failures to process exit codes", async (t) => {
+	const errors: string[] = [];
+	t.mock.method(console, "error", (message: unknown) =>
+		errors.push(String(message)),
+	);
+	assert.equal(
+		await run(["run"], {
+			launch: async () => {
+				throw new SandboxLeaseBusyError("busy fixture");
+			},
+		}),
+		LauncherExitCode.Busy,
+	);
+	assert.equal(
+		await run(["run"], {
+			launch: async () => {
+				throw new Error("failure fixture");
+			},
+		}),
+		LauncherExitCode.Failure,
+	);
+	assert.deepEqual(errors, ["Error: busy fixture", "Error: failure fixture"]);
+});
 
 test("launcher custody status is primary only after a successful agent", () => {
 	assert.equal(

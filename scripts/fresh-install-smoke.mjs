@@ -11,9 +11,9 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const packageName = "pi-docker-sandboxes";
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function fail(message) {
 	throw new Error(message);

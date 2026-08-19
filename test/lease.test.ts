@@ -429,6 +429,7 @@ test("concurrent in-process acquisition has exactly one winner", async (t) => {
 test("Python launches two actual pi-dsbx run processes with one lifecycle owner", async (t) => {
 	const harness = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-lease-probe-"));
 	t.after(() => rm(harness, { recursive: true, force: true }));
+	await mkdir(join(harness, "test", "fixtures"), { recursive: true });
 	await Promise.all([
 		cp(new URL("../src", import.meta.url), join(harness, "src"), {
 			recursive: true,
@@ -439,6 +440,10 @@ test("Python launches two actual pi-dsbx run processes with one lifecycle owner"
 		cp(new URL("../runtime", import.meta.url), join(harness, "runtime"), {
 			recursive: true,
 		}),
+		cp(
+			new URL("fixtures/cli-run.ts", import.meta.url),
+			join(harness, "test", "fixtures", "cli-run.ts"),
+		),
 		symlink(
 			new URL("../node_modules", import.meta.url),
 			join(harness, "node_modules"),
@@ -550,7 +555,7 @@ if [first.returncode, second.returncode] != [0, int(busy)] or second_state_reads
 			"-c",
 			python,
 			process.execPath,
-			join(harness, "src", "cli.ts"),
+			join(harness, "test", "fixtures", "cli-run.ts"),
 			root,
 			home,
 			bin,
