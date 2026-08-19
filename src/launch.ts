@@ -114,6 +114,7 @@ export type LaunchCrashPoint =
 	| "after-ready-transition"
 	| "before-export-publication"
 	| "after-export-publication"
+	| "after-removing-state-persistence"
 	| "before-removal-confirmation"
 	| "after-removal-confirmation";
 
@@ -1110,6 +1111,9 @@ async function launchWithLease(context: {
 						state.phase = "removing";
 						state.updatedAt = new Date().toISOString();
 						await (options.saveState ?? saveSandboxState)(state);
+						await options.onCrashPoint?.(
+							"after-removing-state-persistence",
+						);
 						await client.remove(name, true);
 						await options.onCrashPoint?.("before-removal-confirmation");
 						const removalConfirmed = !(await client.exists(name));

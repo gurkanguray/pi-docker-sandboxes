@@ -21,6 +21,7 @@ async function reconcile(root: string): Promise<void> {
 	const name = sandboxName(root);
 	const state = await loadSandboxState(root, name);
 	const present = await exists(join(root, "daemon-present"));
+	const removalInvoked = await exists(join(root, "removal-invoked"));
 	const decision = reconcileSandbox(state, {
 		exists: present,
 		...(present ? { imageMatches: state.runtimeImage === image } : {}),
@@ -36,6 +37,7 @@ async function reconcile(root: string): Promise<void> {
 			phase: state.phase,
 			attestation: state.imageAttestation?.status,
 			exists: present,
+			removalInvoked,
 			patches: patches.length,
 			decision,
 		})}\n`,
@@ -44,9 +46,10 @@ async function reconcile(root: string): Promise<void> {
 
 async function run(root: string, crashPoint: LaunchCrashPoint): Promise<void> {
 	const daemon = join(root, "daemon-present");
+	const removalInvocation = join(root, "removal-invoked");
 	const scenario = crashPoint.includes("export")
 		? "export"
-		: crashPoint.includes("removal")
+		: crashPoint.includes("remov")
 			? "remove"
 			: "create";
 	const client = {
@@ -80,7 +83,10 @@ async function run(root: string, crashPoint: LaunchCrashPoint): Promise<void> {
 				return { stdout: "1\t0\tfile.txt\n", stderr: "", code: 0 };
 			return { stdout: "", stderr: "", code: 0 };
 		},
-		remove: async () => rm(daemon, { force: true }),
+		remove: async () => {
+			await writeFile(removalInvocation, "invoked\n");
+			await rm(daemon, { force: true });
+		},
 	} as unknown as SbxClient;
 	await launch({
 		cwd: root,

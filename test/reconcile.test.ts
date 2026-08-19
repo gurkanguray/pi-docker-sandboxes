@@ -103,6 +103,7 @@ interface RestartReceipt {
 	phase: SandboxPhase;
 	attestation?: "pending" | "verified";
 	exists: boolean;
+	removalInvoked: boolean;
 	patches: number;
 	decision: ReturnType<typeof reconcileSandbox>;
 }
@@ -165,6 +166,18 @@ test("Python SIGKILL probes production launch lifecycle crash points", async () 
 		});
 	}
 
+	const beforeRemove = await killAndRestart(
+		"after-removing-state-persistence",
+	);
+	assert.equal(beforeRemove.phase, "removing");
+	assert.equal(beforeRemove.exists, true);
+	assert.equal(beforeRemove.removalInvoked, false);
+	assert.notEqual(beforeRemove.decision.action, "remove-state");
+	assert.deepEqual(beforeRemove.decision, {
+		action: "preserve",
+		reason: "interrupted removal",
+	});
+
 	for (const point of [
 		"before-removal-confirmation",
 		"after-removal-confirmation",
@@ -172,6 +185,7 @@ test("Python SIGKILL probes production launch lifecycle crash points", async () 
 		const receipt = await killAndRestart(point);
 		assert.equal(receipt.phase, "removing", point);
 		assert.equal(receipt.exists, false, point);
+		assert.equal(receipt.removalInvoked, true, point);
 		assert.equal(receipt.decision.action, "remove-state", point);
 	}
 });
