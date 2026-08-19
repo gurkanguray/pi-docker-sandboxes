@@ -10,6 +10,6 @@ test("checked-in runtime images cannot enter the smoke path before publication",
 	);
 	assert.throws(
 		() => selectRuntimeImage(lock, true, "linux/arm64"),
-		/production runtime image docker is unpublished/,
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });

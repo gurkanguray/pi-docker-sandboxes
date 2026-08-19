@@ -70,7 +70,11 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - id: runtime-lock
+        run: >-
+          node scripts/runtime-build-args.mjs --github-output
+          >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@49933ea5288ca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.12.0
           cache: npm
@@ -85,6 +89,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: >-
           docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          version: ${{ steps.runtime-lock.outputs.buildx_version }}
+          driver-opts: image=${{ steps.runtime-lock.outputs.buildkit_driver }}
       - name: Build and load scan candidate
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
@@ -94,7 +101,17 @@ jobs:
           load: true
           push: false
           tags: pi-docker-sandboxes:${{ github.sha }}
-          build-args: SOURCE_SHA=${{ github.sha }}
+          build-args: |
+            SOURCE_SHA=${{ github.sha }}
+            STANDARD_BASE=${{ steps.runtime-lock.outputs.standard_base }}
+            DOCKER_BASE=${{ steps.runtime-lock.outputs.docker_base }}
+            PI_VERSION=${{ steps.runtime-lock.outputs.pi_version }}
+            RUNTIME_VERSION=${{ steps.runtime-lock.outputs.runtime_version }}
+            FD_VERSION=${{ steps.runtime-lock.outputs.fd_version }}
+            FD_AMD64_NAME=${{ steps.runtime-lock.outputs.fd_amd64_name }}
+            FD_AMD64_SHA256=${{ steps.runtime-lock.outputs.fd_amd64_sha256 }}
+            FD_ARM64_NAME=${{ steps.runtime-lock.outputs.fd_arm64_name }}
+            FD_ARM64_SHA256=${{ steps.runtime-lock.outputs.fd_arm64_sha256 }}
           cache-from: type=gha,scope=runtime-standard-arm64
       - name: Scan candidate image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25

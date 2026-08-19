@@ -155,7 +155,11 @@ export function selectRuntimeImage(
 	dockerEngine: boolean,
 	runtimePlatform: RuntimePlatform,
 ): PublishedRuntimeImage {
-	const variant = dockerEngine ? "docker" : "standard";
+	if (dockerEngine)
+		throw new Error(
+			"private Docker engine is unavailable in production 1.0 until a verified runtime is published",
+		);
+	const variant = "standard";
 	const image = lock.images[variant];
 	if (image.status === "unpublished")
 		throw new Error(`production runtime image ${variant} is unpublished`);

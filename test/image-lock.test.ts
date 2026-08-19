@@ -136,19 +136,19 @@ test("unpublished runtime variants parse but selection fails closed", () => {
 	);
 	assert.throws(
 		() => selectRuntimeImage(parsed, true, "linux/arm64"),
-		/production runtime image docker is unpublished/,
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });
 
-test("selects the exact published variant and platform", () => {
+test("selects standard and rejects Docker even when a Docker image is published", () => {
 	const parsed = parseImageLock(validLock);
 	assert.equal(
 		selectRuntimeImage(parsed, false, "linux/amd64").reference,
 		validLock.images.standard.reference,
 	);
-	assert.equal(
-		selectRuntimeImage(parsed, true, "linux/arm64").reference,
-		validLock.images.docker.reference,
+	assert.throws(
+		() => selectRuntimeImage(parsed, true, "linux/arm64"),
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });
 

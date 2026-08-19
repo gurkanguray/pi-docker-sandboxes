@@ -14,6 +14,7 @@ type Step = {
 };
 type Job = {
 	environment?: { name?: string; url?: string };
+	if?: string;
 	needs?: string[];
 	permissions?: Record<string, string>;
 	steps?: Step[];
@@ -315,13 +316,28 @@ test("release workflows are valid npm-only gates", async () => {
 	assert.deepEqual(runtime.permissions, { contents: "read" });
 	assert.match(runtimeText, /platforms: linux\/amd64,linux\/arm64/);
 	assert.match(runtimeText, /no-cache: true/);
-	assert.match(runtimeText, /target: \$\{\{ matrix\.variant \}\}/);
+	assert.match(runtimeText, /target: \$\{\{ inputs\.variant \}\}/);
+	assert.match(runtimeText, /options: \[standard, docker\]/);
+	assert.doesNotMatch(runtimeText, /matrix\.variant/);
 	assert.match(runtimeText, /verify-runtime-image\.mjs/);
+	assert.match(runtimeText, /--lock/);
+	assert.match(runtimeText, /runtime-build-args\.mjs/);
 	assert.match(runtimeText, /runtime-image-receipt\.json/);
 	assert.match(runtimeText, /format: cyclonedx/);
 	assert.match(runtimeText, /severity: HIGH,CRITICAL/);
-	assert.match(runtimeText, /candidate-\$SOURCE_SHA/);
+	assert.match(
+		runtimeText,
+		/candidate-\$SOURCE_SHA-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/,
+	);
 	assert.match(runtimeText, /subject-digest:/);
+	assert.match(runtimeText, /subject-path:/);
+	assert.match(runtimeText, /verify-runtime-environment\.mjs/);
+	assert.match(runtimeText, /finalize-runtime-receipt\.mjs/);
+	assert.match(runtimeText, /driver-opts: image=\$\{\{/);
+	assert.doesNotMatch(
+		runtimeText,
+		/candidate already exists|inspect "docker:\/\/\$candidate"/,
+	);
 	assert.doesNotMatch(
 		runtimeText,
 		/pull_request:|pi-docker-sandboxes\.tgz|PACKAGE_VERSION|flag:\s*["']wx["']/,
@@ -332,6 +348,8 @@ test("release workflows are valid npm-only gates", async () => {
 	))
 		assert.equal(step.with?.input, "runtime/oci");
 	const publishRuntime = runtime.jobs.publish;
+	assert.equal(runtime.jobs.receipt.if, "inputs.variant == 'standard'");
+	assert.equal(publishRuntime.if, "inputs.variant == 'standard'");
 	assert.equal(publishRuntime.environment?.name, "release-runtime");
 	assert.deepEqual(publishRuntime.permissions, {
 		contents: "read",
@@ -339,7 +357,8 @@ test("release workflows are valid npm-only gates", async () => {
 		"id-token": "write",
 		attestations: "write",
 	});
-	for (const job of Object.values(runtime.jobs))
+	for (const [name, job] of Object.entries(runtime.jobs)) {
+		assert.ok(job.permissions, `${name} must declare permissions`);
 		for (const step of job.steps ?? [])
 			if (step.uses) {
 				const [action, revision] = step.uses.split("@");
@@ -349,6 +368,7 @@ test("release workflows are valid npm-only gates", async () => {
 					`${action} must be SHA-pinned`,
 				);
 			}
+	}
 	for (const [name, workflow] of parsed)
 		if (name !== "runtime-image.yml")
 			assert.notEqual(

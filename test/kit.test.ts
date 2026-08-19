@@ -45,20 +45,20 @@ test("runtime image resolution fails closed while source variants are unpublishe
 	);
 	await assert.rejects(
 		resolveKitImage(mergeConfig({ sandbox: { dockerEngine: true } })),
-		/production runtime image docker is unpublished/,
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });
 
-test("runtime image resolution selects the exact configured variant", async () => {
+test("runtime image resolution selects standard and rejects Docker", async () => {
 	assert.deepEqual(await resolveKitImage(mergeConfig(), publishedLock), {
 		image: standard,
 	});
-	assert.deepEqual(
-		await resolveKitImage(
+	await assert.rejects(
+		resolveKitImage(
 			mergeConfig({ sandbox: { dockerEngine: true } }),
 			publishedLock,
 		),
-		{ image: docker },
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });
 
