@@ -20,8 +20,17 @@ interface MarkedProcess {
 	command: string;
 }
 
-async function markedProcesses(marker: string): Promise<MarkedProcess[]> {
-	const { stdout } = await exec("ps", ["-ax", "-o", "pid=,pgid=,command="], {
+type ProcessListRunner = (
+	command: string,
+	args: string[],
+	options: { encoding: "utf8" },
+) => Promise<{ stdout: string }>;
+
+async function markedProcesses(
+	marker: string,
+	run: ProcessListRunner = exec as ProcessListRunner,
+): Promise<MarkedProcess[]> {
+	const { stdout } = await run("ps", ["-axww", "-o", "pid=,pgid=,command="], {
 		encoding: "utf8",
 	});
 	return stdout
@@ -36,11 +45,21 @@ async function markedProcesses(marker: string): Promise<MarkedProcess[]> {
 		.filter((process) => process.command.includes(marker));
 }
 
+test("signal identity scan requests untruncated full commands", async () => {
+	let observedArgs: string[] | undefined;
+	await markedProcesses("owned-marker", async (_command, args) => {
+		observedArgs = args;
+		return { stdout: "" };
+	});
+	assert.deepEqual(observedArgs, ["-axww", "-o", "pid=,pgid=,command="]);
+});
+
 interface WrappedProcess {
 	child: ChildProcess;
 	exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 	output: string;
 	waitForLine(line: string): Promise<void>;
+	assertOwnedProcessTree(pids: readonly number[]): Promise<void>;
 	assertNoOwnedProcesses(): Promise<void>;
 }
 
@@ -154,6 +173,21 @@ function spawnWrapped(t: TestContext, source: string): WrappedProcess {
 				entries.push({ resolve, reject });
 				waiters.set(line, entries);
 			});
+		},
+		async assertOwnedProcessTree(pids) {
+			assert.ok(processGroup, output);
+			const owned = await markedProcesses(marker);
+			assert.deepEqual(
+				owned
+					.filter(
+						(process) =>
+							process.processGroup === processGroup && pids.includes(process.pid),
+					)
+					.map((process) => process.pid)
+					.sort((left, right) => left - right),
+				[...pids].sort((left, right) => left - right),
+				`owned marker missing from live process tree: ${JSON.stringify(owned)}`,
+			);
 		},
 		async assertNoOwnedProcesses() {
 			await close;
@@ -480,6 +514,13 @@ test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 	`;
 	const wrapper = spawnWrapped(t, child);
 	await wrapper.waitForLine("resistant-grandchild:");
+	const processGroup = Number(wrapper.output.match(/process-group:(\d+)/)?.[1]);
+	const grandchildPid = Number(
+		wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1],
+	);
+	assert.ok(processGroup > 0);
+	assert.ok(grandchildPid > 0);
+	await wrapper.assertOwnedProcessTree([processGroup, grandchildPid]);
 	wrapper.child.kill("SIGTERM");
 	await wrapper.waitForLine("resistant-direct-ignored");
 	await wrapper.waitForLine("resistant-grandchild-ignored");
@@ -487,10 +528,6 @@ test("forwarded TERM boundedly kills a resistant direct child and descendant", {
 		await wrapper.exit,
 		{ code: 137, signal: null },
 		wrapper.output,
-	);
-	assert.ok(Number(wrapper.output.match(/process-group:(\d+)/)?.[1]) > 0);
-	assert.ok(
-		Number(wrapper.output.match(/resistant-grandchild:(\d+)/)?.[1]) > 0,
 	);
 	await wrapper.assertNoOwnedProcesses();
 });
