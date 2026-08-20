@@ -27,6 +27,7 @@ import type { SyncOptions, SyncProfile } from "./config.ts";
 import { scanSecretCategories } from "./errors.ts";
 import { isCopyEligibleOAuthEntry } from "./host-auth.ts";
 import { superviseCommand } from "./sbx/supervisor.ts";
+import { inspectRepository } from "./workspace.ts";
 
 const SAFE_SETTINGS = new Set([
 	"theme",
@@ -351,6 +352,157 @@ export function resolvePackageLocks(
 		locks.set(source, { source, kind: "git", commit });
 	}
 	return { value: [...locks.values()], warnings };
+}
+
+function installedGitPackage(
+	agentDir: string,
+	source: string,
+): { checkout: string; immutableBase: string } | undefined {
+	const spec = source.slice("git:".length);
+	let host: string;
+	let parsedPath: ReturnType<typeof safeGitPath>;
+	const protocol = /^(?:https?|git|ssh):\/\//.exec(spec);
+	if (protocol) {
+		let url: URL;
+		try {
+			url = new URL(spec);
+		} catch {
+			return undefined;
+		}
+		host = url.hostname;
+		parsedPath = safeGitPath(url.pathname.replace(/^\/+/, ""));
+	} else if (spec.startsWith("git@")) {
+		const colon = spec.indexOf(":", 4);
+		host = spec.slice(4, colon);
+		parsedPath = safeGitPath(spec.slice(colon + 1));
+	} else {
+		const slash = spec.indexOf("/");
+		host = spec.slice(0, slash);
+		parsedPath = safeGitPath(spec.slice(slash + 1));
+	}
+	if (!parsedPath) return undefined;
+	const immutableBase = parsedPath.ref
+		? source.slice(0, -(parsedPath.ref.length + 1))
+		: source;
+	return {
+		checkout: join(agentDir, "git", host, ...parsedPath.path.split("/")),
+		immutableBase,
+	};
+}
+
+async function resolveInstalledPackageLocks(
+	agentDir: string,
+	value: unknown,
+	options: PersonalizationSnapshotOptions,
+): Promise<Sanitized<ImmutablePackageLock[]>> {
+	if (value === undefined) return { value: [], warnings: [] };
+	if (!Array.isArray(value))
+		throw new TypeError("settings.packages must be an array");
+	let npmLockfile: unknown;
+	const resolved: unknown[] = [];
+	for (const [index, entry] of value.entries()) {
+		let source: string | undefined;
+		if (typeof entry === "string") source = entry;
+		else if (plainObject(entry) && typeof entry.source === "string")
+			source = entry.source;
+		if (!source || !safeRemotePackage(source, false)) {
+			resolved.push(entry);
+			continue;
+		}
+		if (source.startsWith("npm:")) {
+			const suppliedIntegrity = plainObject(entry) ? entry.integrity : undefined;
+			if (
+				safeRemotePackage(source) &&
+				typeof suppliedIntegrity === "string" &&
+				NPM_INTEGRITY.test(suppliedIntegrity)
+			) {
+				resolved.push(entry);
+				continue;
+			}
+			npmLockfile ??= await readJson(
+				agentDir,
+				"npm/package-lock.json",
+				options,
+			);
+			const name = npmPackageName(source);
+			const packages = plainObject(npmLockfile)
+				? npmLockfile.packages
+				: undefined;
+			const receipt =
+				name && plainObject(packages)
+					? packages[`node_modules/${name}`]
+					: undefined;
+			if (!name || !plainObject(receipt))
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm lock receipt missing`,
+				);
+			const exactSource = `npm:${name}@${String(receipt.version)}`;
+			if (
+				!NPM_PACKAGE.test(exactSource) ||
+				typeof receipt.integrity !== "string" ||
+				!NPM_INTEGRITY.test(receipt.integrity)
+			)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm lock receipt invalid`,
+				);
+			const requested = NPM_PACKAGE.exec(source);
+			if (requested && requested[2] !== receipt.version)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm version mismatch`,
+				);
+			const installed = await readJson(
+				agentDir,
+				`npm/node_modules/${name}/package.json`,
+				options,
+			);
+			if (
+				!plainObject(installed) ||
+				installed.name !== name ||
+				installed.version !== receipt.version
+			)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm package mismatch`,
+				);
+			resolved.push({ source: exactSource, integrity: receipt.integrity });
+			continue;
+		}
+		if (safeRemotePackage(source)) {
+			resolved.push(entry);
+			continue;
+		}
+		const installed = installedGitPackage(agentDir, source);
+		if (!installed)
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git package path invalid`,
+			);
+		let checkout: string;
+		try {
+			const gitRoot = await realpath(join(agentDir, "git"));
+			checkout = await realpath(installed.checkout);
+			const withinGitRoot = relative(gitRoot, checkout);
+			const checkoutStat = await lstat(installed.checkout);
+			if (
+				checkoutStat.isSymbolicLink() ||
+				!checkoutStat.isDirectory() ||
+				withinGitRoot === "" ||
+				withinGitRoot === ".." ||
+				withinGitRoot.startsWith(`..${sep}`)
+			)
+				throw new Error("unsafe checkout");
+		} catch (cause) {
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git checkout invalid`,
+				{ cause },
+			);
+		}
+		const repository = await inspectRepository(checkout);
+		if (repository.root !== checkout || !GIT_COMMIT.test(repository.head))
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git checkout invalid`,
+			);
+		resolved.push(`${installed.immutableBase}@${repository.head}`);
+	}
+	return resolvePackageLocks(resolved);
 }
 
 export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
@@ -1264,7 +1416,7 @@ async function copyResourceTree(
 
 async function readJson(
 	agentDir: string,
-	name: "settings.json" | "models.json" | "models-store.json" | "auth.json",
+	name: string,
 	options: PersonalizationSnapshotOptions,
 ): Promise<unknown | undefined> {
 	const source = join(agentDir, name);
@@ -1406,8 +1558,10 @@ export async function createPersonalizationSnapshot(
 					: { value: {}, warnings: [] };
 				warnings.push(...sanitized.warnings);
 				if (policy.packages) {
-					const packages = resolvePackageLocks(
+					const packages = await resolveInstalledPackageLocks(
+						agentDir,
 						plainObject(settings) ? settings.packages : undefined,
+						options,
 					);
 					warnings.push(...packages.warnings);
 					packageLocks.push(...packages.value);

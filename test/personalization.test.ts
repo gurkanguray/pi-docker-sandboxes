@@ -221,6 +221,81 @@ test("npm fetch rejects wrong digest, registry failure, malformed response, and 
 	}
 });
 
+test("mirror pins ordinary installed npm and Git packages", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-installed-locks-"));
+	const agent = join(root, "agent");
+	const checkout = join(agent, "git", "github.com", "owner", "repo");
+	await mkdir(join(agent, "npm", "node_modules", "example"), {
+		recursive: true,
+	});
+	await mkdir(checkout, { recursive: true });
+	await writeFile(
+		join(agent, "npm", "node_modules", "example", "package.json"),
+		JSON.stringify({ name: "example", version: "1.2.3" }),
+	);
+	await writeFile(
+		join(agent, "npm", "package-lock.json"),
+		JSON.stringify({
+			lockfileVersion: 3,
+			packages: {
+				"node_modules/example": {
+					version: "1.2.3",
+					integrity: packageIntegrity,
+				},
+			},
+		}),
+	);
+	await exec("git", ["init", checkout]);
+	await writeFile(join(checkout, "README.md"), "fixture\n");
+	await exec("git", ["-C", checkout, "add", "README.md"]);
+	await exec("git", [
+		"-C",
+		checkout,
+		"-c",
+		"user.name=Test",
+		"-c",
+		"user.email=test@example.com",
+		"commit",
+		"-m",
+		"fixture",
+	]);
+	const commit = (
+		await exec("git", ["-C", checkout, "rev-parse", "HEAD"])
+	).stdout.trim();
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({
+			packages: ["npm:example", "git:github.com/owner/repo"],
+		}),
+	);
+
+	const snapshot = await createPersonalizationSnapshot(
+		agent,
+		join(root, "snapshot"),
+		"mirror",
+		undefined,
+		{ deferAllPackages: true },
+	);
+
+	assert.deepEqual(snapshot.packageLocks, [
+		{
+			source: "npm:example@1.2.3",
+			kind: "npm",
+			integrity: packageIntegrity,
+		},
+		{
+			source: `git:github.com/owner/repo@${commit}`,
+			kind: "git",
+			commit,
+		},
+	]);
+	assert.deepEqual(
+		snapshot.packageSpecs,
+		snapshot.packageLocks.map((entry) => entry.source),
+	);
+	await rm(root, { recursive: true, force: true });
+});
+
 test("package mirroring accepts only immutable receipt-bearing specs", () => {
 	const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
 	const commit = "a".repeat(40);

@@ -337,7 +337,7 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 	}
 });
 
-test("mutable package inputs fail before sandbox mutation", async () => {
+test("mutable packages without installed receipts fail before sandbox mutation", async () => {
 	const root = await committedRepository();
 	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-mutable-package-"));
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
@@ -360,7 +360,7 @@ test("mutable package inputs fail before sandbox mutation", async () => {
 				} as unknown as SbxClient,
 				config: { ...launchConfig, syncProfile: "mirror" },
 			}),
-			/immutable package source required/,
+			/installed npm lock receipt missing/,
 		);
 		assert.equal(created, 0);
 	} finally {
