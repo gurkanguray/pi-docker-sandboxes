@@ -93,13 +93,13 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Download called-workflow package artifact
         if: github.event_name != 'workflow_dispatch'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ inputs.package_artifact }}
           path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
       - name: Download dispatched package artifact
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ inputs.package_artifact }}
           path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
@@ -107,13 +107,13 @@ jobs:
           run-id: ${{ inputs.run_id }}
       - name: Download called-workflow OCI candidate
         if: github.event_name != 'workflow_dispatch'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ inputs.image_artifact }}
           path: ${{ runner.temp }}/pi-dsbx-e2e-image
       - name: Download dispatched OCI candidate
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: ${{ inputs.image_artifact }}
           path: ${{ runner.temp }}/pi-dsbx-e2e-image
