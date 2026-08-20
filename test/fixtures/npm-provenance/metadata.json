@@ -1,0 +1,17 @@
+{
+  "name": "pi-docker-sandboxes",
+  "version": "1.2.3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gurkanguray/pi-docker-sandboxes.git"
+  },
+  "distTags": {
+    "latest": "1.2.3"
+  },
+  "dist": {
+    "integrity": "sha512-qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg==",
+    "attestations": {
+      "url": "https://registry.npmjs.org/-/npm/v1/attestations/pi-docker-sandboxes@1.2.3"
+    }
+  }
+}

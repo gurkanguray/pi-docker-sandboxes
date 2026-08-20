@@ -1,12 +1,18 @@
 {
-  "packageVersion": "0.1.0",
+  "version": 2,
+  "runtimeSchema": 1,
   "piVersion": "0.84.1",
-  "platform": "linux/arm64",
-  "baseImage": "docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299",
-  "localImage": "docker.io/pi-docker-sandboxes/pi:0.1.0",
-  "tools": {
-    "fdDebianVersion": "10.3.0-2ubuntu1",
-    "rgDebianVersion": "15.1.0-1ubuntu1",
-    "gitDebianVersion": "1:2.53.0-1ubuntu1"
+  "images": {
+    "standard": {
+      "status": "published",
+      "reference": "ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b",
+      "platforms": ["linux/amd64", "linux/arm64"],
+      "privileged": false
+    },
+    "docker": {
+      "status": "unpublished",
+      "platforms": ["linux/amd64", "linux/arm64"],
+      "privileged": true
+    }
   }
 }

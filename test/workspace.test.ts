@@ -11,6 +11,7 @@ import {
 	readdir,
 	realpath,
 	rename,
+	rm,
 	stat,
 	symlink,
 	unlink,
@@ -20,15 +21,18 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { formatError, OperationError } from "../src/errors.ts";
+import { acquireSandboxLease } from "../src/lease.ts";
 import type { SbxClient } from "../src/sbx/client.ts";
 import {
 	applyPatch,
 	assertPatchSize,
 	createEmptyInitialCommit,
+	createOwnedHostStaging,
 	exportPatch,
 	inspectRepository,
 	MAX_PATCH_BYTES,
 	preparePatchDestination,
+	reconcileOwnedHostStaging,
 	readBoundedExact,
 	readStablePatch,
 	loadSandboxState,
@@ -59,15 +63,22 @@ async function repository(): Promise<string> {
 
 async function sandboxState(root: string): Promise<SandboxState> {
 	const repositoryState = await inspectRepository(root);
+	const now = new Date().toISOString();
 	return {
-		version: 1,
+		version: 2,
+		phase: "ready",
 		name: sandboxName(root),
 		hostBaseCommit: repositoryState.head,
 		hostBranch: repositoryState.branch,
 		hostRepoIdentity: repositoryState.identity,
+		hostWorktreeIdentity: root,
 		hostRoot: root,
 		workspaceMode: "clone",
-		createdAt: new Date().toISOString(),
+		createdAt: now,
+		updatedAt: now,
+		runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+		runtimeSchema: 1,
+		packageVersion: "1.0.0",
 	};
 }
 
@@ -91,6 +102,34 @@ const gitInput: GitInputRunner = (cwd, args, stdin) =>
 		);
 		child.stdin?.end(stdin);
 	});
+
+test("repository inspection disables Git optional locks", async () => {
+	const root = await repository();
+	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-git-wrapper-"));
+	const log = join(directory, "optional-locks.log");
+	const wrapper = join(directory, "git");
+	const realGit = (await exec("which", ["git"], { encoding: "utf8" })).stdout.trim();
+	await writeFile(
+		wrapper,
+		`#!/bin/sh\nprintf '%s\\n' "\${GIT_OPTIONAL_LOCKS-unset}" >> "$GIT_ENV_LOG"\nexec "$REAL_GIT" "$@"\n`,
+	);
+	await chmod(wrapper, 0o755);
+	const originalPath = process.env.PATH;
+	let observed = "";
+	try {
+		process.env.PATH = `${directory}:${originalPath}`;
+		process.env.GIT_ENV_LOG = log;
+		process.env.REAL_GIT = realGit;
+		await inspectRepository(root);
+		observed = await readFile(log, "utf8");
+	} finally {
+		process.env.PATH = originalPath;
+		delete process.env.GIT_ENV_LOG;
+		delete process.env.REAL_GIT;
+		await rm(directory, { recursive: true, force: true });
+	}
+	assert.ok(observed.trim().split("\n").every((value) => value === "0"));
+});
 
 test("unborn repositories are identified and can receive an explicit empty commit", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-unborn-"));
@@ -210,6 +249,55 @@ test("repository inspection and names are deterministic", async () => {
 	assert.notEqual(sandboxName(root, true), sandboxName(root, true));
 });
 
+test("linked worktrees keep distinct state and share daemon-global leases", async () => {
+	const root = await repository();
+	const linked = await mkdtemp(join(tmpdir(), "pi-dsbx-linked-state-"));
+	await rm(linked, { recursive: true });
+	await git(root, "worktree", "add", "-b", "linked", linked);
+	const [mainRepository, linkedRepository] = await Promise.all([
+		inspectRepository(root),
+		inspectRepository(linked),
+	]);
+	assert.equal(mainRepository.identity, linkedRepository.identity);
+	assert.equal(mainRepository.commonDir, linkedRepository.commonDir);
+	assert.notEqual(
+		mainRepository.worktreeIdentity,
+		linkedRepository.worktreeIdentity,
+	);
+	const mainState = await sandboxState(root);
+	const linkedState = await sandboxState(linked);
+	await Promise.all([saveSandboxState(mainState), saveSandboxState(linkedState)]);
+	assert.notEqual(
+		statePath(root, mainState.name),
+		statePath(linked, linkedState.name),
+	);
+	assert.equal((await loadSandboxState(root, mainState.name)).hostRoot, root);
+	assert.equal((await loadSandboxState(linked, linkedState.name)).hostRoot, linked);
+	const mainLease = await acquireSandboxLease(root, "shared-name", "run");
+	await assert.rejects(
+		() => acquireSandboxLease(linked, "shared-name", "run"),
+		/busy.*run/i,
+	);
+	await mainLease.release();
+});
+
+test("host staging reconciliation removes only recorded abandoned ownership", async () => {
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-staging-parent-"));
+	const stale = await createOwnedHostStaging(parent, { pid: 1001 });
+	const live = await createOwnedHostStaging(parent, { pid: 1002 });
+	const unowned = join(parent, "pi-docker-sandboxes-unowned");
+	await mkdir(unowned);
+	assert.deepEqual(
+		await reconcileOwnedHostStaging(parent, {
+			processState: (pid) => (pid === 1001 ? "absent" : "present"),
+		}),
+		[stale],
+	);
+	await assert.rejects(lstat(stale), { code: "ENOENT" });
+	assert.equal((await lstat(live)).isDirectory(), true);
+	assert.equal((await lstat(unowned)).isDirectory(), true);
+});
+
 test("repository inspection never executes configured fsmonitor executables", async () => {
 	const root = await repository();
 	const marker = join(root, "fsmonitor-ran");
@@ -264,14 +352,20 @@ test("state writes replace atomically and corrupt state has recovery context", a
 	const repositoryState = await inspectRepository(root);
 	const name = sandboxName(root);
 	const state: SandboxState = {
-		version: 1,
+		version: 2,
+		phase: "ready",
 		name,
 		hostBaseCommit: repositoryState.head,
 		hostBranch: repositoryState.branch,
 		hostRepoIdentity: repositoryState.identity,
+		hostWorktreeIdentity: root,
 		hostRoot: root,
 		workspaceMode: "clone",
 		createdAt: "2026-08-12T00:00:00.000Z",
+		updatedAt: "2026-08-18T00:00:00.000Z",
+		runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+		runtimeSchema: 1,
+		packageVersion: "1.0.0",
 	};
 	await saveSandboxState(state);
 	await saveSandboxState({ ...state, hostBranch: "updated" });
@@ -913,6 +1007,23 @@ test("patch destination detects parent replacement and leaves outside untouched"
 	);
 	assert.deepEqual(await readdir(outside), []);
 	assert.deepEqual(await readdir(moved), []);
+});
+
+test("unsupported patch directory sync fails closed and retains the claimed artifact", async () => {
+	const root = await repository();
+	const path = join(root, "patches", "unsynced.patch");
+	await assert.rejects(
+		() =>
+			preparePatchDestination(root, "patches", "unsynced.patch", {
+				syncDirectory: async () => {
+					throw Object.assign(new Error("unsupported directory sync"), {
+						code: "EINVAL",
+					});
+				},
+			}),
+		/unsupported directory sync/,
+	);
+	assert.equal((await lstat(path)).isFile(), true);
 });
 
 test("failed patch claims are retained rather than removed by pathname", async () => {

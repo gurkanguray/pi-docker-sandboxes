@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { npmCommand } from "../scripts/npm-command.mjs";
 
 const exec = promisify(execFile);
 const script = new URL("../scripts/e2e-receipt.mjs", import.meta.url);
@@ -38,11 +39,11 @@ async function fixture(): Promise<Fixture> {
 		await exec("git", ["rev-parse", "HEAD"], { cwd: root })
 	).stdout.trim();
 	const packed = JSON.parse(
-		(await exec("npm", ["pack", "--json"], { cwd: root })).stdout,
+		(await exec(npmCommand, ["pack", "--json"], { cwd: root })).stdout,
 	)[0];
 	const tarball = join(root, packed.filename);
 	const prefix = join(root, "prefix");
-	await exec("npm", [
+	await exec(npmCommand, [
 		"install",
 		"--ignore-scripts",
 		"--prefix",
@@ -56,6 +57,8 @@ async function runReceipt(
 	fixture: Fixture,
 	overrides: Record<string, string> = {},
 ) {
+	const osName = process.platform === "darwin" ? "macOS" : "ubuntu";
+	const osVersion = process.platform === "darwin" ? "14.0" : "24.04";
 	const values = {
 		"source-sha": fixture.sourceSha,
 		package: fixture.tarball,
@@ -70,11 +73,15 @@ async function runReceipt(
 		"selected-image-id": imageDigest,
 		status: "passed",
 		"tests-count": "1",
-		platform: "darwin",
-		"macos-version": "15.6",
-		architecture: "arm64",
+		"expected-platform": process.platform,
+		"os-name": osName,
+		"os-version": osVersion,
+		"expected-architecture": process.arch,
+		"require-kvm": "false",
+		"docker-version": "29.1.0",
 		"sbx-version": "0.38.0",
 		"pi-version": "0.84.1",
+		"image-lock-pi-version": "0.84.1",
 		receipt: join(fixture.root, "e2e-receipt.json"),
 		...overrides,
 	};
@@ -106,6 +113,21 @@ async function runReceipt(
 
 for (const [name, overrides, message] of [
 	["source SHA", { "source-sha": "deadbeef" }, /source SHA/i],
+	[
+		"measured host",
+		{ "expected-architecture": process.arch === "x64" ? "arm64" : "x64" },
+		/measured host/i,
+	],
+	[
+		"host distro",
+		{ "os-name": process.platform === "darwin" ? "ubuntu" : "debian" },
+		/supported host OS/i,
+	],
+	[
+		"host OS version",
+		{ "os-version": process.platform === "darwin" ? "13.9" : "22.04" },
+		/macOS 14|Ubuntu 24\.04/i,
+	],
 	["package version", { "package-version": "9.9.9" }, /package version/i],
 	[
 		"package integrity",
@@ -121,6 +143,14 @@ for (const [name, overrides, message] of [
 		"selected image inspect ID",
 		{ "selected-image-id": `sha256:${"b".repeat(64)}` },
 		/image digest/i,
+	],
+	["Docker version", { "docker-version": "28.5.0" }, /Docker 29/i],
+	["malformed Docker version", { "docker-version": "release-29" }, /Docker 29/i],
+	["SBX version", { "sbx-version": "0.39.0" }, /SBX 0\.38\.x/i],
+	[
+		"sandbox runtime Pi version",
+		{ "pi-version": "0.84.2" },
+		/sandbox runtime Pi version/i,
 	],
 ] as const) {
 	test(`E2E receipt rejects mismatched ${name}`, async () => {
@@ -147,10 +177,14 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			"imageDigest",
 			"selectedImage",
 			"platform",
-			"macosVersion",
+			"osName",
+			"osVersion",
 			"architecture",
+			"kvm",
+			"dockerVersion",
 			"sbxVersion",
 			"piVersion",
+			"imageLockPiVersion",
 			"packageVersion",
 			"tests",
 			"testsCount",
@@ -162,11 +196,21 @@ test("E2E receipt binds successful tests to source, package, and image evidence"
 			packageIntegrity: value.integrity,
 			imageDigest,
 			selectedImage: `docker.io/example/pi:local-${"a".repeat(64)}`,
-			platform: "darwin",
-			macosVersion: "15.6",
-			architecture: "arm64",
+			platform: process.platform,
+			osName: process.platform === "darwin" ? "macOS" : "ubuntu",
+			osVersion: process.platform === "darwin" ? "14.0" : "24.04",
+			architecture: process.arch,
+			kvm: {
+				required: false,
+				path: null,
+				characterDevice: false,
+				opened: false,
+				openMode: null,
+			},
+			dockerVersion: "29.1.0",
 			sbxVersion: "0.38.0",
 			piVersion: "0.84.1",
+			imageLockPiVersion: "0.84.1",
 			packageVersion: "1.2.3",
 			tests: ["real scenario"],
 			testsCount: 1,
@@ -208,12 +252,16 @@ test("failed E2E receipt exists when candidate evidence is unavailable", async (
 			"installed-package": "",
 			"selected-image": "",
 			"selected-image-id": "",
+			"pi-version": "",
+			"image-lock-pi-version": "",
 		});
 		assert.equal(result.code, 0, result.stderr);
 		const receipt = JSON.parse(await readFile(result.receipt, "utf8"));
 		assert.equal(receipt.packageIntegrity, null);
 		assert.equal(receipt.packageVersion, null);
 		assert.equal(receipt.selectedImage, null);
+		assert.equal(receipt.piVersion, null);
+		assert.equal(receipt.imageLockPiVersion, null);
 		assert.equal(receipt.status, "failed");
 		assert.equal(receipt.passedAt, null);
 	} finally {

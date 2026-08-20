@@ -1,33 +1,49 @@
-import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import type { RuntimePlatform } from "./platform.ts";
 
-export interface ImageLock {
-	packageVersion: string;
+export type DigestReference = `${string}@sha256:${string}`;
+
+type RuntimeImageFields = {
+	platforms: readonly ["linux/amd64", "linux/arm64"];
+	privileged: boolean;
+};
+
+export type LockedRuntimeImage =
+	| (RuntimeImageFields & { status: "unpublished" })
+	| (RuntimeImageFields & {
+			status: "published";
+			reference: DigestReference;
+	  });
+
+export type PublishedRuntimeImage = Extract<
+	LockedRuntimeImage,
+	{ status: "published" }
+>;
+
+export interface RuntimeImageLock {
+	version: 2;
+	runtimeSchema: 1;
 	piVersion: string;
-	platform: "linux/arm64";
-	baseImage: string;
-	localImage: string;
-	tools: {
-		fdDebianVersion: string;
-		rgDebianVersion: string;
-		gitDebianVersion: string;
+	images: {
+		standard: LockedRuntimeImage;
+		docker: LockedRuntimeImage;
 	};
 }
 
 const LOCK_URL = new URL("../docker/image-lock.json", import.meta.url);
 const LOCK_FIELDS = new Set([
-	"packageVersion",
+	"version",
+	"runtimeSchema",
 	"piVersion",
-	"platform",
-	"baseImage",
-	"localImage",
-	"tools",
+	"images",
 ]);
-const TOOL_FIELDS = new Set([
-	"fdDebianVersion",
-	"rgDebianVersion",
-	"gitDebianVersion",
+const IMAGE_FIELDS = new Set([
+	"status",
+	"reference",
+	"platforms",
+	"privileged",
 ]);
 const SEMVER_LIKE =
 	/^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
@@ -62,65 +78,101 @@ function version(value: unknown, field: string): string {
 	return parsed;
 }
 
-function debianVersion(value: unknown, field: string): string {
-	const parsed = requiredString(value, field);
-	if (!/^\d[0-9A-Za-z.+:~-]*$/.test(parsed))
-		throw new TypeError(`${field} must be an exact Debian package version`);
-	return parsed;
-}
-
-export function assertDigestReference(value: string, field: string): string {
+export function assertDigestReference(
+	value: string,
+	field: string,
+): DigestReference {
 	if (!/^[^\s@]+@sha256:[0-9a-f]{64}$/.test(value))
 		throw new TypeError(
 			`${field} must be an immutable sha256 digest reference`,
 		);
-	return value;
+	return value as DigestReference;
 }
 
-export function parseImageLock(value: unknown): ImageLock {
+function parseRuntimeImage(
+	value: unknown,
+	variant: "standard" | "docker",
+): LockedRuntimeImage {
+	const field = `images.${variant}`;
+	const image = object(value, field);
+	rejectUnknown(image, IMAGE_FIELDS, field);
+	if (
+		!Array.isArray(image.platforms) ||
+		image.platforms.length !== 2 ||
+		image.platforms[0] !== "linux/amd64" ||
+		image.platforms[1] !== "linux/arm64"
+	)
+		throw new TypeError(
+			`${field}.platforms must be exactly linux/amd64, linux/arm64`,
+		);
+	const expectedPrivilege = variant === "docker";
+	if (image.privileged !== expectedPrivilege)
+		throw new TypeError(
+			`${field}.privileged must be exactly ${String(expectedPrivilege)}`,
+		);
+	const fields: RuntimeImageFields = {
+		platforms: ["linux/amd64", "linux/arm64"],
+		privileged: expectedPrivilege,
+	};
+	if (image.status === "unpublished") {
+		if (image.reference !== undefined)
+			throw new TypeError(`${field}.reference is forbidden while unpublished`);
+		return { status: "unpublished", ...fields };
+	}
+	if (image.status === "published")
+		return {
+			status: "published",
+			reference: assertDigestReference(
+				requiredString(image.reference, `${field}.reference`),
+				`${field}.reference`,
+			),
+			...fields,
+		};
+	throw new TypeError(`${field}.status is unsupported`);
+}
+
+export function parseImageLock(value: unknown): RuntimeImageLock {
 	const lock = object(value, "image lock");
 	rejectUnknown(lock, LOCK_FIELDS, "image lock");
-	const baseImage = assertDigestReference(
-		requiredString(lock.baseImage, "baseImage"),
-		"baseImage",
-	);
-	const packageVersion = version(lock.packageVersion, "packageVersion");
-	const piVersion = version(lock.piVersion, "piVersion");
-	if (lock.platform !== "linux/arm64")
-		throw new TypeError("platform must be exactly linux/arm64");
-	const localImage = requiredString(lock.localImage, "localImage");
-	if (localImage !== `docker.io/pi-docker-sandboxes/pi:${packageVersion}`)
-		throw new TypeError(
-			"localImage must be the package-versioned local build tag; resolve its RepoDigest before selection",
-		);
-	const tools = object(lock.tools, "tools");
-	rejectUnknown(tools, TOOL_FIELDS, "tools");
+	if (lock.version !== 2) throw new TypeError("image lock.version must be 2");
+	if (lock.runtimeSchema !== 1)
+		throw new TypeError("image lock.runtimeSchema must be 1");
+	const images = object(lock.images, "images");
+	rejectUnknown(images, new Set(["standard", "docker"]), "images");
 	return {
-		packageVersion,
-		piVersion,
-		platform: "linux/arm64",
-		baseImage,
-		localImage,
-		tools: {
-			fdDebianVersion: debianVersion(
-				tools.fdDebianVersion,
-				"tools.fdDebianVersion",
-			),
-			rgDebianVersion: debianVersion(
-				tools.rgDebianVersion,
-				"tools.rgDebianVersion",
-			),
-			gitDebianVersion: debianVersion(
-				tools.gitDebianVersion,
-				"tools.gitDebianVersion",
-			),
+		version: 2,
+		runtimeSchema: 1,
+		piVersion: version(lock.piVersion, "piVersion"),
+		images: {
+			standard: parseRuntimeImage(images.standard, "standard"),
+			docker: parseRuntimeImage(images.docker, "docker"),
 		},
 	};
 }
 
+export function selectRuntimeImage(
+	lock: RuntimeImageLock,
+	dockerEngine: boolean,
+	runtimePlatform: RuntimePlatform,
+): PublishedRuntimeImage {
+	if (dockerEngine)
+		throw new Error(
+			"private Docker engine is unavailable in production 1.0 until a verified runtime is published",
+		);
+	const variant = "standard";
+	const image = lock.images[variant];
+	if (image.status === "unpublished")
+		throw new Error(`production runtime image ${variant} is unpublished`);
+	if (!image.platforms.includes(runtimePlatform))
+		throw new Error(
+			`production runtime image ${variant} does not support ${runtimePlatform}`,
+		);
+	return image;
+}
+
 export async function loadImageLock(
 	path = fileURLToPath(LOCK_URL),
-): Promise<ImageLock> {
+): Promise<RuntimeImageLock> {
 	return parseImageLock(JSON.parse(await readFile(path, "utf8")));
 }
 

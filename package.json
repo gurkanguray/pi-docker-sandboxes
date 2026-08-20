@@ -1,6 +1,6 @@
 {
   "name": "pi-docker-sandboxes",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Run Pi inside a Docker Sandboxes microVM",
   "type": "module",
   "bin": {
@@ -17,7 +17,7 @@
   "author": "Guray Gurkan",
   "packageManager": "npm@11.6.2",
   "engines": {
-    "node": ">=24.12.0 <25"
+    "node": "^22.19.0 || ^24.12.0"
   },
   "license": "MIT",
   "keywords": [
@@ -36,30 +36,30 @@
   },
   "scripts": {
     "build:cli": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; rm -rf dist && tsc --project tsconfig.cli.json",
-    "prepack": "if [ -f .source-checkout ]; then npm run build:cli; fi",
+    "prepack": "node scripts/prepack.mjs",
     "typecheck": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; tsc --noEmit",
     "test": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/*.test.ts",
+    "test:cli-matrix": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/cli-matrix.test.ts",
+    "test:coverage": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-coverage.mjs",
     "test:e2e": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; PI_DOCKER_SANDBOX_E2E=1 node --experimental-strip-types --test test/e2e.test.ts",
     "test:e2e-receipt": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/e2e-receipt.test.ts",
     "docs:dev": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress docs",
     "docs:build": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; vitepress build docs",
     "check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; npm run typecheck && npm test",
-    "image:build": "if [ -f .source-checkout ]; then npm run build:cli; fi; node bin/pi-dsbx.mjs image build",
-    "image:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-image.mjs",
     "release:check": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-release.mjs",
     "package:verify": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/verify-package.mjs",
     "smoke:fresh-install": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/fresh-install-smoke.mjs",
     "pack:dry": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": ">=0.84.1 <0.85.0",
+    "@earendil-works/pi-agent-core": ">=0.84.1 <0.85.0",
     "@earendil-works/pi-coding-agent": ">=0.84.1 <0.85.0",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-tui": ">=0.84.1 <0.85.0",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "@types/node": "24.13.3",
     "ajv": "8.20.0",
     "typescript": "7.0.2",
@@ -74,6 +74,7 @@
     "dist/",
     "docker/",
     "extensions/",
+    "runtime/",
     "src/",
     "docs/*.md",
     "README.md",

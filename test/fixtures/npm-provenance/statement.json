@@ -1,0 +1,32 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "pkg:npm/pi-docker-sandboxes@1.2.3",
+      "digest": {
+        "sha512": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1",
+      "externalParameters": {
+        "workflow": {
+          "repository": "https://github.com/gurkanguray/pi-docker-sandboxes",
+          "path": ".github/workflows/release-candidate.yml",
+          "ref": "refs/tags/v1.2.3"
+        }
+      },
+      "resolvedDependencies": [
+        {
+          "uri": "git+https://github.com/gurkanguray/pi-docker-sandboxes@refs/tags/v1.2.3",
+          "digest": {
+            "gitCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      ]
+    }
+  }
+}

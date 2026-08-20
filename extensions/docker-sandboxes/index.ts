@@ -43,6 +43,7 @@ async function runLauncher(args: string[]): Promise<number> {
 export default async function dockerSandboxesExtension(
 	pi: ExtensionAPI,
 ): Promise<void> {
+	if (await attestSandbox()) return;
 	pi.registerFlag("docker-sandbox", {
 		description: "Run Pi inside Docker Sandboxes",
 		type: "boolean",
@@ -85,11 +86,7 @@ export default async function dockerSandboxesExtension(
 		default: false,
 	});
 
-	const sandboxAttested = await attestSandbox();
-	const reexec = reexecArgumentsForSandbox(
-		sandboxAttested,
-		process.argv.slice(2),
-	);
+	const reexec = reexecArgumentsForSandbox(false, process.argv.slice(2));
 	if (reexec) process.exit(await runLauncher(reexec.launcherArgs));
 
 	pi.registerCommand("docker-sandbox", {
@@ -102,15 +99,11 @@ export default async function dockerSandboxesExtension(
 			const [command = "status"] = args.trim().split(/\s+/).filter(Boolean);
 			try {
 				if (command === "status") {
-					ctx.ui.notify(sandboxStatus(sandboxAttested), "info");
+					ctx.ui.notify(sandboxStatus(false), "info");
 					return;
 				}
 				if (command === "doctor") {
-					const results = await runDoctor(
-						sandboxAttested,
-						new SbxClient(),
-						ctx.cwd,
-					);
+					const results = await runDoctor(false, new SbxClient(), ctx.cwd);
 					ctx.ui.notify(
 						formatDoctor(results),
 						results.some((result) => result.level === "fail")
@@ -120,8 +113,6 @@ export default async function dockerSandboxesExtension(
 					return;
 				}
 				if (command === "config") {
-					if (sandboxAttested)
-						throw new Error("Run pi-dsbx config on the host");
 					const config = await loadConfig(ctx.cwd, {
 						projectTrusted: ctx.isProjectTrusted(),
 						configDir: CONFIG_DIR_NAME,
@@ -134,10 +125,5 @@ export default async function dockerSandboxesExtension(
 				ctx.ui.notify(formatError(error), "error");
 			}
 		},
-	});
-
-	pi.on("session_start", (_event, ctx) => {
-		if (sandboxAttested)
-			ctx.ui.setStatus("docker-sandboxes", sandboxStatus(sandboxAttested));
 	});
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import test from "node:test";
 import {
 	access,
@@ -20,16 +21,27 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
 	createPersonalizationSnapshot,
+	fetchVerifiedNpmPackage,
 	hashTree,
 	MAX_RESOURCE_FILE_BYTES,
+	resolvePackageLocks,
 	resolvePackageSpecs,
 	sanitizeModels,
 	sanitizeSettings,
 	scanResourceContent,
 	syncOptions,
 } from "../src/personalization.ts";
+import { CommandTimeoutError } from "../src/sbx/supervisor.ts";
 
 const exec = promisify(execFile);
+const packageTarball = Buffer.from("verified npm tarball fixture");
+const packageIntegrity = `sha512-${createHash("sha512").update(packageTarball).digest("base64")}`;
+const packageCommit = "a".repeat(40);
+const lockedNpm = (name: string) => ({
+	source: `npm:${name}@1.0.0`,
+	integrity: packageIntegrity,
+});
+const lockedGit = (source: string) => `${source}@${packageCommit}`;
 
 const resourcePolicy = {
 	settings: false,
@@ -83,6 +95,395 @@ async function createNativePackage(
 	);
 	return packageRoot;
 }
+
+test("model metadata is a strict allowlist for arbitrary opaque properties", () => {
+	for (let index = 0; index < 50; index++) {
+		const key = `unknown_${randomBytes(8).toString("hex")}`;
+		const secret = randomBytes(48).toString("base64url");
+		const result = sanitizeModels({
+			providers: {
+				test: {
+					name: "Test provider",
+					baseUrl: "https://api.example.com/v1",
+					models: [{ id: "safe-model", name: "Safe model", [key]: secret }],
+					[key]: secret,
+					headers: { Authorization: secret },
+					cookies: secret,
+					certificate: secret,
+					env: { SECRET: secret },
+				},
+			},
+		});
+		const serialized = JSON.stringify(result);
+		assert.equal(serialized.includes(secret), false);
+		assert.equal(serialized.includes(key), false);
+	}
+});
+
+test("npm lock receipts reject conflicting duplicates", () => {
+	const source = "npm:example@1.2.3";
+	assert.throws(
+		() =>
+			resolvePackageLocks([
+				{ source, integrity: packageIntegrity },
+				{
+					source,
+					integrity: `sha512-${Buffer.alloc(64, 9).toString("base64")}`,
+				},
+			]),
+		/conflicting integrity receipts/,
+	);
+});
+
+test("npm fetch binds declared SRI to downloaded tarball bytes", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-npm-fetch-"));
+	const lock = { ...lockedNpm("example"), kind: "npm" as const };
+	let policy: { timeoutMs: number; killGraceMs: number } | undefined;
+	let invocation: { command: string; args: readonly string[] } | undefined;
+	const run = async (
+		command: string,
+		args: readonly string[],
+		options: { policy: { timeoutMs: number; killGraceMs: number } },
+	) => {
+		policy = options.policy;
+		invocation = { command, args };
+		await writeFile(join(root, "example.tgz"), packageTarball);
+		return {
+			stdout: Buffer.from(JSON.stringify([{ filename: "example.tgz" }])),
+			stderr: Buffer.alloc(0),
+			code: 0,
+		};
+	};
+	assert.equal(
+		await fetchVerifiedNpmPackage(lock, root, run),
+		join(root, "example.tgz"),
+	);
+	assert.deepEqual(invocation, {
+		command: "npm",
+		args: [
+			"pack",
+			"example@1.0.0",
+			"--pack-destination",
+			root,
+			"--json",
+			"--ignore-scripts",
+		],
+	});
+	assert.ok(policy && policy.timeoutMs > 0 && policy.timeoutMs <= 120_000);
+	assert.ok(policy && policy.killGraceMs > 0);
+	await rm(root, { recursive: true, force: true });
+});
+
+test("npm fetch rejects wrong digest, registry failure, malformed response, and timeout", async () => {
+	for (const failure of [
+		"digest",
+		"registry",
+		"response",
+		"timeout",
+	] as const) {
+		const root = await mkdtemp(join(tmpdir(), `pi-dsbx-npm-${failure}-`));
+		const run = async () => {
+			if (failure === "timeout") throw new CommandTimeoutError("npm", 10);
+			if (failure === "registry")
+				return {
+					stdout: Buffer.alloc(0),
+					stderr: Buffer.from("registry refused"),
+					code: 1,
+				};
+			await writeFile(join(root, "example.tgz"), packageTarball);
+			return {
+				stdout: Buffer.from(
+					failure === "response"
+						? "not-json"
+						: JSON.stringify([{ filename: "example.tgz" }]),
+				),
+				stderr: Buffer.alloc(0),
+				code: 0,
+			};
+		};
+		const lock =
+			failure === "digest"
+				? {
+						source: "npm:example@1.0.0",
+						kind: "npm" as const,
+						integrity: `sha512-${Buffer.alloc(64, 9).toString("base64")}`,
+					}
+				: { ...lockedNpm("example"), kind: "npm" as const };
+		await assert.rejects(
+			fetchVerifiedNpmPackage(lock, root, run),
+			failure === "digest"
+				? /integrity/i
+				: failure === "timeout"
+					? /timed out/i
+					: /npm package fetch/i,
+		);
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("mirror pins ordinary installed npm and Git packages", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-installed-locks-"));
+	const agent = join(root, "agent");
+	const checkout = join(agent, "git", "github.com", "owner", "repo");
+	await mkdir(join(agent, "npm", "node_modules", "example"), {
+		recursive: true,
+	});
+	await mkdir(checkout, { recursive: true });
+	await writeFile(
+		join(agent, "npm", "node_modules", "example", "package.json"),
+		JSON.stringify({ name: "example", version: "1.2.3" }),
+	);
+	await writeFile(
+		join(agent, "npm", "package-lock.json"),
+		JSON.stringify({
+			lockfileVersion: 3,
+			packages: {
+				"node_modules/example": {
+					version: "1.2.3",
+					integrity: packageIntegrity,
+				},
+			},
+		}),
+	);
+	await exec("git", ["init", checkout]);
+	await writeFile(join(checkout, "README.md"), "fixture\n");
+	await exec("git", ["-C", checkout, "add", "README.md"]);
+	await exec("git", [
+		"-C",
+		checkout,
+		"-c",
+		"user.name=Test",
+		"-c",
+		"user.email=test@example.com",
+		"commit",
+		"-m",
+		"fixture",
+	]);
+	const commit = (
+		await exec("git", ["-C", checkout, "rev-parse", "HEAD"])
+	).stdout.trim();
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({
+			packages: [
+				"npm:example",
+				"git:github.com/owner/repo",
+				"git:https://github.com/owner/repo.git",
+				"git:git@github.com:owner/repo.git",
+			],
+		}),
+	);
+
+	const snapshot = await createPersonalizationSnapshot(
+		agent,
+		join(root, "snapshot"),
+		"mirror",
+		undefined,
+		{ deferAllPackages: true },
+	);
+
+	assert.deepEqual(snapshot.packageLocks, [
+		{
+			source: "npm:example@1.2.3",
+			kind: "npm",
+			integrity: packageIntegrity,
+		},
+		{
+			source: `git:github.com/owner/repo@${commit}`,
+			kind: "git",
+			commit,
+		},
+		{
+			source: `git:https://github.com/owner/repo.git@${commit}`,
+			kind: "git",
+			commit,
+		},
+		{
+			source: `git:git@github.com:owner/repo.git@${commit}`,
+			kind: "git",
+			commit,
+		},
+	]);
+	assert.deepEqual(
+		snapshot.packageSpecs,
+		snapshot.packageLocks.map((entry) => entry.source),
+	);
+	await rm(root, { recursive: true, force: true });
+});
+
+test("mirror rejects npm receipts that disagree with requested or installed versions", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-mismatched-lock-"));
+	const agent = join(root, "agent");
+	const destination = join(root, "snapshot");
+	await mkdir(join(agent, "npm", "node_modules", "example"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(agent, "npm", "package-lock.json"),
+		JSON.stringify({
+			packages: {
+				"node_modules/example": {
+					version: "1.2.3",
+					integrity: packageIntegrity,
+				},
+			},
+		}),
+	);
+	await writeFile(
+		join(agent, "npm", "node_modules", "example", "package.json"),
+		JSON.stringify({ name: "example", version: "9.9.9" }),
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({ packages: ["npm:example@2.0.0"] }),
+	);
+	await assert.rejects(
+		createPersonalizationSnapshot(
+			agent,
+			join(root, "version-snapshot"),
+			"mirror",
+			undefined,
+			{ deferAllPackages: true },
+		),
+		/installed npm version mismatch/,
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({ packages: ["npm:example"] }),
+	);
+	await assert.rejects(
+		createPersonalizationSnapshot(agent, destination, "mirror", undefined, {
+			deferAllPackages: true,
+		}),
+		/installed npm package mismatch/,
+	);
+	assert.equal(await exists(destination), false);
+	await rm(root, { recursive: true, force: true });
+});
+
+test("package mirroring accepts only immutable receipt-bearing specs", () => {
+	const integrity = `sha512-${Buffer.alloc(64, 7).toString("base64")}`;
+	const commit = "a".repeat(40);
+	assert.deepEqual(
+		resolvePackageLocks([
+			{ source: "npm:@scope/name@1.2.3", integrity },
+			`git:github.com/owner/repo@${commit}`,
+		]).value,
+		[
+			{
+				source: "npm:@scope/name@1.2.3",
+				kind: "npm",
+				integrity,
+			},
+			{
+				source: `git:github.com/owner/repo@${commit}`,
+				kind: "git",
+				commit,
+			},
+		],
+	);
+	for (const source of [
+		"npm:name",
+		"npm:name@^1.2.3",
+		"npm:name@1.x",
+		"npm:name@latest",
+		"git:github.com/owner/repo",
+		"git:github.com/owner/repo@main",
+	])
+		assert.throws(() => resolvePackageLocks([source]), /immutable package/i);
+	assert.throws(
+		() => resolvePackageLocks([{ source: "npm:name@1.2.3" }]),
+		/sha512 integrity/i,
+	);
+});
+
+test("dynamic provider and override keys reject unsafe object names and Unicode", () => {
+	const unsafe = [
+		"__proto__",
+		"prototype",
+		"constructor",
+		"white space",
+		"line\nbreak",
+		"provider\0id",
+		"provider💥",
+	];
+	for (const key of unsafe) {
+		assert.throws(
+			() =>
+				sanitizeModels({
+					providers: Object.fromEntries([[key, { models: [{ id: "safe" }] }]]),
+				}),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+		assert.throws(
+			() =>
+				sanitizeModels({
+					providers: {
+						safe: {
+							modelOverrides: Object.fromEntries([[key, { name: "safe" }]]),
+						},
+					},
+				}),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+		assert.throws(
+			() =>
+				sanitizeModels(Object.fromEntries([[key, { models: [] }]]), "store"),
+			/unsafe dynamic model metadata key/,
+			key,
+		);
+	}
+});
+
+test("model URLs accept only canonical public HTTPS destinations", () => {
+	const accepted = sanitizeModels({
+		providers: {
+			safe: { baseUrl: "HTTPS://API.Example.COM:443/v1/../v2" },
+		},
+	});
+	assert.equal(
+		(accepted.value.providers as any).safe.baseUrl,
+		"https://api.example.com/v2",
+	);
+	for (const baseUrl of [
+		"http://api.example.com/v1",
+		"https://user:password@api.example.com/v1",
+		"https://api.example.com/%0aheader",
+		"https://api.example.com\\@evil.example/v1",
+		"https://127.0.0.1/v1",
+		"https://0x7f.1/v1",
+		"https://localhost/v1",
+		"https://service.internal/v1",
+		" https://api.example.com/v1",
+		"https://api.example.com/v1\n",
+		"ftp://api.example.com/v1",
+	]) {
+		const result = sanitizeModels({ providers: { unsafe: { baseUrl } } });
+		assert.equal(
+			(result.value.providers as any).unsafe.baseUrl,
+			undefined,
+			baseUrl,
+		);
+	}
+});
+
+test("cost tiers are bounded and never recurse into nested tiers", () => {
+	let nested: Record<string, unknown> = { input: 1 };
+	for (let depth = 0; depth < 20_000; depth++) nested = { tiers: [nested] };
+	const result = sanitizeModels({
+		providers: {
+			safe: {
+				models: [{ id: "safe", cost: { input: 1, tiers: [nested] } }],
+			},
+		},
+	});
+	assert.deepEqual((result.value.providers as any).safe.models[0].cost, {
+		input: 1,
+		tiers: [{}],
+	});
+});
 
 test("npm and git package specs cross the platform boundary", () => {
 	const result = resolvePackageSpecs([
@@ -305,7 +706,10 @@ test("git package specs fail closed against Pi's parser without echoing rejectio
 	const piPackage = JSON.parse(
 		await readFile(new URL("../package.json", piIndex), "utf8"),
 	) as { version?: string };
-	assert.equal(piPackage.version, "0.84.1");
+	assert.equal(
+		piPackage.version,
+		process.env.PI_TEST_VERSION ?? "0.84.2",
+	);
 	type ParsedGit = {
 		type: string;
 		host: string;
@@ -336,7 +740,7 @@ test("snapshot collapses settings-key and host-path skips", async () => {
 			theme: "dark",
 			subagents: {},
 			lastChangelogVersion: "1",
-			packages: ["npm:pi-subagents", "../../host-project/local-package"],
+			packages: [lockedNpm("pi-subagents"), "../../host-project/local-package"],
 		}),
 	);
 	const snapshot = await createPersonalizationSnapshot(
@@ -431,9 +835,9 @@ test("mirror skips native npm packages and copies their skills", async () => {
 		JSON.stringify({
 			theme: "dark",
 			packages: [
-				"npm:context-mode",
-				"npm:pi-subagents",
-				"git:github.com/obra/superpowers",
+				lockedNpm("context-mode"),
+				lockedNpm("pi-subagents"),
+				lockedGit("git:github.com/obra/superpowers"),
 			],
 		}),
 	);
@@ -446,8 +850,8 @@ test("mirror skips native npm packages and copies their skills", async () => {
 		await readFile(join(destination, "settings.json"), "utf8"),
 	);
 	assert.deepEqual(settings.packages, [
-		"npm:pi-subagents",
-		"git:github.com/obra/superpowers",
+		"npm:pi-subagents@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
 	]);
 	assert.equal(settings.theme, "dark");
 	assert.equal(
@@ -503,7 +907,7 @@ test("mirror merges ordinary host skills with native fallback skills", async () 
 	);
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: ["npm:context-mode"] }),
+		JSON.stringify({ packages: [lockedNpm("context-mode")] }),
 	);
 
 	await createPersonalizationSnapshot(agent, destination, "mirror");
@@ -556,7 +960,7 @@ test("native fallback skill collisions fail closed", async () => {
 	await writeFile(
 		join(agent, "settings.json"),
 		JSON.stringify({
-			packages: ["npm:first-native", "npm:second-native"],
+			packages: [lockedNpm("first-native"), lockedNpm("second-native")],
 		}),
 	);
 
@@ -586,7 +990,7 @@ test("native fallback skill symlinks fail closed", async () => {
 		}
 		await writeFile(
 			join(agent, "settings.json"),
-			JSON.stringify({ packages: ["npm:linked-native"] }),
+			JSON.stringify({ packages: [lockedNpm("linked-native")] }),
 		);
 
 		await assert.rejects(
@@ -605,7 +1009,7 @@ test("native fallback skills root must be a directory", async () => {
 	await writeFile(join(packageRoot, "skills"), "not a directory\n");
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: ["npm:file-skills-native"] }),
+		JSON.stringify({ packages: [lockedNpm("file-skills-native")] }),
 	);
 
 	await assert.rejects(
@@ -624,7 +1028,7 @@ test("native package without fallback skills remains allowed", async () => {
 		join(agent, "settings.json"),
 		JSON.stringify({
 			theme: "dark",
-			packages: ["npm:no-skills-native"],
+			packages: [lockedNpm("no-skills-native")],
 		}),
 	);
 
@@ -633,7 +1037,7 @@ test("native package without fallback skills remains allowed", async () => {
 		join(root, "snapshot"),
 		"mirror",
 	);
-	assert.deepEqual(snapshot.nativePackages, ["npm:no-skills-native"]);
+	assert.deepEqual(snapshot.nativePackages, ["npm:no-skills-native@1.0.0"]);
 	assert.equal(await exists(join(root, "snapshot", "skills")), false);
 	await rm(root, { recursive: true, force: true });
 });
@@ -670,9 +1074,9 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
-				"git:github.com/obra/superpowers",
-				"npm:pi-subagents",
+				lockedNpm("context-mode"),
+				lockedGit("git:github.com/obra/superpowers"),
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -687,11 +1091,11 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 		await readFile(join(destination, "settings.json"), "utf8"),
 	);
 	assert.deepEqual(settings.packages, [
-		"npm:context-mode",
-		"git:github.com/obra/superpowers",
-		"npm:pi-subagents",
+		"npm:context-mode@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
+		"npm:pi-subagents@1.0.0",
 	]);
-	assert.deepEqual(snapshot.nativePackages, ["npm:context-mode"]);
+	assert.deepEqual(snapshot.nativePackages, ["npm:context-mode@1.0.0"]);
 	assert.equal(
 		snapshot.warnings.some((warning) => /context-mode.*native/.test(warning)),
 		false,
@@ -709,11 +1113,11 @@ test("mirror keeps approved natives or defers them with fallback skills", async 
 	);
 	assert.equal(deferredSettings.packages, undefined);
 	assert.deepEqual(deferred.packageSpecs, [
-		"npm:context-mode",
-		"git:github.com/obra/superpowers",
-		"npm:pi-subagents",
+		"npm:context-mode@1.0.0",
+		lockedGit("git:github.com/obra/superpowers"),
+		"npm:pi-subagents@1.0.0",
 	]);
-	assert.deepEqual(deferred.nativePackages, ["npm:context-mode"]);
+	assert.deepEqual(deferred.nativePackages, ["npm:context-mode@1.0.0"]);
 	assert.equal(
 		deferred.warnings.some((warning) => /native packages/.test(warning)),
 		false,
@@ -872,7 +1276,7 @@ test("settings keep only enabledModels whose provider exists in sbx", () => {
 	assert.equal(result.value.defaultModel, "gpt-5.6-sol");
 });
 
-test("models sanitizer handles normalized credentials without overbroad token rejection", () => {
+test("models sanitizer drops credentials, headers, environment references, and unknown fields", () => {
 	const credentialKeys = [
 		"clientSecret",
 		"secret_access_key",
@@ -941,14 +1345,10 @@ test("models sanitizer handles normalized credentials without overbroad token re
 	assert.equal(serialized.includes("ghp_1234567890abcdef"), false);
 	assert.deepEqual((result.value.providers as any).safe, {
 		baseUrl: "https://api.example.com/v1",
-		...environmentCredentials,
 		maxTokens: 100,
-		inputTokens: 20,
-		outputTokens: 80,
-		tokenBudget: 100,
 		models: [{ id: "m" }],
 	});
-	assert.equal((result.value.providers as any).headers.headers["x-safe"], "ok");
+	assert.deepEqual((result.value.providers as any).headers, {});
 	assert.ok(result.warnings.every((warning) => !warning.includes(fake)));
 });
 
@@ -1130,7 +1530,6 @@ test("models-store sync sanitizes nested credentials and preserves catalog metad
 					id: "grok-4.6",
 					name: "Grok 4.6",
 					contextWindow: 128_000,
-					metadata: {},
 				},
 			],
 		},
@@ -1140,8 +1539,8 @@ test("models-store sync sanitizes nested credentials and preserves catalog metad
 		assert.ok(snapshot.warnings.every((warning) => !warning.includes(secret)));
 	}
 	assert.ok(
-		snapshot.warnings.some((warning) =>
-		warning.includes("credential-bearing URL not imported"),
+		snapshot.warnings.includes(
+			"model metadata outside the production allowlist was not imported",
 		),
 	);
 	await rm(root, { recursive: true, force: true });
@@ -1267,8 +1666,14 @@ test("extension sync skips runtime state that Pi cannot auto-discover", async ()
 	const log = join(runtimeState, "logs", "permission-review.jsonl");
 	await writeFile(log, "x");
 	await truncate(log, MAX_RESOURCE_FILE_BYTES + 1);
-	await writeFile(join(validExtension, "index.ts"), "export default () => {};\n");
-	await writeFile(join(extensions, "top-level.js"), "export default () => {};\n");
+	await writeFile(
+		join(validExtension, "index.ts"),
+		"export default () => {};\n",
+	);
+	await writeFile(
+		join(extensions, "top-level.js"),
+		"export default () => {};\n",
+	);
 	await writeFile(
 		join(packagedExtension, "package.json"),
 		JSON.stringify({ pi: { extensions: ["src/index.ts"] } }),
@@ -1310,7 +1715,10 @@ test("extension sync skips runtime state that Pi cannot auto-discover", async ()
 		false,
 	);
 	assert.equal(
-		await readFile(join(root, "snapshot", "extensions", "valid", "index.ts"), "utf8"),
+		await readFile(
+			join(root, "snapshot", "extensions", "valid", "index.ts"),
+			"utf8",
+		),
 		"export default () => {};\n",
 	);
 	assert.equal(
@@ -1394,10 +1802,7 @@ test("extension sync rejects entrypoints removed after classification", async ()
 							| "afterExtensionClassification",
 						path: string,
 					) => {
-						if (
-							boundary === "afterExtensionClassification" &&
-							path === "raced"
-						)
+						if (boundary === "afterExtensionClassification" && path === "raced")
 							await rm(join(extension, "index.ts"));
 					},
 				},

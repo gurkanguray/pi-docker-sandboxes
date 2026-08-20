@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
 	chmod,
+	mkdir,
 	mkdtemp,
 	readFile,
 	realpath,
+	rm,
 	symlink,
 	writeFile,
 	access,
@@ -16,21 +18,146 @@ import { promisify } from "node:util";
 import {
 	createLaunchReporter,
 	createPausedConfirm,
+	launchProcessExitCode,
 	main,
+	run,
 } from "../src/cli.ts";
+import { LauncherExitCode } from "../src/exit-codes.ts";
+import { IMAGE_LOCK } from "../src/image-lock.ts";
 import {
+	acquireSandboxLease,
+	LEASE_BUSY_EXIT_CODE,
+	SandboxLeaseBusyError,
+} from "../src/lease.ts";
+import { sessionBackupRoot } from "../src/sessions.ts";
+import {
+	createOwnedHostStaging,
 	inspectRepository,
+	loadSandboxState,
 	sandboxName,
 	saveSandboxState,
 	statePath,
+	type SandboxPhase,
 } from "../src/workspace.ts";
 
 const exec = promisify(execFile);
 const cli = new URL("../src/cli.ts", import.meta.url).pathname;
 
+const fixtureImage = `example.invalid/runtime@sha256:${"a".repeat(64)}`;
+
+test("all mutating commands certify the host before mutation", async () => {
+	for (const argv of [
+		["run"],
+		["unlock", "--name", "fixture", "--yes"],
+		["sessions", "restore", "backup", "--name", "fixture"],
+		["sessions", "delete", "backup", "--name", "fixture", "--yes"],
+		["export", "--name", "fixture"],
+		["apply", "change.patch", "--name", "fixture", "--yes"],
+		["destroy", "--name", "fixture", "--yes"],
+	]) {
+		let certifications = 0;
+		let inspected = false;
+		let launched = false;
+		await assert.rejects(
+			() =>
+				main(argv, {
+					certifyHost: async () => {
+						certifications++;
+						throw new Error("unsupported host fixture");
+					},
+					launch: async () => {
+						launched = true;
+						assert.fail("launch must not run before host certification");
+					},
+					inspectRepository: async () => {
+						inspected = true;
+						assert.fail("repository inspection must follow host certification");
+					},
+				}),
+			/unsupported host fixture/,
+			argv.join(" "),
+		);
+		assert.equal(certifications, 1, argv.join(" "));
+		assert.equal(inspected, false, argv.join(" "));
+		assert.equal(launched, false, argv.join(" "));
+	}
+});
+
+test("observational session listing remains available without cleanup", async (t) => {
+	let certifications = 0;
+	const parent = await mkdtemp(join(tmpdir(), "pi-dsbx-sessions-tmp-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = parent;
+	const staging = await createOwnedHostStaging(parent, {
+		pid: 2_147_483_647,
+	});
+	t.mock.method(console, "log", () => undefined);
+	try {
+		assert.equal(
+			await main(["sessions", "list", "--name", "fixture"], {
+				certifyHost: async () => {
+					certifications++;
+					throw new Error("unsupported host fixture");
+				},
+			}),
+			0,
+		);
+		await access(staging);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		await rm(parent, { recursive: true, force: true });
+	}
+	assert.equal(certifications, 0);
+});
+
+test("CLI run maps lease contention and ordinary failures to process exit codes", async (t) => {
+	const errors: string[] = [];
+	t.mock.method(console, "error", (message: unknown) =>
+		errors.push(String(message)),
+	);
+	assert.equal(
+		await run(["run"], {
+			launch: async () => {
+				throw new SandboxLeaseBusyError("busy fixture");
+			},
+		}),
+		LauncherExitCode.Busy,
+	);
+	assert.equal(
+		await run(["run"], {
+			launch: async () => {
+				throw new Error("failure fixture");
+			},
+		}),
+		LauncherExitCode.Failure,
+	);
+	assert.deepEqual(errors, ["Error: busy fixture", "Error: failure fixture"]);
+});
+
+test("launcher custody status is primary only after a successful agent", () => {
+	assert.equal(
+		launchProcessExitCode({
+			agentExitCode: 0,
+			launcherExitCode: LauncherExitCode.CustodyFailure,
+		}),
+		LauncherExitCode.CustodyFailure,
+	);
+	assert.equal(
+		launchProcessExitCode({
+			agentExitCode: 17,
+			launcherExitCode: LauncherExitCode.CustodyFailure,
+		}),
+		17,
+	);
+});
+
 async function fixture(
-	options: { git?: boolean; state?: boolean } = { git: true, state: true },
-): Promise<{ root: string; bin: string; log: string }> {
+	options: { git?: boolean; state?: boolean; phase?: SandboxPhase } = {
+		git: true,
+		state: true,
+	},
+): Promise<{ root: string; bin: string; log: string; daemon: string }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-destroy-"));
 	if (options.git !== false) {
 		await exec("git", ["init", "-b", "main"], { cwd: root });
@@ -47,26 +174,47 @@ async function fixture(
 		const repository = await inspectRepository(canonical);
 		const name = sandboxName(canonical);
 		await saveSandboxState({
-			version: 1,
+			version: 2,
+			phase: options.phase ?? "ready",
 			name,
 			hostBaseCommit: repository.head,
 			hostBranch: repository.branch,
 			hostRepoIdentity: repository.identity,
+			hostWorktreeIdentity: canonical,
 			hostRoot: canonical,
 			workspaceMode: "clone",
 			createdAt: "2026-08-12T00:00:00.000Z",
+			updatedAt: "2026-08-18T00:00:00.000Z",
+			runtimeImage: fixtureImage,
+			runtimeSchema: 1,
+			packageVersion: "1.0.0",
+			...(options.phase === undefined || options.phase === "ready"
+				? {
+						imageAttestation: {
+							status: "verified" as const,
+							image: fixtureImage,
+						},
+					}
+				: {}),
 		});
 	}
 	const bin = join(root, "bin");
 	const log = join(root, "sbx.log");
+	const daemon = join(root, "daemon-present");
+	await writeFile(daemon, "present\n");
 	await exec("mkdir", ["-p", bin]);
 	const script = join(bin, "sbx");
 	await writeFile(
 		script,
-		`#!/usr/bin/env node\nimport { appendFileSync } from "node:fs";\nappendFileSync(process.env.FAKE_SBX_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");\nif (process.argv[2] === "exec") process.stdout.write(process.env.FAKE_DIRTY === "1" ? " M file.txt\\n" : "");\n`,
+		`#!/usr/bin/env node\nimport { appendFileSync, existsSync, unlinkSync } from "node:fs";\nconst args = process.argv.slice(2);\nappendFileSync(process.env.FAKE_SBX_LOG, JSON.stringify(args) + "\\n");\nif (args[0] === "exec") process.stdout.write(process.env.FAKE_DIRTY === "1" ? " M file.txt\\n" : "");
+if (args[0] === "list" && process.env.FAKE_LIST_ERROR === "1") { process.stderr.write("daemon unavailable\\n"); process.exit(7); }
+if (args[0] === "list") process.stdout.write(JSON.stringify({ sandboxes: existsSync(process.env.FAKE_DAEMON) ? [{ name: process.env.FAKE_NAME }] : [] }) + "\\n");
+if (args[0] === "inspect") process.stdout.write(JSON.stringify({ image: process.env.FAKE_IMAGE }) + "\\n");
+if (args[0] === "rm" && existsSync(process.env.FAKE_DAEMON)) unlinkSync(process.env.FAKE_DAEMON);
+`,
 	);
 	await chmod(script, 0o755);
-	return { root: canonical, bin, log };
+	return { root: canonical, bin, log, daemon };
 }
 
 async function runCli(
@@ -74,6 +222,8 @@ async function runCli(
 	command: "export" | "apply" | "destroy",
 	args: string[],
 	dirty: boolean,
+	daemonImage = fixtureImage,
+	listError = false,
 ): Promise<{ code: number; stderr: string; calls: string[][] }> {
 	try {
 		await exec(
@@ -86,6 +236,10 @@ async function runCli(
 					PATH: `${subject.bin}:${process.env.PATH}`,
 					FAKE_SBX_LOG: subject.log,
 					FAKE_DIRTY: dirty ? "1" : "0",
+					FAKE_DAEMON: subject.daemon,
+					FAKE_NAME: sandboxName(subject.root),
+					FAKE_IMAGE: daemonImage,
+					FAKE_LIST_ERROR: listError ? "1" : "0",
 				},
 			},
 		);
@@ -118,9 +272,173 @@ function runDestroy(
 	subject: Awaited<ReturnType<typeof fixture>>,
 	args: string[],
 	dirty: boolean,
+	daemonImage?: string,
 ): ReturnType<typeof runCli> {
-	return runCli(subject, "destroy", args, dirty);
+	return runCli(subject, "destroy", args, dirty, daemonImage);
 }
+
+test("all management mutations contend on the sandbox lifecycle lease", async () => {
+	for (const [command, args] of [
+		["export", []],
+		["apply", ["change.patch", "--yes"]],
+		["destroy", ["--yes"]],
+	] as const) {
+		const subject = await fixture();
+		const held = await acquireSandboxLease(
+			subject.root,
+			sandboxName(subject.root),
+			"run",
+		);
+		try {
+			const result = await runCli(subject, command, [...args], false);
+			assert.equal(result.code, LEASE_BUSY_EXIT_CODE, result.stderr);
+			assert.match(result.stderr, /busy.*run/i);
+			assert.deepEqual(result.calls, []);
+		} finally {
+			await held.release();
+		}
+	}
+});
+
+test("CLI session restore rejects mismatched custody and accepts exact state", async () => {
+	const subject = await fixture();
+	const repository = await inspectRepository(subject.root);
+	const name = sandboxName(subject.root);
+	const image = IMAGE_LOCK.images.standard;
+	assert.equal(image.status, "published");
+	if (image.status !== "published") return;
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-sessions-home-"));
+	const agentDir = join(home, ".pi", "agent");
+	await chmod(home, 0o700);
+	await mkdir(agentDir, { recursive: true, mode: 0o700 });
+	const backupId = "2026-08-14T12-34-56-789Z";
+	await mkdir(
+		join(
+			sessionBackupRoot(agentDir, repository.identity, name),
+			backupId,
+			"sessions",
+		),
+		{ recursive: true },
+	);
+	await chmod(join(agentDir, "docker-sandboxes"), 0o700);
+	const original = await loadSandboxState(subject.root, name);
+	const valid = {
+		...original,
+		version: 2 as const,
+		phase: "ready" as const,
+		hostRepoIdentity: repository.identity,
+		hostWorktreeIdentity: repository.worktreeIdentity,
+		hostRoot: repository.root,
+		runtimeImage: image.reference,
+		runtimeSchema: IMAGE_LOCK.runtimeSchema,
+		packageVersion: "1.0.0",
+		imageAttestation: {
+			status: "verified" as const,
+			image: image.reference,
+		},
+		updatedAt: "2026-08-18T00:00:00.000Z",
+	};
+	const run = async (): Promise<{
+		code: number;
+		stderr: string;
+		calls: string[][];
+	}> => {
+		await writeFile(subject.log, "");
+		try {
+			await exec(
+				process.execPath,
+				[
+					"--experimental-strip-types",
+					cli,
+					"sessions",
+					"restore",
+					backupId,
+					"--name",
+					name,
+				],
+				{
+					cwd: subject.root,
+					env: {
+						...process.env,
+						HOME: home,
+						PATH: `${subject.bin}:${process.env.PATH}`,
+						FAKE_SBX_LOG: subject.log,
+						FAKE_DIRTY: "0",
+						FAKE_DAEMON: subject.daemon,
+						FAKE_NAME: name,
+						FAKE_IMAGE: image.reference,
+						FAKE_LIST_ERROR: "0",
+					},
+				},
+			);
+			return {
+				code: 0,
+				stderr: "",
+				calls: (await readFile(subject.log, "utf8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line)),
+			};
+		} catch (cause) {
+			const error = cause as { code: number; stderr: string };
+			return {
+				code: error.code,
+				stderr: error.stderr,
+				calls: (await readFile(subject.log, "utf8"))
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => JSON.parse(line)),
+			};
+		}
+	};
+	for (const [label, state, diagnostic] of [
+		[
+			"state",
+			{ ...valid, phase: "creating", imageAttestation: undefined },
+			/ready/i,
+		],
+		[
+			"repository",
+			{ ...valid, hostRepoIdentity: "local:other" },
+			/repository/i,
+		],
+		[
+			"image",
+			{
+				...valid,
+				runtimeImage: fixtureImage,
+				imageAttestation: { status: "verified", image: fixtureImage },
+			},
+			/image|runtime/i,
+		],
+		[
+			"worktree",
+			{ ...valid, hostWorktreeIdentity: `${subject.root}-other` },
+			/worktree/i,
+		],
+		["attestation", { ...valid, imageAttestation: undefined }, /attest|ready/i],
+	] as const) {
+		await saveSandboxState(state);
+		const result = await run();
+		assert.notEqual(result.code, 0, label);
+		assert.match(result.stderr, diagnostic, `${label}: ${result.stderr}`);
+		assert.equal(
+			result.calls.some((call) => call[0] === "cp"),
+			false,
+			label,
+		);
+	}
+	await saveSandboxState(valid);
+	const restored = await run();
+	assert.equal(restored.code, 0, restored.stderr);
+	assert.equal(
+		restored.calls.some((call) => call[0] === "cp"),
+		true,
+	);
+	assert.equal(restored.calls.filter((call) => call[0] === "exec").length, 3);
+});
 
 test("management commands reject trailing arguments", async () => {
 	const destroyed = await runCli(
@@ -168,16 +486,21 @@ test("CLI help documents passing Pi session arguments after the separator", asyn
 	}
 	assert.match(output.join("\n"), /pi-dsbx run[^\n]*-- PI_ARGS/);
 	assert.match(output.join("\n"), /-- --session ID/);
+	assert.match(output.join("\n"), /doctor \[--json\]/);
+	assert.match(output.join("\n"), /status \[--json\]/);
+	assert.match(output.join("\n"), /unlock --name NAME --yes/);
+	assert.match(output.join("\n"), /sessions list/);
 });
 
 test("symlinked CLI entry executes its main function", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-symlink-"));
 	const link = join(directory, "pi-dsbx.ts");
 	await symlink(await realpath(cli), link);
-	const { stdout } = await exec(
-		process.execPath,
-		["--experimental-strip-types", link, "--help"],
-	);
+	const { stdout } = await exec(process.execPath, [
+		"--experimental-strip-types",
+		link,
+		"--help",
+	]);
 	assert.match(stdout, /Usage:/);
 });
 
@@ -348,7 +671,7 @@ test("inline false destroy booleans strip without granting authority", async () 
 	assert.match(rejected.stderr, /--discard-changes/);
 	assert.deepEqual(
 		rejected.calls.map((call) => call[0]),
-		["exec"],
+		["list", "inspect", "exec"],
 	);
 
 	const invalid = await fixture();
@@ -358,7 +681,7 @@ test("inline false destroy booleans strip without granting authority", async () 
 	assert.deepEqual(malformed.calls, []);
 });
 
-test("destroy with --discard-changes removes a sandbox that has no clone state", async () => {
+test("destroy refuses a sandbox that has no durable lifecycle state", async () => {
 	const subject = await fixture({ state: false });
 	const name = sandboxName(subject.root);
 	const result = await runDestroy(
@@ -366,8 +689,75 @@ test("destroy with --discard-changes removes a sandbox that has no clone state",
 		["--name", name, "--discard-changes"],
 		false,
 	);
-	assert.equal(result.code, 0, result.stderr);
-	assert.deepEqual(result.calls, [["rm", "--force", name]]);
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /durable lifecycle state/i);
+	assert.deepEqual(
+		result.calls.map((call) => call[0]),
+		["list"],
+	);
+});
+
+test("management export and destroy refuse non-ready reconciled state", async () => {
+	for (const [command, phase, args] of [
+		["export", "exporting", []],
+		["destroy", "failed", ["--discard-changes"]],
+	] as const) {
+		const subject = await fixture({ phase });
+		const result = await runCli(subject, command, [...args], false);
+		assert.equal(result.code, 1);
+		assert.match(result.stderr, /interrupted export|failed lifecycle/i);
+		assert.equal(
+			result.calls.some((call) => call[0] === "rm"),
+			false,
+		);
+		assert.equal(
+			(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
+			phase,
+		);
+	}
+});
+
+test("management image mismatch marks failed and never removes", async () => {
+	const subject = await fixture();
+	const wrongImage = `example.invalid/runtime@sha256:${"b".repeat(64)}`;
+	const result = await runDestroy(
+		subject,
+		["--discard-changes"],
+		false,
+		wrongImage,
+	);
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /runtime image mismatch/i);
+	assert.equal(
+		result.calls.some((call) => call[0] === "rm"),
+		false,
+	);
+	assert.equal(
+		(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
+		"failed",
+	);
+});
+
+test("management daemon ambiguity preserves state and never removes", async () => {
+	const subject = await fixture();
+	const result = await runCli(
+		subject,
+		"destroy",
+		["--discard-changes"],
+		false,
+		fixtureImage,
+		true,
+	);
+	assert.equal(result.code, 1);
+	assert.match(result.stderr, /daemon unavailable|sbx list failed/i);
+	assert.equal(
+		result.calls.some((call) => call[0] === "rm"),
+		false,
+	);
+	assert.equal(
+		(await loadSandboxState(subject.root, sandboxName(subject.root))).phase,
+		"ready",
+	);
 });
 
 test("--yes cannot discard dirty sandbox changes", async () => {
@@ -377,7 +767,7 @@ test("--yes cannot discard dirty sandbox changes", async () => {
 	assert.match(result.stderr, /--discard-changes/);
 	assert.deepEqual(
 		result.calls.map((call) => call[0]),
-		["exec"],
+		["list", "inspect", "exec"],
 	);
 });
 
@@ -391,7 +781,7 @@ test("--discard-changes authorizes dirty removal and --yes authorizes clean remo
 		assert.equal(result.code, 0, result.stderr);
 		assert.deepEqual(
 			result.calls.map((call) => call[0]),
-			["exec", "rm"],
+			["list", "inspect", "exec", "rm", "list"],
 		);
 		await assert.rejects(
 			access(statePath(subject.root, sandboxName(subject.root))),
@@ -408,6 +798,9 @@ test("destroy reports stale state custody when exact state cleanup fails", async
 	process.env.PATH = `${subject.bin}:${previousPath}`;
 	process.env.FAKE_SBX_LOG = subject.log;
 	process.env.FAKE_DIRTY = "0";
+	process.env.FAKE_DAEMON = subject.daemon;
+	process.env.FAKE_NAME = sandboxName(subject.root);
+	process.env.FAKE_IMAGE = fixtureImage;
 	try {
 		await assert.rejects(
 			main(["destroy", "--yes"], {
@@ -434,12 +827,15 @@ test("destroy reports stale state custody when exact state cleanup fails", async
 			.map((line) => JSON.parse(line));
 		assert.deepEqual(
 			calls.map((call) => call[0]),
-			["exec", "rm"],
+			["list", "inspect", "exec", "rm", "list"],
 		);
 	} finally {
 		process.chdir(previousCwd);
 		process.env.PATH = previousPath;
 		delete process.env.FAKE_SBX_LOG;
 		delete process.env.FAKE_DIRTY;
+		delete process.env.FAKE_DAEMON;
+		delete process.env.FAKE_NAME;
+		delete process.env.FAKE_IMAGE;
 	}
 });

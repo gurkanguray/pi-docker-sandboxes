@@ -1,14 +1,17 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, lstatSync, readFileSync, realpathSync } from "node:fs";
 import {
 	access,
 	lstat,
 	mkdir,
+	mkdtemp,
 	open,
-	readFile,
+	readdir,
 	realpath,
+	rm,
 	unlink,
+	writeFile,
 	type FileHandle,
 } from "node:fs/promises";
 import {
@@ -21,6 +24,7 @@ import {
 	sep,
 } from "node:path";
 import { promisify } from "node:util";
+import { hostname } from "node:os";
 import {
 	OperationError,
 	sanitizeDetail,
@@ -29,9 +33,22 @@ import {
 import {
 	migrateSandboxState,
 	type Migration,
+	type SandboxMigrationEvidence,
 	writeJsonAtomic,
 } from "./migration.ts";
 import { type SbxClient, validateSandboxName } from "./sbx/client.ts";
+import {
+	parseSandboxState,
+	type SandboxState,
+	type SandboxStateV2,
+} from "./state-schema.ts";
+export type {
+	SandboxImageAttestation,
+	SandboxPhase,
+	SandboxState,
+	SandboxStateV1,
+	SandboxStateV2,
+} from "./state-schema.ts";
 
 const execFileAsync = promisify(execFile);
 const SAFE_GIT_CONFIG = [
@@ -67,6 +84,7 @@ async function runGit(
 	try {
 		const result = await execFileAsync("git", [...SAFE_GIT_CONFIG, ...args], {
 			cwd,
+			env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
 			encoding: "utf8",
 			maxBuffer: 32 * 1024 * 1024,
 		});
@@ -167,6 +185,8 @@ export class UnbornHeadError extends OperationError {
 
 export interface RepositoryState {
 	root: string;
+	commonDir: string;
+	worktreeIdentity: string;
 	head: string;
 	branch: string;
 	identity: string;
@@ -242,6 +262,8 @@ export async function inspectRepository(
 	);
 	const absolute = (value: string) =>
 		resolve(root, isAbsolute(value) ? value : join(root, value));
+	const gitDirectory = await realpath(absolute(gitDirValue));
+	const commonDir = await realpath(absolute(commonDirValue));
 	const remote = await git(
 		runner,
 		root,
@@ -260,13 +282,15 @@ export async function inspectRepository(
 	);
 	return {
 		root,
+		commonDir,
+		worktreeIdentity: root,
 		head,
 		branch,
 		identity: remote
 			? scrubRemote(remote)
-			: `local:${createHash("sha256").update(root).digest("hex")}`,
+			: `local:${createHash("sha256").update(commonDir).digest("hex")}`,
 		dirty: status.length > 0,
-		mainWorktree: absolute(gitDirValue) === absolute(commonDirValue),
+		mainWorktree: gitDirectory === commonDir,
 	};
 }
 
@@ -292,6 +316,158 @@ export async function createEmptyInitialCommit(
 	);
 }
 
+const HOST_STAGING_PREFIX = "pi-docker-sandboxes-";
+const HOST_STAGING_OWNER = ".pi-dsbx-owner.json";
+
+export interface HostStagingRuntime {
+	pid?: number;
+	host?: string;
+	uid?: number;
+	processState?: (pid: number) => "present" | "absent" | "unknown";
+}
+
+function stagingProcessState(pid: number): "present" | "absent" | "unknown" {
+	try {
+		process.kill(pid, 0);
+		return "present";
+	} catch (cause) {
+		const code = (cause as NodeJS.ErrnoException).code;
+		return code === "ESRCH" ? "absent" : code === "EPERM" ? "present" : "unknown";
+	}
+}
+
+export async function createOwnedHostStaging(
+	parent: string,
+	runtime: HostStagingRuntime = {},
+): Promise<string> {
+	const directory = await mkdtemp(join(parent, HOST_STAGING_PREFIX));
+	const record = {
+		schema: 1,
+		kind: "pi-dsbx-host-staging",
+		path: basename(directory),
+		pid: runtime.pid ?? process.pid,
+		host: runtime.host ?? hostname(),
+		...(typeof process.getuid === "function"
+			? { uid: runtime.uid ?? process.getuid() }
+			: {}),
+	};
+	await writeFile(
+		join(directory, HOST_STAGING_OWNER),
+		`${JSON.stringify(record)}\n`,
+		{
+			flag: "wx",
+			mode: 0o600,
+		},
+	);
+	const handle = await open(
+		parent,
+		constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+	);
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return directory;
+}
+
+async function readOwnedStagingRecord(
+	path: string,
+	discovered: Awaited<ReturnType<typeof lstat>>,
+): Promise<unknown> {
+	const file = await open(
+		path,
+		constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+	);
+	try {
+		const identity = await file.stat();
+		if (
+			!identity.isFile() ||
+			identity.nlink !== 1 ||
+			identity.size > 4096 ||
+			!sameIdentity(identity, discovered)
+		)
+			throw new Error("Host staging ownership record changed while opening");
+		const bytes = Buffer.alloc(identity.size);
+		const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+		const [opened, current] = await Promise.all([file.stat(), lstat(path)]);
+		if (
+			bytesRead !== bytes.length ||
+			!sameIdentity(identity, opened) ||
+			!sameIdentity(identity, current) ||
+			current.isSymbolicLink() ||
+			!current.isFile() ||
+			current.nlink !== 1
+		)
+			throw new Error("Host staging ownership record changed while reading");
+		return JSON.parse(bytes.toString("utf8"));
+	} finally {
+		await file.close();
+	}
+}
+
+export async function reconcileOwnedHostStaging(
+	parent: string,
+	runtime: HostStagingRuntime = {},
+): Promise<string[]> {
+	const removed: string[] = [];
+	const host = runtime.host ?? hostname();
+	const uid =
+		typeof process.getuid === "function"
+			? (runtime.uid ?? process.getuid())
+			: undefined;
+	for (const entry of (await readdir(parent))
+		.filter((name) => name.startsWith(HOST_STAGING_PREFIX))
+		.sort()) {
+		const directory = join(parent, entry);
+		const ownerPath = join(directory, HOST_STAGING_OWNER);
+		let owner: unknown;
+		try {
+			const [directoryMetadata, ownerMetadata] = await Promise.all([
+				lstat(directory),
+				lstat(ownerPath),
+			]);
+			if (
+				!directoryMetadata.isDirectory() ||
+				directoryMetadata.isSymbolicLink() ||
+				!ownerMetadata.isFile() ||
+				ownerMetadata.isSymbolicLink() ||
+				ownerMetadata.nlink !== 1 ||
+				ownerMetadata.size > 4096 ||
+				(uid !== undefined && ownerMetadata.uid !== uid)
+			)
+				continue;
+			owner = await readOwnedStagingRecord(ownerPath, ownerMetadata);
+		} catch {
+			continue;
+		}
+		const record = owner as Record<string, unknown>;
+		if (
+			record.schema !== 1 ||
+			record.kind !== "pi-dsbx-host-staging" ||
+			record.path !== entry ||
+			record.host !== host ||
+			!Number.isSafeInteger(record.pid) ||
+			(uid !== undefined && record.uid !== uid) ||
+			(runtime.processState ?? stagingProcessState)(record.pid as number) !==
+				"absent"
+		)
+			continue;
+		await rm(directory, { recursive: true });
+		const parentHandle = await open(
+			parent,
+			constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		);
+		try {
+			await parentHandle.sync();
+		} finally {
+			await parentHandle.close();
+		}
+		removed.push(directory);
+	}
+	return removed;
+}
+
 export function sandboxName(root: string, fresh = false): string {
 	const slug =
 		basename(root)
@@ -305,27 +481,60 @@ export function sandboxName(root: string, fresh = false): string {
 	return `pi-${slug}-${suffix}`;
 }
 
-export interface SandboxImageAttestation {
-	status: "pending" | "verified";
-	image: string;
-	templateStoreId?: string;
+export function worktreeMetadataDirectory(root: string): string {
+	const canonicalRoot = realpathSync(root);
+	const entry = join(canonicalRoot, ".git");
+	let metadata;
+	try {
+		metadata = lstatSync(entry);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return entry;
+		throw cause;
+	}
+	if (metadata.isDirectory() && !metadata.isSymbolicLink())
+		return realpathSync(entry);
+	if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096)
+		throw new Error("Git worktree association is invalid");
+	const match = readFileSync(entry, "utf8").match(/^gitdir: ([^\0\r\n]+)\n?$/);
+	if (!match?.[1]) throw new Error("Git worktree association is invalid");
+	const gitDirectory = realpathSync(resolve(canonicalRoot, match[1]));
+	const backReference = join(gitDirectory, "gitdir");
+	const referencedEntry = readFileSync(backReference, "utf8").replace(/\n$/, "");
+	if (
+		!referencedEntry ||
+		/[\0\r\n]/.test(referencedEntry) ||
+		realpathSync(resolve(gitDirectory, referencedEntry)) !== realpathSync(entry)
+	)
+		throw new Error("Git worktree back-reference is invalid");
+	return gitDirectory;
 }
 
-export interface SandboxState {
-	version: 1;
-	name: string;
-	hostBaseCommit: string;
-	hostBranch: string;
-	hostRepoIdentity: string;
-	hostRoot: string;
-	workspaceMode: "clone";
-	createdAt: string;
-	imageAttestation?: SandboxImageAttestation;
+export function repositoryCommonMetadataDirectory(root: string): string {
+	const gitDirectory = worktreeMetadataDirectory(root);
+	const commonReference = join(gitDirectory, "commondir");
+	let metadata;
+	try {
+		metadata = lstatSync(commonReference);
+	} catch (cause) {
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return gitDirectory;
+		throw cause;
+	}
+	if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096)
+		throw new Error("Git common-directory association is invalid");
+	const reference = readFileSync(commonReference, "utf8").replace(/\n$/, "");
+	if (!reference || /[\0\r\n]/.test(reference))
+		throw new Error("Git common-directory association is invalid");
+	return realpathSync(resolve(gitDirectory, reference));
 }
 
 export function statePath(root: string, name: string): string {
 	validateSandboxName(name);
-	return join(root, ".git", "pi-docker-sandbox", "state", `${name}.json`);
+	return join(
+		worktreeMetadataDirectory(root),
+		"pi-docker-sandbox",
+		"state",
+		`${name}.json`,
+	);
 }
 
 export async function removeSandboxState(
@@ -336,7 +545,7 @@ export async function removeSandboxState(
 		| ((path: string) => Promise<void>) = {},
 ): Promise<void> {
 	const canonicalRoot = await realpath(root);
-	const git = join(canonicalRoot, ".git");
+	const git = worktreeMetadataDirectory(canonicalRoot);
 	const directory = join(git, "pi-docker-sandbox", "state");
 	const path = statePath(canonicalRoot, name);
 	const directoryFlags =
@@ -345,7 +554,7 @@ export async function removeSandboxState(
 	try {
 		const gitStat = await lstat(git);
 		if (!gitStat.isDirectory() || gitStat.isSymbolicLink())
-			throw new Error("Sandbox state requires a main-worktree .git directory");
+			throw new Error("Sandbox state requires a real worktree Git directory");
 		parent = await open(directory, directoryFlags);
 		const [openedParent, currentParent] = await Promise.all([
 			parent.stat(),
@@ -381,6 +590,7 @@ export async function removeSandboxState(
 		)
 			throw new Error("Sandbox state path identity changed before removal");
 		await unlink(path);
+		await parent.sync();
 	} catch (cause) {
 		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return;
 		throw cause;
@@ -394,10 +604,11 @@ async function prepareStateDirectory(root: string): Promise<{
 	validate: () => Promise<void>;
 }> {
 	const canonicalRoot = await realpath(root);
+	const gitDirectory = worktreeMetadataDirectory(canonicalRoot);
 	const paths = [
-		join(canonicalRoot, ".git"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox"),
-		join(canonicalRoot, ".git", "pi-docker-sandbox", "state"),
+		gitDirectory,
+		join(gitDirectory, "pi-docker-sandbox"),
+		join(gitDirectory, "pi-docker-sandbox", "state"),
 	];
 	const identities: Array<{ dev: number | bigint; ino: number | bigint }> = [];
 	const validate = async (): Promise<void> => {
@@ -433,18 +644,28 @@ async function prepareStateDirectory(root: string): Promise<{
 	return { directory: paths.at(-1)!, validate };
 }
 
-export async function saveSandboxState(state: SandboxState): Promise<void> {
-	const reportedPath = statePath(state.hostRoot, state.name);
-	const value = migrateSandboxState(state, reportedPath).value;
-	const prepared = await prepareStateDirectory(state.hostRoot);
+async function saveSandboxStateAt(
+	root: string,
+	name: string,
+	state: SandboxState,
+	beforeRename?: () => Promise<void>,
+): Promise<void> {
+	const reportedPath = statePath(root, name);
+	const value = parseSandboxState(state, reportedPath);
+	const prepared = await prepareStateDirectory(root);
 	await writeJsonAtomic(
 		join(prepared.directory, basename(reportedPath)),
 		value,
 		{
 			directoryPrepared: true,
 			validateDirectory: prepared.validate,
+			beforeRename,
 		},
 	);
+}
+
+export async function saveSandboxState(state: SandboxState): Promise<void> {
+	await saveSandboxStateAt(state.hostRoot, state.name, state);
 }
 
 function shellArg(value: string): string {
@@ -453,25 +674,267 @@ function shellArg(value: string): string {
 
 function stateRecovery(path: string, name: string, missing = false): string[] {
 	return [
-		...(missing
-			? []
-			: [`cp ${shellArg(path)} ${shellArg(`${path}.preserved`)}`]),
+		...(missing ? [] : [`cp ${shellArg(path)} ${shellArg(`${path}.preserved`)}`]),
 		`sbx exec ${shellArg(name)} git status --porcelain=v1`,
 		`sbx rm --force ${shellArg(name)}`,
 	];
 }
 
+const MAX_STATE_BYTES = 1024 * 1024;
+
+interface OpenedStateSnapshot {
+	path: string;
+	bytes: Buffer;
+	file: FileHandle;
+	parent: FileHandle;
+	validate: () => Promise<void>;
+	validateParent: () => Promise<void>;
+}
+
+function stateReadFlags(): { directory: number; file: number } {
+	for (const name of [
+		"O_RDONLY",
+		"O_DIRECTORY",
+		"O_NOFOLLOW",
+		"O_NONBLOCK",
+	] as const)
+		if (typeof constants[name] !== "number")
+			throw new Error(`Secure state reads are unsupported: ${name} unavailable`);
+	return {
+		directory: constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+		file: constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+	};
+}
+
+async function readStateHandle(file: FileHandle): Promise<Buffer> {
+	const metadata = await file.stat();
+	if (
+		!metadata.isFile() ||
+		metadata.nlink !== 1 ||
+		metadata.size > MAX_STATE_BYTES
+	)
+		throw new Error("Sandbox state must be a bounded single-link regular file");
+	const bytes = Buffer.alloc(metadata.size);
+	let offset = 0;
+	while (offset < bytes.length) {
+		const result = await file.read(bytes, offset, bytes.length - offset, offset);
+		if (result.bytesRead === 0) break;
+		offset += result.bytesRead;
+	}
+	if (offset !== bytes.length)
+		throw new Error("Sandbox state changed while reading");
+	return bytes;
+}
+
+async function openStateSnapshot(
+	root: string,
+	name: string,
+): Promise<OpenedStateSnapshot> {
+	const flags = stateReadFlags();
+	const canonicalRoot = await realpath(root);
+	const git = worktreeMetadataDirectory(canonicalRoot);
+	const gitStat = await lstat(git);
+	if (
+		!gitStat.isDirectory() ||
+		gitStat.isSymbolicLink() ||
+		(await realpath(git)) !== git
+	)
+		throw new Error("Sandbox state requires a real worktree Git directory");
+	const path = statePath(root, name);
+	const directory = dirname(path);
+	const canonicalDirectory = join(git, "pi-docker-sandbox", "state");
+	const parent = await open(directory, flags.directory);
+	let file: FileHandle | undefined;
+	try {
+		const parentIdentity = await parent.stat();
+		const validateParent = async (): Promise<void> => {
+			const current = await lstat(directory);
+			if (
+				!current.isDirectory() ||
+				current.isSymbolicLink() ||
+				!sameIdentity(parentIdentity, await parent.stat()) ||
+				!sameIdentity(parentIdentity, current) ||
+				(await realpath(directory)) !== canonicalDirectory
+			)
+				throw new Error("Sandbox state directory identity changed");
+		};
+		await validateParent();
+		const discovered = await lstat(path);
+		if (
+			!discovered.isFile() ||
+			discovered.isSymbolicLink() ||
+			discovered.nlink !== 1 ||
+			discovered.size > MAX_STATE_BYTES
+		)
+			throw new Error("Sandbox state is not a bounded single-link regular file");
+		file = await open(path, flags.file);
+		const openedIdentity = await file.stat();
+		if (!sameIdentity(discovered, openedIdentity))
+			throw new Error("Sandbox state changed while opening");
+		const bytes = await readStateHandle(file);
+		const validate = async (): Promise<void> => {
+			await validateParent();
+			const [opened, current, reread] = await Promise.all([
+				file!.stat(),
+				lstat(path),
+				readStateHandle(file!),
+			]);
+			if (
+				!opened.isFile() ||
+				opened.nlink !== 1 ||
+				!current.isFile() ||
+				current.isSymbolicLink() ||
+				current.nlink !== 1 ||
+				!sameIdentity(openedIdentity, opened) ||
+				!sameIdentity(openedIdentity, current) ||
+				!reread.equals(bytes)
+			)
+				throw new Error("Sandbox state changed during migration");
+			await validateParent();
+		};
+		await validate();
+		return { path, bytes, file, parent, validate, validateParent };
+	} catch (cause) {
+		await file?.close().catch(() => undefined);
+		await parent.close().catch(() => undefined);
+		throw cause;
+	}
+}
+
+async function preserveV1StateBytes(
+	snapshot: OpenedStateSnapshot,
+): Promise<void> {
+	const backup = `${snapshot.path}.v1.backup`;
+	const flags = stateReadFlags();
+	let file: FileHandle | undefined;
+	let claimedIdentity: FileIdentity | undefined;
+	try {
+		await snapshot.validate();
+		try {
+			file = await open(
+				backup,
+				constants.O_CREAT |
+					constants.O_EXCL |
+					constants.O_WRONLY |
+					constants.O_NOFOLLOW,
+				0o600,
+			);
+			claimedIdentity = await file.stat();
+			await file.writeFile(snapshot.bytes);
+			await file.sync();
+			await file.close();
+			file = await open(backup, flags.file);
+		} catch (cause) {
+			await file?.close().catch(() => undefined);
+			file = undefined;
+			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+			file = await open(backup, flags.file);
+		}
+		const openedIdentity = await file.stat();
+		if (
+			(claimedIdentity && !sameIdentity(claimedIdentity, openedIdentity)) ||
+			!openedIdentity.isFile() ||
+			openedIdentity.nlink !== 1
+		)
+			throw new Error("Version 1 state backup is not a single-link regular file");
+		const backupBytes = await readStateHandle(file);
+		const current = await lstat(backup);
+		if (
+			current.isSymbolicLink() ||
+			!current.isFile() ||
+			current.nlink !== 1 ||
+			!sameIdentity(openedIdentity, current) ||
+			!backupBytes.equals(snapshot.bytes)
+		)
+			throw new Error("Existing version 1 state backup is unsafe or mismatched");
+		await file.sync();
+		const finalBackup = await lstat(backup);
+		if (
+			finalBackup.isSymbolicLink() ||
+			!finalBackup.isFile() ||
+			finalBackup.nlink !== 1 ||
+			!sameIdentity(openedIdentity, await file.stat()) ||
+			!sameIdentity(openedIdentity, finalBackup) ||
+			!(await readStateHandle(file)).equals(snapshot.bytes)
+		)
+			throw new Error("Version 1 state backup changed before publication");
+		await snapshot.validateParent();
+		await snapshot.parent.sync();
+		await snapshot.validateParent();
+	} finally {
+		await file?.close().catch(() => undefined);
+	}
+}
+
+export type SandboxMigrationEvidenceProvider =
+	| SandboxMigrationEvidence
+	| (() => Promise<SandboxMigrationEvidence>);
+
+export interface SandboxStateLoadOptions {
+	expectedRepositoryIdentity?: string;
+	expectedWorktreeIdentity?: string;
+	/** @internal Deterministic migration race injection. */
+	beforeMigrationReplace?: () => Promise<void>;
+}
+
+function validateRequestedStateIdentity(
+	state: SandboxState,
+	root: string,
+	name: string,
+	options: SandboxStateLoadOptions,
+): void {
+	if (state.name !== name || state.hostRoot !== root)
+		throw new Error("Sandbox state metadata does not match the requested path");
+	if (
+		state.version === 1 &&
+		(options.expectedRepositoryIdentity === undefined ||
+			options.expectedWorktreeIdentity === undefined)
+	)
+		throw new Error(
+			"Version 1 migration requires requested repository and worktree identity",
+		);
+	if (
+		options.expectedRepositoryIdentity !== undefined &&
+		state.hostRepoIdentity !== options.expectedRepositoryIdentity
+	)
+		throw new Error("Sandbox state repository identity does not match");
+	if (
+		state.version === 2 &&
+		options.expectedWorktreeIdentity !== undefined &&
+		state.hostWorktreeIdentity !== options.expectedWorktreeIdentity
+	)
+		throw new Error("Sandbox state worktree identity does not match");
+}
+
 export async function loadSandboxStateResult(
 	root: string,
 	name: string,
-): Promise<Migration<SandboxState>> {
+	evidence?: SandboxMigrationEvidenceProvider,
+	options: SandboxStateLoadOptions = {},
+): Promise<Migration<SandboxStateV2>> {
 	const path = statePath(root, name);
-	let migrated: Migration<SandboxState>;
+	let migrated: Migration<SandboxStateV2>;
+	let snapshot: OpenedStateSnapshot | undefined;
 	try {
-		migrated = migrateSandboxState(
-			JSON.parse(await readFile(path, "utf8")),
-			path,
-		);
+		snapshot = await openStateSnapshot(root, name);
+		const input: unknown = JSON.parse(snapshot.bytes.toString("utf8"));
+		const parsed = parseSandboxState(input, path);
+		validateRequestedStateIdentity(parsed, root, name, options);
+		const migrationEvidence =
+			typeof evidence === "function" && parsed.version === 1
+				? await evidence()
+				: typeof evidence === "function"
+					? undefined
+					: evidence;
+		migrated = migrateSandboxState(input, path, migrationEvidence);
+		if (migrated.migrated) {
+			await snapshot.validate();
+			await preserveV1StateBytes(snapshot);
+			await saveSandboxStateAt(root, name, migrated.value, async () => {
+				await options.beforeMigrationReplace?.();
+				await snapshot!.validate();
+			});
+		}
 	} catch (cause) {
 		const missing = (cause as NodeJS.ErrnoException).code === "ENOENT";
 		throw new OperationError({
@@ -487,23 +950,20 @@ export async function loadSandboxStateResult(
 			recovery: stateRecovery(path, name, missing),
 			cause,
 		});
+	} finally {
+		await snapshot?.file.close().catch(() => undefined);
+		await snapshot?.parent.close().catch(() => undefined);
 	}
-	if (migrated.value.name !== name || migrated.value.hostRoot !== root)
-		throw new OperationError({
-			phase: "preflight",
-			operation: `load state for sandbox ${name} from ${path}`,
-			detail:
-				"Sandbox metadata does not match this repository; inspect first because unexported work may be lost by force removal",
-			recovery: stateRecovery(path, name),
-		});
 	return migrated;
 }
 
 export async function loadSandboxState(
 	root: string,
 	name: string,
-): Promise<SandboxState> {
-	return (await loadSandboxStateResult(root, name)).value;
+	evidence?: SandboxMigrationEvidenceProvider,
+	options?: SandboxStateLoadOptions,
+): Promise<SandboxStateV2> {
+	return (await loadSandboxStateResult(root, name, evidence, options)).value;
 }
 
 export async function sandboxStateExists(
@@ -553,6 +1013,8 @@ export interface PatchDestinationOptions {
 	beforeCreate?: (directory: string, path: string) => Promise<void>;
 	/** @internal Deterministic race injection after the file is opened. */
 	afterCreate?: (directory: string, path: string) => Promise<void>;
+	/** @internal Deterministic directory-sync failure injection. */
+	syncDirectory?: (directory: string) => Promise<void>;
 }
 
 class PatchClaimError extends Error {
@@ -610,9 +1072,7 @@ function destinationFlags(values: PatchOpenConstants = constants): {
 		"O_NONBLOCK",
 	] as const) {
 		if (typeof values[name] !== "number")
-			throw new Error(
-				`Secure patch export is unsupported: ${name} unavailable`,
-			);
+			throw new Error(`Secure patch export is unsupported: ${name} unavailable`);
 	}
 	return {
 		directory: values.O_RDONLY! | values.O_DIRECTORY! | values.O_NOFOLLOW!,
@@ -860,9 +1320,7 @@ async function patchContainmentRoot(
 		};
 	} catch (cause) {
 		await Promise.all(
-			guardians.map((guardian) =>
-				guardian.handle.close().catch(() => undefined),
-			),
+			guardians.map((guardian) => guardian.handle.close().catch(() => undefined)),
 		);
 		throw cause;
 	}
@@ -893,8 +1351,7 @@ async function preparePatchFile(
 			await directory.validate();
 			const childPath = join(currentPath, part);
 			let childStat = await lstat(childPath).catch((cause) => {
-				if ((cause as NodeJS.ErrnoException).code === "ENOENT")
-					return undefined;
+				if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 				throw cause;
 			});
 			if (!childStat) {
@@ -990,14 +1447,9 @@ export async function preparePatchDestination(
 	try {
 		await prepared.file.sync();
 		await prepared.validateParent();
-		await prepared.parent.sync().catch((cause) => {
-			if (
-				!["EINVAL", "ENOTSUP", "EBADF"].includes(
-					(cause as NodeJS.ErrnoException).code ?? "",
-				)
-			)
-				throw cause;
-		});
+		if (options.syncDirectory)
+			await options.syncDirectory(dirname(prepared.path));
+		else await prepared.parent.sync();
 		return prepared.path;
 	} finally {
 		await prepared.file.close().catch(() => undefined);
@@ -1112,14 +1564,9 @@ export async function exportPatch(
 				)
 					throw new Error("Patch file changed during write");
 				await prepared.validateParent();
-				await prepared.parent.sync().catch((cause) => {
-					if (
-						!["EINVAL", "ENOTSUP", "EBADF"].includes(
-							(cause as NodeJS.ErrnoException).code ?? "",
-						)
-					)
-						throw cause;
-				});
+				if (options.destination?.syncDirectory)
+					await options.destination.syncDirectory(dirname(prepared.path));
+				else await prepared.parent.sync();
 				completed = true;
 			} catch (cause) {
 				const current = await lstat(prepared.path).catch(() => undefined);

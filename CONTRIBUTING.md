@@ -15,6 +15,7 @@ Run the focused test while developing, then the full check before opening a pull
 
 ```bash
 node --experimental-strip-types --test test/name.test.ts
+npm run test:cli-matrix
 npm run test:e2e
 npm pack --dry-run
 ```

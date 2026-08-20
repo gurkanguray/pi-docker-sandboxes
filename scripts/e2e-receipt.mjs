@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
+import { npmCommand } from "./npm-command.mjs";
 
 const exec = promisify(execFile);
 
@@ -46,6 +47,20 @@ function imageIdentity(value) {
 	fail("Image digest must be a sha256 ID or local content tag");
 }
 
+function versionAtLeast(actual, minimum) {
+	const left = actual
+		.match(/^\d+(?:\.\d+)*$/)?.[0]
+		.split(".")
+		.map(Number);
+	const right = minimum.split(".").map(Number);
+	if (!left) return false;
+	for (let index = 0; index < Math.max(left.length, right.length); index++) {
+		if ((left[index] ?? 0) !== (right[index] ?? 0))
+			return (left[index] ?? 0) > (right[index] ?? 0);
+	}
+	return true;
+}
+
 try {
 	const values = argumentsFrom(process.argv.slice(2));
 	const status = required(values, "status");
@@ -61,9 +76,60 @@ try {
 	const expectedSourceSha = required(values, "source-sha");
 	const sourceSha = (await exec("git", ["rev-parse", "HEAD"])).stdout.trim();
 	if (sourceSha !== expectedSourceSha)
+		fail(`Source SHA mismatch: expected ${expectedSourceSha}, got ${sourceSha}`);
+
+	const expectedPlatform = required(values, "expected-platform");
+	const expectedArchitecture = required(values, "expected-architecture");
+	if (
+		process.platform !== expectedPlatform ||
+		process.arch !== expectedArchitecture
+	)
 		fail(
-			`Source SHA mismatch: expected ${expectedSourceSha}, got ${sourceSha}`,
+			`Measured host mismatch: expected ${expectedPlatform}/${expectedArchitecture}, got ${process.platform}/${process.arch}`,
 		);
+	const osName = required(values, "os-name");
+	const osVersion = required(values, "os-version");
+	const requireKvm = required(values, "require-kvm");
+	if (requireKvm !== "true" && requireKvm !== "false")
+		fail("--require-kvm must be true or false");
+	if (process.platform === "darwin") {
+		if (osName !== "macOS") fail(`Supported host OS is macOS; got ${osName}`);
+		if (!versionAtLeast(osVersion, "14"))
+			fail(`macOS 14 or newer is required; got ${osVersion}`);
+	} else if (process.platform === "linux") {
+		if (osName !== "ubuntu") fail(`Supported host OS is Ubuntu; got ${osName}`);
+		if (!versionAtLeast(osVersion, "24.04"))
+			fail(`Ubuntu 24.04 or newer is required; got ${osVersion}`);
+	} else fail(`Supported host OS is macOS or Ubuntu; got ${process.platform}`);
+	const kvm = {
+		required: requireKvm === "true",
+		path: requireKvm === "true" ? "/dev/kvm" : null,
+		characterDevice: false,
+		opened: false,
+		openMode: requireKvm === "true" ? "r+" : null,
+	};
+	if (kvm.required) {
+		try {
+			kvm.characterDevice = (await lstat("/dev/kvm")).isCharacterDevice();
+			const handle = await open("/dev/kvm", "r+");
+			await handle.close();
+			kvm.opened = true;
+		} catch {
+			// The failed receipt still records measured negative KVM evidence.
+		}
+		if (status === "passed" && (!kvm.characterDevice || !kvm.opened))
+			fail("Passing Linux KVM receipt requires a character device opened r+");
+	}
+
+	const dockerVersion = required(values, "docker-version");
+	const dockerMajor = Number(
+		dockerVersion.match(/^(\d+)(?:\.\d+){1,3}(?:[-+].*)?$/)?.[1],
+	);
+	if (!Number.isSafeInteger(dockerMajor) || dockerMajor < 29)
+		fail(`Docker 29 or newer is required; got ${dockerVersion}`);
+	const sbxVersion = required(values, "sbx-version");
+	if (!/^0\.38\.\d+(?:[-+].*)?$/.test(sbxVersion))
+		fail(`Docker SBX 0.38.x is required; got ${sbxVersion}`);
 
 	const expectedImageDigest = required(values, "image-digest");
 	const selectedImage = optional(values, "selected-image");
@@ -72,6 +138,8 @@ try {
 	const expectedIntegrity = optional(values, "package-integrity");
 	const expectedPackageVersion = optional(values, "package-version");
 	const installedPackageArgument = optional(values, "installed-package");
+	const piVersion = optional(values, "pi-version");
+	const imageLockPiVersion = optional(values, "image-lock-pi-version");
 	let packageIntegrity = null;
 	let packageVersion = null;
 
@@ -87,7 +155,17 @@ try {
 			!selectedImageId
 		)
 			fail("Passing receipt requires complete package and image evidence");
+		if (!piVersion || !imageLockPiVersion)
+			fail("Passing receipt requires sandbox runtime Pi evidence");
 	}
+	if (Boolean(piVersion) !== Boolean(imageLockPiVersion))
+		fail("Sandbox runtime Pi evidence must be complete or absent");
+	if (imageLockPiVersion && imageLockPiVersion !== "0.84.1")
+		fail("Image lock Pi version must be 0.84.1");
+	if (piVersion && piVersion !== imageLockPiVersion)
+		fail(
+			`Sandbox runtime Pi version mismatch: expected ${imageLockPiVersion}, got ${piVersion}`,
+		);
 
 	if (
 		packageArgument &&
@@ -97,7 +175,7 @@ try {
 	) {
 		const packagePath = resolve(packageArgument);
 		const { stdout } = await exec(
-			"npm",
+			npmCommand,
 			["pack", "--dry-run", "--json", packagePath],
 			{ cwd: dirname(packagePath) },
 		);
@@ -146,11 +224,15 @@ try {
 		packageIntegrity,
 		imageDigest: expectedImageDigest,
 		selectedImage,
-		platform: required(values, "platform"),
-		macosVersion: required(values, "macos-version"),
-		architecture: required(values, "architecture"),
-		sbxVersion: optional(values, "sbx-version"),
-		piVersion: optional(values, "pi-version"),
+		platform: process.platform,
+		osName,
+		osVersion,
+		architecture: process.arch,
+		kvm,
+		dockerVersion,
+		sbxVersion,
+		piVersion,
+		imageLockPiVersion,
 		packageVersion,
 		tests,
 		testsCount,

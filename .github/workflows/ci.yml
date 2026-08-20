@@ -9,113 +9,148 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  workflow-lint:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Lint GitHub workflows
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+  compatibility:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.19.0", "24.12.0"]
+        pi: ["0.84.1", "0.84.2"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Bind exact Pi matrix version
+        env:
+          PI_VERSION: ${{ matrix.pi }}
+          PI_TEST_VERSION: ${{ matrix.pi }}
+        run: |
+          npm install --ignore-scripts --no-save --package-lock=false \
+            "@earendil-works/pi-ai@$PI_VERSION" \
+            "@earendil-works/pi-agent-core@$PI_VERSION" \
+            "@earendil-works/pi-coding-agent@$PI_VERSION" \
+            "@earendil-works/pi-tui@$PI_VERSION"
+          node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          for (const name of [
+            "pi-ai",
+            "pi-agent-core",
+            "pi-coding-agent",
+            "pi-tui",
+          ]) {
+            const path = `node_modules/@earendil-works/${name}/package.json`;
+            const actual = JSON.parse(await readFile(path)).version;
+            if (actual !== process.env.PI_VERSION)
+              throw new Error(`${name}: ${actual}`);
+          }
+          NODE
+      - run: npm run check
+        env:
+          PI_TEST_VERSION: ${{ matrix.pi }}
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.12.0
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run check
+      - run: npm run test:coverage
       - run: npm audit --audit-level=high
-      - id: tarball
+
+  package-runtime-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - id: candidate
+        name: Pack and verify the package
         run: |
           package_dir="$RUNNER_TEMP/npm-package"
           mkdir "$package_dir"
           npm pack --pack-destination "$package_dir"
           tarball="$(node scripts/assert-one-tarball.mjs "$package_dir")"
-          echo "path=$tarball" >> "$GITHUB_OUTPUT"
-      - run: >-
-          npm run package:verify -- "${{ steps.tarball.outputs.path }}"
-          --receipt package-verification.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: npm-package-${{ github.sha }}
-          path: |
-            ${{ steps.tarball.outputs.path }}
-            package-verification.json
-          if-no-files-found: error
-          retention-days: 14
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-        with:
-          platforms: arm64
-      - name: Set up Docker Buildx
-        uses: >-
-          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-      - id: image
+          npm run package:verify -- "$tarball" \
+            --receipt package-verification.json
+          npm run --silent smoke:fresh-install -- "$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+      - id: runtime
+        name: Read the exact locked runtime
         run: |
-          cp "${{ steps.tarball.outputs.path }}" docker/pi-docker-sandboxes.tgz
           node --input-type=module <<'NODE' >> "$GITHUB_OUTPUT"
           import { readFile } from "node:fs/promises";
           const lock = JSON.parse(await readFile("docker/image-lock.json"));
-          for (const [name, value] of Object.entries({
-            base_image: lock.baseImage,
-            pi_version: lock.piVersion,
-            package_version: lock.packageVersion,
-            fd_version: lock.tools.fdDebianVersion,
-            rg_version: lock.tools.rgDebianVersion,
-            git_version: lock.tools.gitDebianVersion,
-          })) console.log(`${name}=${value}`);
+          const runtime = lock.images?.standard;
+          if (runtime?.status !== "published" ||
+              !runtime.platforms?.includes(process.env.EXPECTED_PLATFORM))
+            throw new Error("locked runtime does not support this platform");
+          console.log(`reference=${runtime.reference}`);
+          console.log(`pi_version=${lock.piVersion}`);
           NODE
-      - name: Build and load one arm64 candidate
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: docker
-          platforms: linux/arm64
-          load: true
-          push: false
-          tags: pi-docker-sandboxes:${{ github.sha }}
-          build-args: |
-            BASE_IMAGE=${{ steps.image.outputs.base_image }}
-            PI_VERSION=${{ steps.image.outputs.pi_version }}
-            PACKAGE_VERSION=${{ steps.image.outputs.package_version }}
-            FD_DEBIAN_VERSION=${{ steps.image.outputs.fd_version }}
-            RG_DEBIAN_VERSION=${{ steps.image.outputs.rg_version }}
-            GIT_DEBIAN_VERSION=${{ steps.image.outputs.git_version }}
-          cache-from: type=gha,scope=candidate-arm64
-          cache-to: type=gha,mode=max,scope=candidate-arm64
-      - name: Verify and export the same candidate
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+      - name: Pull and smoke the native locked runtime
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          PI_VERSION: ${{ steps.runtime.outputs.pi_version }}
+          RUNTIME_REFERENCE: ${{ steps.runtime.outputs.reference }}
         run: |
-          image="pi-docker-sandboxes:${{ github.sha }}"
-          image_id="$(docker image inspect "$image" --format '{{.Id}}')"
-          npm run image:verify -- "$image_id" | tee image-verification.log
-          tail -n 1 image-verification.log > image-verification.json
-          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
-          docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock \
-            --volume /tmp:/tmp "$skopeo" copy "docker-daemon:$image" \
-            oci-archive:/tmp/candidate-image.oci.tar:candidate
-          mkdir /tmp/candidate-oci
-          tar -xf /tmp/candidate-image.oci.tar \
-            -C /tmp/candidate-oci index.json
-          node --input-type=module - "$image_id" <<'NODE'
-          import { readFile, writeFile } from "node:fs/promises";
-          const path = "image-verification.json";
-          const receipt = JSON.parse(await readFile(path));
-          const index = JSON.parse(
-            await readFile("/tmp/candidate-oci/index.json", "utf8"),
-          );
-          const ociDigest = index.manifests?.[0]?.digest;
-          if (
-            receipt.platform !== "linux/arm64" ||
-            receipt.imageId !== process.argv[2] ||
-            index.manifests?.length !== 1 ||
-            !/^sha256:[0-9a-f]{64}$/.test(ociDigest)
-          ) process.exit(1);
-          receipt.sourceSha = process.env.SOURCE_SHA;
-          receipt.ociDigest = ociDigest;
-          await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`);
-          NODE
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          docker pull --platform "$PLATFORM" "$RUNTIME_REFERENCE"
+          docker image inspect "$RUNTIME_REFERENCE" \
+            --format '{{json .RepoDigests}}' | grep -F "${RUNTIME_REFERENCE#*@}"
+          docker run --rm --env PI_VERSION --entrypoint sh \
+            "$RUNTIME_REFERENCE" -c '
+            test "$(pi --version)" = "$PI_VERSION"
+            test -x /opt/pi-runtime/node_modules/.bin/pi
+            controller=/usr/local/share/npm-global/lib/node_modules
+            test ! -e "$controller/pi-docker-sandboxes"
+          '
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          name: oci-candidate-${{ github.sha }}
-          path: |
-            /tmp/candidate-image.oci.tar
-            image-verification.json
-          if-no-files-found: error
-          retention-days: 14
+          node-version: 24.12.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Typecheck and run platform-independent units
+        run: |
+          npx tsc --noEmit
+          node --experimental-strip-types --test `
+            test/config.test.ts `
+            test/package.test.ts `
+            test/platform.test.ts `
+            test/runtime-extension.test.ts `
+            test/workflows.test.ts
+      - name: Build and pack on Windows
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          npx tsc --project tsconfig.cli.json
+          npm pack --ignore-scripts

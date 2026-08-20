@@ -3,221 +3,52 @@ import { execFile } from "node:child_process";
 import {
 	access,
 	chmod,
-	cp,
 	mkdir,
 	mkdtemp,
 	readFile,
 	rm,
-	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import type { ImageLock } from "../src/image-lock.ts";
-import { loadImageLock } from "../src/image-lock.ts";
 
 const exec = promisify(execFile);
+const execNpm = (
+	args: string[],
+	options: { cwd: string | URL },
+): Promise<{ stdout: string; stderr: string }> => {
+	const npmCli =
+		process.env.npm_execpath ??
+		(process.platform === "win32"
+			? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+			: undefined);
+	const command = npmCli ? process.execPath : "npm";
+	const commandArgs = npmCli ? [npmCli, ...args] : args;
+	return exec(command, commandArgs, {
+		...options,
+		encoding: "utf8",
+	}) as Promise<{ stdout: string; stderr: string }>;
+};
 const root = new URL("..", import.meta.url);
-const rootPath = fileURLToPath(root);
-interface InstalledImageReceipt {
-	image: string;
-	digest: string;
-	imageId: string;
-	registryDigest: string | null;
-	platform: string;
-	uid: number;
-	user: string;
-	entrypoint: string[];
-	versions: Record<string, string>;
-	parity: { status: string; candidate: string | null };
-}
 
-function assertInstalledImageReceipt(
-	receipt: InstalledImageReceipt,
-	image: string,
-	lock: ImageLock,
-): void {
-	assert.deepEqual(Object.keys(receipt).sort(), [
-		"digest",
-		"entrypoint",
-		"image",
-		"imageId",
-		"parity",
-		"platform",
-		"registryDigest",
-		"uid",
-		"user",
-		"versions",
-	]);
-	assert.equal(receipt.image, image);
-	assert.match(receipt.digest, /^sha256:[0-9a-f]{64}$/);
-	assert.equal(receipt.digest, receipt.imageId);
-	assert.equal(receipt.registryDigest, null);
-	assert.equal(receipt.platform, "linux/arm64");
-	assert.equal(receipt.uid, 1000);
-	assert.equal(receipt.user, "agent");
-	assert.deepEqual(receipt.entrypoint, ["tini", "--"]);
-	assert.deepEqual(Object.keys(receipt.versions).sort(), [
-		"fd",
-		"git",
-		"node",
-		"npm",
-		"package",
-		"pi",
-		"ripgrep",
-	]);
-	assert.equal(receipt.versions.package, lock.packageVersion);
-	assert.equal(receipt.versions.pi, lock.piVersion);
-	assert.equal(receipt.versions.fd, lock.tools.fdDebianVersion);
-	assert.equal(receipt.versions.ripgrep, lock.tools.rgDebianVersion);
-	assert.equal(receipt.versions.git, lock.tools.gitDebianVersion);
-	assert.match(receipt.versions.node ?? "", /^v\d+\.\d+\.\d+$/);
-	assert.match(receipt.versions.npm ?? "", /^\d+\.\d+\.\d+$/);
-	assert.deepEqual(receipt.parity, {
-		status: "not-compared",
-		candidate: null,
-	});
-}
-
-test("source package builds the CLI exactly once before scriptless packing", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-source-pack-"));
-	try {
-		const source = join(directory, "source");
-		const output = join(directory, "output");
-		await mkdir(source);
-		await mkdir(output);
-		for (const path of ["package.json", "tsconfig.json", "tsconfig.cli.json"])
-			await cp(join(rootPath, path), join(source, path));
-		await cp(join(rootPath, "src"), join(source, "src"), { recursive: true });
-		await symlink(join(rootPath, "node_modules"), join(source, "node_modules"));
-		await writeFile(join(source, ".source-checkout"), "");
-		const { packPackage, runImageCommand } = await import("../src/image.ts");
-		const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
-		const archive = await packPackage(
-			output,
-			source,
-			async (command, args, options = {}) => {
-				calls.push({ command, args, cwd: options.cwd });
-				return runImageCommand(command, args, options);
-			},
-		);
-		assert.deepEqual(calls, [
-			{ command: "npm", args: ["run", "build:cli"], cwd: source },
-			{
-				command: "npm",
-				args: [
-					"pack",
-					source,
-					"--pack-destination",
-					output,
-					"--json",
-					"--ignore-scripts",
-				],
-				cwd: undefined,
-			},
-		]);
-		const { stdout: listing } = await exec("tar", ["-tf", archive]);
-		assert.match(listing, /^package\/dist\/cli\.js$/m);
-		assert.match(listing, /^package\/dist\/image\.js$/m);
-	} finally {
-		await rm(directory, { recursive: true, force: true });
-	}
-});
-
-test("source CLI build failure is structured", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-source-fail-"));
-	try {
-		await writeFile(join(directory, ".source-checkout"), "");
-		await writeFile(
-			join(directory, "package.json"),
-			JSON.stringify({
-				name: "pi-dsbx-build-failure",
-				version: "1.0.0",
-				scripts: { "build:cli": "node -e 'process.exit(7)'" },
-			}),
-		);
-		const { packPackage } = await import("../src/image.ts");
-		await assert.rejects(
-			packPackage(directory, directory),
-			(error: unknown) => {
-				assert.equal((error as { name?: string }).name, "OperationError");
-				assert.equal((error as { phase?: string }).phase, "prepare");
-				assert.equal((error as { exitCode?: number }).exitCode, 7);
-				assert.deepEqual((error as { recovery?: string[] }).recovery, [
-					"pi-dsbx image build",
-				]);
-				return true;
-			},
-		);
-	} finally {
-		await rm(directory, { recursive: true, force: true });
-	}
-});
-
-test("installed receipt assertion rejects every omitted or mutated field", async () => {
-	const lock = await loadImageLock();
-	const image = lock.localImage;
-	const id = `sha256:${"a".repeat(64)}`;
-	const receipt: InstalledImageReceipt = {
-		image,
-		digest: id,
-		imageId: id,
-		registryDigest: null,
-		platform: lock.platform,
-		uid: 1000,
-		user: "agent",
-		entrypoint: ["tini", "--"],
-		versions: {
-			package: lock.packageVersion,
-			pi: lock.piVersion,
-			fd: lock.tools.fdDebianVersion,
-			ripgrep: lock.tools.rgDebianVersion,
-			git: lock.tools.gitDebianVersion,
-			node: "v22.22.1",
-			npm: "9.2.0",
-		},
-		parity: { status: "not-compared", candidate: null },
-	};
-	assertInstalledImageReceipt(receipt, image, lock);
-	const mutations: InstalledImageReceipt[] = [
-		{ ...receipt, image: "wrong" },
-		{ ...receipt, digest: "sha256:bad" },
-		{ ...receipt, imageId: `sha256:${"b".repeat(64)}` },
-		{ ...receipt, registryDigest: `registry/image@${id}` },
-		{ ...receipt, platform: "linux/amd64" },
-		{ ...receipt, uid: 0 },
-		{ ...receipt, user: "root" },
-		{ ...receipt, entrypoint: ["sh"] },
-		...["package", "pi", "fd", "ripgrep", "git", "node", "npm"].map((name) => ({
-			...receipt,
-			versions: { ...receipt.versions, [name]: "mutated" },
-		})),
-		{ ...receipt, parity: { status: "matched", candidate: null } },
-		{ ...receipt, parity: { status: "not-compared", candidate: "unexpected" } },
-	];
-	for (const mutation of mutations)
-		assert.throws(() => assertInstalledImageReceipt(mutation, image, lock));
-	for (const field of Object.keys(receipt)) {
-		const incomplete = { ...receipt } as Record<string, unknown>;
-		delete incomplete[field];
-		assert.throws(() =>
-			assertInstalledImageReceipt(
-				incomplete as unknown as InstalledImageReceipt,
-				image,
-				lock,
-			),
-		);
-	}
+test("runtime doctor ranges match package requirements", async () => {
+	const manifest = JSON.parse(
+		await readFile(new URL("../package.json", import.meta.url), "utf8"),
+	);
+	const metadata = await import("../src/package-metadata.ts");
+	assert.equal(metadata.NODE_RANGE, manifest.engines.node);
+	assert.equal(
+		metadata.HOST_PI_RANGE,
+		manifest.peerDependencies["@earendil-works/pi-coding-agent"],
+	);
 });
 
 test("packed CLI runs from node_modules", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-cli-pack-"));
 	try {
-		const { stdout } = await exec(
-			"npm",
+		const { stdout } = await execNpm(
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
@@ -262,28 +93,8 @@ test("packed CLI runs from node_modules", async () => {
 		assert.equal(
 			(await readFile(reexecLog, "utf8")).trim().split("\n").length,
 			1,
-			"the package bin must not forward NODE_OPTIONS to its CLI child",
 		);
-
 		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
-		await assert.rejects(access(join(packageDirectory, "scripts")));
-		for (const script of [
-			"build:cli",
-			"typecheck",
-			"test:e2e",
-			"docs:build",
-			"package:verify",
-		])
-			await assert.rejects(
-				exec("npm", ["run", script], { cwd: packageDirectory }),
-				(error: unknown) => {
-					assert.match(
-						(error as { stderr?: string }).stderr ?? "",
-						/source checkout only/,
-					);
-					return true;
-				},
-			);
 	} finally {
 		await chmod(
 			join(directory, "node_modules", "pi-docker-sandboxes"),
@@ -291,86 +102,58 @@ test("packed CLI runs from node_modules", async () => {
 		).catch(() => {});
 		await rm(directory, { recursive: true, force: true });
 	}
-	await assert.rejects(access(directory));
 });
 
-test("installed read-only package repacks without scripts or a compiler", async () => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-installed-pack-"));
-	try {
-		const sourceArchive = join(directory, "source.tgz");
-		const { packPackage: packSource } = await import("../src/image.ts");
-		await exec("mv", [await packSource(directory, rootPath), sourceArchive]);
-		const packageDirectory = join(
-			directory,
-			"node_modules",
-			"pi-docker-sandboxes",
-		);
-		await mkdir(packageDirectory, { recursive: true });
-		await exec("tar", [
-			"-xzf",
-			sourceArchive,
-			"--strip-components=1",
-			"-C",
-			packageDirectory,
-		]);
-		await chmod(packageDirectory, 0o555);
-		const { packPackage, runImageCommand } = await import(
-			pathToFileURL(join(packageDirectory, "dist", "image.js")).href
-		);
-		await assert.rejects(access(join(packageDirectory, ".source-checkout")));
-		const output = join(directory, "output");
-		await mkdir(output);
-		const calls: string[][] = [];
-		const archive = await packPackage(
-			output,
-			packageDirectory,
-			async (
-				command: string,
-				args: string[],
-				options: { cwd?: string; maxBuffer?: number } = {},
-			) => {
-				calls.push(args);
-				return runImageCommand(command, args, options);
-			},
-		);
-		assert.equal(calls.length, 1);
-		assert.equal(calls[0]?.[0], "pack");
-		const { stdout: listing } = await exec("tar", ["-tf", archive]);
-		assert.match(listing, /^package\/dist\/cli\.js$/m);
-		assert.match(listing, /^package\/dist\/sbx\/inherited-runner\.mjs$/m);
-	} finally {
-		await chmod(
-			join(directory, "node_modules", "pi-docker-sandboxes"),
-			0o755,
-		).catch(() => {});
-		await rm(directory, { recursive: true, force: true });
-	}
-	await assert.rejects(access(directory));
-});
-
-test("npm package includes the image lock contract", async () => {
+test("npm package includes the image lock and standalone runtime contracts", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-dsbx-pack-"));
 	try {
-		const { stdout } = await exec(
-			"npm",
+		const { stdout } = await execNpm(
 			["pack", "--silent", "--pack-destination", directory],
 			{ cwd: root },
 		);
-		const tarball = join(directory, stdout.trim());
-		const { stdout: listing } = await exec("tar", ["-tf", tarball]);
-		const files = new Set(listing.trim().split("\n"));
+		const { stdout: listing } = await exec("tar", [
+			"-tf",
+			join(directory, stdout.trim()),
+		]);
+		const files = new Set(
+			listing
+				.trim()
+				.split("\n")
+				.map((line) => line.replace(/\r$/, "")),
+		);
 		assert.equal(files.has("package/docker/image-lock.json"), true);
+		assert.equal(files.has("package/docker/runtime-lock.json"), true);
+		assert.equal(files.has("package/docker/runtime-release-lock.json"), true);
+		assert.equal(files.has("package/docker/runtime-package.json"), true);
+		assert.equal(files.has("package/docker/runtime-package-lock.json"), true);
 		assert.equal(files.has("package/src/image-lock.ts"), true);
+		assert.equal(files.has("package/src/platform.ts"), true);
+		assert.equal(files.has("package/src/state-schema.ts"), true);
 		assert.equal(files.has("package/dist/cli.js"), true);
-		assert.equal(files.has("package/dist/image.js"), true);
-		assert.equal(files.has("package/dist/sbx/inherited-runner.mjs"), true);
+		assert.equal(files.has("package/runtime/extension.mjs"), true);
+		assert.equal(files.has("package/runtime/package.json"), true);
 		assert.equal(files.has("package/scripts/verify-image.mjs"), false);
-		assert.equal(files.has("package/scripts/verify-package.mjs"), false);
-		assert.equal(files.has("package/scripts/fresh-install-smoke.mjs"), false);
-		assert.equal(files.has("package/docs/.vitepress/config.mts"), false);
-		assert.equal(files.has("package/docs/.vitepress/dist/index.html"), false);
+		const { stdout: runtimeSource } = await exec("tar", [
+			"-xOf",
+			join(directory, stdout.trim()),
+			"package/runtime/extension.mjs",
+		]);
+		assert.doesNotMatch(
+			runtimeSource,
+			/(?:from\s+|import\s*\()["'][^"']*(?:src\/(?:launch|image|workspace|config)|image-lock|host-auth)[^"']*["']/,
+		);
+		const { stdout: dockerfile } = await exec("tar", [
+			"-xOf",
+			join(directory, stdout.trim()),
+			"package/docker/runtime.Dockerfile",
+		]);
+		assert.doesNotMatch(dockerfile, /pi-docker-sandboxes\.tgz/);
+		assert.doesNotMatch(dockerfile, /node_modules\/pi-docker-sandboxes/);
+		assert.doesNotMatch(dockerfile, /apt-get/);
+		assert.match(dockerfile, /runtime-package-lock\.json/);
+		assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+		assert.match(dockerfile, /sha256sum --check/);
 	} finally {
 		await rm(directory, { recursive: true, force: true });
 	}
-	await assert.rejects(access(directory));
 });

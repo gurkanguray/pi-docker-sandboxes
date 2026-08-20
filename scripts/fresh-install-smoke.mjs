@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+	access,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const packageName = "pi-docker-sandboxes";
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function fail(message) {
 	throw new Error(message);
@@ -18,11 +25,7 @@ export function runCommand(command, args, options) {
 			done({
 				command,
 				args,
-				exitCode: error
-					? typeof error.code === "number"
-						? error.code
-						: -1
-					: 0,
+				exitCode: error ? (typeof error.code === "number" ? error.code : -1) : 0,
 				error: error?.message,
 				signal: error?.signal,
 				stdout: stdout.trim(),
@@ -41,10 +44,25 @@ async function exists(path) {
 	}
 }
 
+async function hasPackageRecord(piHome, source) {
+	const settings = await readFile(join(piHome, "settings.json"), "utf8")
+		.then(JSON.parse)
+		.catch(() => ({}));
+	return (settings.packages ?? []).some(
+		(entry) => (typeof entry === "string" ? entry : entry?.source) === source,
+	);
+}
+
 async function main() {
-	const [argument] = process.argv.slice(2);
-	if (!argument || process.argv.length !== 3)
-		fail("Usage: node scripts/fresh-install-smoke.mjs <tarball-or-version>");
+	const args = process.argv.slice(2);
+	const published = args[0] === "--published";
+	const argument = published ? args[1] : args[0];
+	if (!argument || args.length !== (published ? 2 : 1))
+		fail(
+			"Usage: node scripts/fresh-install-smoke.mjs [--published] <tarball-or-version>",
+		);
+	if (published && !/^\d+\.\d+\.\d+$/.test(argument))
+		fail("Published Pi install verification requires an exact stable version");
 
 	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-fresh-install-"));
 	const home = join(root, "home");
@@ -62,9 +80,14 @@ async function main() {
 		/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(argument)
 	)
 		artifact = `${packageName}@${argument.replace(/^v/, "")}`;
+	const npmUserConfig = join(root, "npmrc");
+	await import("node:fs/promises").then(({ writeFile }) =>
+		writeFile(npmUserConfig, "registry=https://registry.npmjs.org/\n"),
+	);
 	const env = {
 		HOME: home,
 		LOGNAME: "pi-dsbx-smoke",
+		NPM_CONFIG_USERCONFIG: npmUserConfig,
 		PATH: process.env.PATH ?? "",
 		PI_CODING_AGENT_DIR: piHome,
 		TMPDIR: root,
@@ -93,16 +116,24 @@ async function main() {
 				`Expected ${packageName} artifact, received ${packed.name ?? "unknown"}`,
 			);
 
-		const install = await runCommand(
-			npmCommand,
-			["install", "--ignore-scripts", "--prefix", prefix, artifact],
-			{ cwd: root, env },
-		);
-		install.label = "install";
+		const installSource = `npm:${packageName}@${packed.version}`;
+		const piCommand = process.env.PI_COMMAND ?? "pi";
+		const install = published
+			? await runCommand(piCommand, ["install", installSource], { cwd: root, env })
+			: await runCommand(
+					npmCommand,
+					["install", "--ignore-scripts", "--prefix", prefix, artifact],
+					{ cwd: root, env },
+				);
+		install.label = published ? "pi install exact npm version" : "install";
 		commands.push(install);
 		if (install.exitCode !== 0) fail("fresh install failed");
 
-		const packageRoot = join(prefix, "node_modules", packed.name);
+		const packageRoot = published
+			? join(piHome, "npm", "node_modules", packed.name)
+			: join(prefix, "node_modules", packed.name);
+		if (published && !(await hasPackageRecord(piHome, installSource)))
+			fail("Pi did not record the exact installed package source");
 		const pkg = JSON.parse(
 			await readFile(join(packageRoot, "package.json"), "utf8"),
 		);
@@ -120,17 +151,20 @@ async function main() {
 			fail("installed artifact does not expose its declared Pi extension");
 
 		const cli = join(
-			prefix,
+			published ? join(piHome, "npm") : prefix,
 			"node_modules",
 			".bin",
 			process.platform === "win32" ? "pi-dsbx.cmd" : "pi-dsbx",
 		);
-		for (const [label, args] of [
-			["pi-dsbx --help", ["--help"]],
-			["pi-dsbx config", ["config"]],
-			["pi-dsbx doctor", ["doctor"]],
-		]) {
-			const result = await runCommand(cli, args, { cwd: root, env });
+		const smokeCommands = published
+			? [["pi extension launch", piCommand, ["--help"]]]
+			: [
+					["pi-dsbx --help", cli, ["--help"]],
+					["pi-dsbx config", cli, ["config"]],
+					["pi-dsbx doctor", cli, ["doctor"]],
+				];
+		for (const [label, command, args] of smokeCommands) {
+			const result = await runCommand(command, args, { cwd: root, env });
 			result.label = label;
 			commands.push(result);
 			// doctor intentionally reports unmet host prerequisites with exit 1;
@@ -138,20 +172,78 @@ async function main() {
 			if (result.exitCode !== 0 && label !== "pi-dsbx doctor")
 				fail(`${label} failed`);
 			if (
+				label === "pi extension launch" &&
+				(!result.stdout.includes("--docker-sandbox") ||
+					!result.stdout.includes("--docker-sandbox-no-host-auth"))
+			)
+				fail("Pi did not discover the installed extension flags");
+			if (
 				label === "pi-dsbx doctor" &&
 				(![0, 1].includes(result.exitCode) || !result.stdout)
 			)
 				fail(`${label} did not complete diagnostics`);
 		}
 
+		const removeArgs = published
+			? ["remove", installSource]
+			: ["uninstall", "--ignore-scripts", "--prefix", prefix, packed.name];
+		let runtimeLaunches = 0;
+		if (published) {
+			await writeFile(join(root, "release-smoke.txt"), "public install\n");
+			for (const gitArgs of [
+				["init", "-b", "main"],
+				["config", "user.email", "release@example.invalid"],
+				["config", "user.name", "Release verification"],
+				["add", "release-smoke.txt"],
+				["commit", "-m", "release smoke"],
+			]) {
+				const prepared = await runCommand("git", gitArgs, { cwd: root, env });
+				if (prepared.exitCode !== 0)
+					fail("could not prepare the public dispatch workspace");
+			}
+			const launched = await runCommand(
+				piCommand,
+				["--docker-sandbox", "--docker-sandbox-no-host-auth", "--yes", "--help"],
+				{ cwd: root, env },
+			);
+			launched.label = "installed Pi extension dispatch";
+			commands.push(launched);
+			if (launched.exitCode !== 0) fail("installed Pi extension dispatch failed");
+			if (!launched.stderr.includes("pi-dsbx: checking Docker Sandboxes"))
+				fail("installed Pi extension did not enter the launch path");
+			runtimeLaunches = 1;
+		}
+
 		const uninstall = await runCommand(
-			npmCommand,
-			["uninstall", "--ignore-scripts", "--prefix", prefix, packed.name],
+			published ? piCommand : npmCommand,
+			removeArgs,
 			{ cwd: root, env },
 		);
-		uninstall.label = "uninstall";
+		uninstall.label = published ? "pi remove exact npm version" : "uninstall";
 		commands.push(uninstall);
 		if (uninstall.exitCode !== 0) fail("fresh uninstall failed");
+		if (published) {
+			if (await hasPackageRecord(piHome, installSource))
+				fail("Pi remove left the package recorded");
+			const reinstall = await runCommand(piCommand, ["install", installSource], {
+				cwd: root,
+				env,
+			});
+			reinstall.label = "pi reinstall exact npm version";
+			commands.push(reinstall);
+			if (reinstall.exitCode !== 0) fail("Pi reinstall failed");
+			if (!(await hasPackageRecord(piHome, installSource)))
+				fail("Pi reinstall did not restore the package record");
+			const finalRemove = await runCommand(piCommand, ["remove", installSource], {
+				cwd: root,
+				env,
+			});
+			finalRemove.label = "pi final cleanup";
+			commands.push(finalRemove);
+			if (finalRemove.exitCode !== 0) fail("Pi final cleanup failed");
+			if (await hasPackageRecord(piHome, installSource))
+				fail("Pi final cleanup left the package recorded");
+		}
 
 		receipt = {
 			sourceSha: process.env.SOURCE_SHA ?? null,
@@ -164,13 +256,22 @@ async function main() {
 				node: process.version,
 			},
 			piPackage,
+			actualPiInstall: published,
+			exactInstallSource: published ? installSource : null,
+			packageRecordVerified: published,
+			extensionFlagsVerified: published,
+			extensionDispatchVerified: published,
+			launchPathVerified: published,
+			runtimeLaunches,
 			commands,
 		};
 	} catch (error) {
 		failure = error;
 	} finally {
 		const installedPackage = receipt
-			? join(prefix, "node_modules", packageName)
+			? published
+				? join(piHome, "npm", "node_modules", packageName)
+				: join(prefix, "node_modules", packageName)
 			: undefined;
 		const packageRemoved = installedPackage
 			? !(await exists(installedPackage))
@@ -179,6 +280,7 @@ async function main() {
 		if (receipt) {
 			receipt.cleanup = {
 				packageRemoved,
+				packageRecordRemoved: true,
 				prefixRemoved: !(await exists(prefix)),
 				piHomeRemoved: !(await exists(piHome)),
 			};

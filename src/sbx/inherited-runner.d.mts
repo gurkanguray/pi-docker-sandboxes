@@ -4,6 +4,13 @@ export class SbxNotInstalledError extends Error {
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 
+export interface InheritedGrace {
+	termGraceMs: number;
+	killGraceMs: number;
+}
+
+export const INHERITED_GRACE_MS: Readonly<InheritedGrace>;
+
 export interface InheritedRuntime {
 	spawn(
 		command: string,
@@ -18,4 +25,5 @@ export function runInherited(
 	args: readonly string[],
 	env?: Record<string, string | undefined>,
 	runtime?: InheritedRuntime,
+	grace?: InheritedGrace,
 ): Promise<number>;

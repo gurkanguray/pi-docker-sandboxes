@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	access,
 	mkdir,
 	mkdtemp,
 	readFile,
+	rm,
 	realpath,
 	writeFile,
 } from "node:fs/promises";
@@ -13,25 +15,39 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { parseRunArgs } from "../src/cli.ts";
+import { OperationError } from "../src/errors.ts";
+import { resolveKitImage } from "../src/kit.ts";
+import { acquireSandboxLease } from "../src/lease.ts";
 import {
-	launch,
+	launch as productionLaunch,
 	sanitizedHostEnvironment,
 	stripSandboxFlags,
 } from "../src/launch.ts";
 import { buildReexecArguments } from "../src/reexec.ts";
 import {
 	inspectRepository,
+	loadSandboxState,
 	sandboxName,
 	saveSandboxState,
 	statePath,
 } from "../src/workspace.ts";
 import {
+	CommandCancelledError,
+	CommandTimeoutError,
 	SbxClient,
 	SbxCommandError,
 	type CommandRunner,
 } from "../src/sbx/client.ts";
 
 const exec = promisify(execFile);
+const packageTarball = Buffer.from("verified npm tarball fixture");
+const packageIntegrity = `sha512-${createHash("sha512").update(packageTarball).digest("base64")}`;
+const packageCommit = "a".repeat(40);
+const lockedNpm = (name: string) => ({
+	source: `npm:${name}@1.0.0`,
+	integrity: packageIntegrity,
+});
+const lockedGit = (source: string) => `${source}@${packageCommit}`;
 async function git(cwd: string, ...args: string[]): Promise<string> {
 	return (await exec("git", args, { cwd, encoding: "utf8" })).stdout.trim();
 }
@@ -62,6 +78,26 @@ async function exists(path: string): Promise<boolean> {
 }
 
 const launchImage = `example.invalid/image@sha256:${"a".repeat(64)}`;
+const launch: typeof productionLaunch = (options) =>
+	productionLaunch({
+		...options,
+		fetchNpmPackage:
+			options.fetchNpmPackage ??
+			(async (_lock, destination) => {
+				await mkdir(destination, { recursive: true, mode: 0o700 });
+				const path = join(destination, "verified-package.tgz");
+				await writeFile(path, packageTarball);
+				return path;
+			}),
+		resolveImage: options.resolveImage ?? (async () => ({ image: launchImage })),
+		certifyPlatform:
+			options.certifyPlatform ??
+			(async () => ({
+				os: "darwin",
+				arch: "arm64",
+				runtimePlatform: "linux/arm64",
+			})),
+	});
 
 const launchClient = {
 	capabilities: async () => ({
@@ -75,6 +111,7 @@ const launchClient = {
 	secretServices: async () => new Set<string>(),
 	exists: async () => false,
 	validateKit: async () => undefined,
+	copyTo: async () => undefined,
 	create: async () => undefined,
 	inspect: async () => ({ image: launchImage }),
 	attach: async () => 0,
@@ -82,12 +119,134 @@ const launchClient = {
 
 const launchConfig = {
 	syncProfile: "clean" as const,
-	sandbox: {
-		image: launchImage,
-		keep: true,
-	},
+	sandbox: { keep: true },
 	export: { onExit: "never" as const },
 };
+
+test("production launch succeeds from a real linked worktree", async (t) => {
+	const root = await committedRepository();
+	const linked = `${root}-linked`;
+	t.after(() => rm(root, { recursive: true, force: true }));
+	t.after(() => rm(linked, { recursive: true, force: true }));
+	await git(root, "worktree", "add", "-b", "linked-launch", linked);
+	const canonicalLinked = await realpath(linked);
+	let requestName = "";
+	const client = {
+		...launchClient,
+		create: async (request: { name: string }) => {
+			requestName = request.name;
+		},
+	} as unknown as SbxClient;
+	const result = await launch({
+		cwd: canonicalLinked,
+		client,
+		config: launchConfig,
+	});
+	const repository = await inspectRepository(canonicalLinked);
+	assert.equal(repository.mainWorktree, false);
+	assert.equal(result.name, sandboxName(canonicalLinked));
+	assert.equal(requestName, result.name);
+	assert.equal(result.state?.hostRepoIdentity, repository.identity);
+	assert.equal(result.state?.hostWorktreeIdentity, canonicalLinked);
+	assert.equal(
+		(await loadSandboxState(canonicalLinked, result.name)).hostWorktreeIdentity,
+		canonicalLinked,
+	);
+});
+
+test("production launch resolves the published runtime before SBX preflight", async () => {
+	const root = await committedRepository();
+	let created = false;
+	const client = {
+		...launchClient,
+		capabilities: async () => {
+			throw new Error("capability probe reached");
+		},
+		create: async () => {
+			created = true;
+		},
+	} as unknown as SbxClient;
+	await assert.rejects(
+		launch({
+			cwd: root,
+			client,
+			config: launchConfig,
+			resolveImage: resolveKitImage,
+		}),
+		(error: unknown) => {
+			assert.equal(
+				(error as { detail?: string }).detail,
+				"capability probe reached",
+			);
+			return true;
+		},
+	);
+	assert.equal(created, false);
+});
+
+test("Linux KVM preflight precedes repository and sandbox mutation", async () => {
+	let inspected = false;
+	let opened = false;
+	await assert.rejects(
+		launch({
+			cwd: "/not-inspected",
+			client: launchClient,
+			config: launchConfig,
+			certifyPlatform: async () => ({
+				os: "linux",
+				arch: "x64",
+				runtimePlatform: "linux/amd64",
+			}),
+			kvmPreflight: {
+				statKvm: async () => ({ isCharacterDevice: () => true }),
+				openKvm: async () => {
+					opened = true;
+					throw new Error("KVM O_RDWR denied");
+				},
+			},
+			inspectRepository: async (...args) => {
+				inspected = true;
+				return inspectRepository(...args);
+			},
+		}),
+		(error: unknown) => {
+			assert.equal((error as { detail?: string }).detail, "KVM O_RDWR denied");
+			return true;
+		},
+	);
+	assert.equal(opened, true);
+	assert.equal(inspected, false);
+});
+
+test("host certification rejection precedes repository inspection", async () => {
+	let inspected = false;
+	await assert.rejects(
+		launch({
+			cwd: "/not-inspected",
+			client: launchClient,
+			config: launchConfig,
+			certifyPlatform: async () => {
+				throw new Error("Ubuntu 24.04 or newer is required; detected ubuntu 22.04");
+			},
+			inspectRepository: async (...args) => {
+				inspected = true;
+				return inspectRepository(...args);
+			},
+		}),
+		(error: unknown) => {
+			assert.equal(
+				(error as { operation?: string }).operation,
+				"certify host platform and virtualization",
+			);
+			assert.match(
+				(error as { detail?: string }).detail ?? "",
+				/Ubuntu 24\.04 or newer is required/,
+			);
+			return true;
+		},
+	);
+	assert.equal(inspected, false);
+});
 
 test("launch stages personalization but no runtime package archive or setup", async () => {
 	const root = await committedRepository();
@@ -126,11 +285,11 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 	const root = await committedRepository();
 	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-ponytail-"));
 	const agent = join(home, ".pi", "agent");
-	const ponytail = "git:github.com/DietrichGebert/ponytail";
+	const ponytail = lockedGit("git:github.com/DietrichGebert/ponytail");
 	await mkdir(agent, { recursive: true });
 	await writeFile(
 		join(agent, "settings.json"),
-		JSON.stringify({ packages: [ponytail, "npm:pi-subagents"] }),
+		JSON.stringify({ packages: [ponytail, lockedNpm("pi-subagents")] }),
 	);
 	const oldHome = process.env.HOME;
 	process.env.HOME = home;
@@ -142,8 +301,13 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 				events.push("create");
 			},
 			exec: async (_name: string, argv: string[]) => {
-				assert.deepEqual(argv.slice(0, 2), ["pi", "install"]);
-				events.push(`install:${argv[2]}`);
+				if (argv[0] === "pi")
+					events.push(
+						argv[2]?.startsWith("/tmp/pi-dsbx-package-")
+							? "install:npm-local"
+							: `install:${argv[2]}`,
+					);
+				else if (argv[0] === "rm") events.push("cleanup:npm-local");
 				return { stdout: "", stderr: "", code: 0 };
 			},
 			attach: async () => {
@@ -159,7 +323,8 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 		assert.deepEqual(events, [
 			"create",
 			`install:${ponytail}`,
-			"install:npm:pi-subagents",
+			"install:npm-local",
+			"cleanup:npm-local",
 			"attach",
 		]);
 		assert.equal(
@@ -169,6 +334,151 @@ test("Ponytail installs before attach in snapshot order without an unsafe warnin
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+	}
+});
+
+test("mutable packages without installed receipts fail before sandbox mutation", async () => {
+	const root = await committedRepository();
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-mutable-package-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: ["npm:mutable@latest"] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	let created = 0;
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					create: async () => {
+						created++;
+					},
+				} as unknown as SbxClient,
+				config: { ...launchConfig, syncProfile: "mirror" },
+			}),
+			/installed npm lock receipt missing/,
+		);
+		assert.equal(created, 0);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("npm artifact verification completes before sandbox mutation", async () => {
+	const root = await committedRepository();
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-npm-verify-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: [lockedNpm("example")] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	let created = 0;
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					create: async () => {
+						created++;
+					},
+				} as unknown as SbxClient,
+				config: { ...launchConfig, syncProfile: "mirror" },
+				fetchNpmPackage: async () => {
+					throw new Error("npm registry response failed verification");
+				},
+			}),
+			/registry response failed verification/,
+		);
+		assert.equal(created, 0);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("verified npm tarballs are copied, installed locally, and always cleaned", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-npm-local-"));
+	await mkdir(join(home, ".pi", "agent"), { recursive: true });
+	await writeFile(
+		join(home, ".pi", "agent", "settings.json"),
+		JSON.stringify({ packages: [lockedNpm("example")] }),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		for (const failure of ["none", "copy", "install", "cleanup"] as const) {
+			const root = await committedRepository();
+			const events: string[] = [];
+			let installedArgument = "";
+			const client = {
+				...launchClient,
+				create: async () => {
+					events.push("create");
+				},
+				copyTo: async (_name: string, source: string, destination: string) => {
+					events.push("copy");
+					assert.deepEqual(await readFile(source), packageTarball);
+					assert.match(destination, /^\/tmp\/pi-dsbx-package-[0-9a-f-]+\.tgz$/);
+					if (failure === "copy") throw new Error("copy failed");
+				},
+				exec: async (_name: string, argv: string[]) => {
+					if (argv[0] === "pi") {
+						events.push("install");
+						installedArgument = argv[2]!;
+						return {
+							stdout: "",
+							stderr: "",
+							code: failure === "install" ? 1 : 0,
+						};
+					}
+					if (argv[0] === "rm") {
+						events.push("cleanup");
+						return {
+							stdout: "",
+							stderr: "",
+							code: failure === "cleanup" ? 1 : 0,
+						};
+					}
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
+			const operation = launch({
+				cwd: root,
+				client,
+				config: { ...launchConfig, syncProfile: "mirror" },
+				onStatus: (status) => events.push(status),
+			});
+			if (failure === "copy" || failure === "cleanup")
+				await assert.rejects(
+					operation,
+					new RegExp(`${failure} failed|staged npm package`),
+				);
+			else {
+				const result = await operation;
+				assert.equal(result.agentExitCode, 0);
+				if (failure === "install")
+					assert.ok(
+						result.warnings.some((warning) => /package was skipped/.test(warning)),
+					);
+			}
+			assert.ok(events.indexOf("copy") > events.indexOf("create"));
+			assert.ok(events.includes("cleanup"));
+			if (failure !== "copy") {
+				assert.match(installedArgument, /^\/tmp\/pi-dsbx-package-/);
+				assert.notEqual(installedArgument, "npm:example@1.0.0");
+			}
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 	}
 });
 
@@ -269,7 +579,7 @@ test("explicit mirror sync does not wait for a second resource prompt", async ()
 			},
 		});
 		assert.equal(confirmed, false);
-		assert.equal(result.exitCode, 0);
+		assert.equal(result.agentExitCode, 0);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
@@ -332,7 +642,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
+				lockedNpm("context-mode"),
 				"NPM:pi-subagents",
 				"git:example.com/owner/...git",
 				"git:https://999.999/owner/repo",
@@ -344,7 +654,7 @@ test("native packages prompt once and install a compiler only after yes", async 
 				"git:https://www.github.com/owner/repo",
 				"git:example.com/owner/repo#secret-ref",
 				"git:gitlab.com/owner/repo@feature/main",
-				"npm:pi-subagents",
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -359,9 +669,8 @@ test("native packages prompt once and install a compiler only after yes", async 
 			const client = {
 				...launchClient,
 				validateKit: async (directory: string) => {
-					kitAllow = JSON.parse(
-						await readFile(join(directory, "spec.yaml"), "utf8"),
-					).permissions.network.allow;
+					kitAllow = JSON.parse(await readFile(join(directory, "spec.yaml"), "utf8"))
+						.permissions.network.allow;
 				},
 				create: async () => {
 					events.push("create");
@@ -393,12 +702,12 @@ test("native packages prompt once and install a compiler only after yes", async 
 							}
 						: async (packages) => {
 								events.push("prompt");
-								assert.deepEqual(packages, ["npm:context-mode"]);
+								assert.deepEqual(packages, ["npm:context-mode@1.0.0"]);
 								return mode === "yes";
 							},
 				onStatus: (status) => statuses.push(status),
 			});
-			assert.equal(result.exitCode, 0);
+			assert.equal(result.agentExitCode, 0);
 			const rejected = [
 				"NPM:pi-subagents",
 				"git:example.com/owner/...git",
@@ -422,22 +731,21 @@ test("native packages prompt once and install a compiler only after yes", async 
 				execs.some((argv) => rejected.some((source) => argv.includes(source))),
 				false,
 			);
-			assert.deepEqual(statuses.slice(0, 4), [
+			assert.deepEqual(statuses.slice(0, 3), [
 				"checking Docker Sandboxes",
 				"syncing host credentials",
 				"copying host profile",
-				"creating sandbox",
 			]);
+			const lastVerification = statuses.reduce(
+				(last, status, index) =>
+					status.startsWith("verifying npm:") ? index : last,
+				-1,
+			);
+			assert.ok(statuses.indexOf("creating sandbox") > lastVerification);
 			assert.equal(statuses.at(-1), "starting Pi");
 			if (mode === "yes") {
-				assert.deepEqual(events, [
-					"prompt",
-					"create",
-					"exec",
-					"exec",
-					"exec",
-					"attach",
-				]);
+				assert.deepEqual(events.slice(0, 2), ["prompt", "create"]);
+				assert.equal(events.at(-1), "attach");
 				assert.equal(execs[0]?.[0], "root");
 				const compilerCommand = execs[0]?.join(" ") ?? "";
 				assert.match(compilerCommand, /build-essential/);
@@ -451,50 +759,32 @@ test("native packages prompt once and install a compiler only after yes", async 
 					compilerCommand.match(/-o Dir::Etc::sourceparts=-/g)?.length,
 					2,
 				);
-				assert.deepEqual(execs.slice(1), [
-					["agent", "pi", "install", "npm:context-mode"],
-					["agent", "pi", "install", "npm:pi-subagents"],
-				]);
-				assert.deepEqual(statuses, [
-					"checking Docker Sandboxes",
-					"syncing host credentials",
-					"copying host profile",
-					"creating sandbox",
-					"installing compiler",
-					"installing npm:context-mode",
-					"installing npm:pi-subagents",
-					"starting Pi",
-				]);
+				const installs = execs.filter((argv) => argv[1] === "pi");
+				assert.equal(installs.length, 2);
+				assert.ok(
+					installs.every((argv) =>
+						/^\/tmp\/pi-dsbx-package-[0-9a-f-]+\.tgz$/.test(argv[3] ?? ""),
+					),
+				);
+				assert.deepEqual(
+					statuses.filter((status) => status.startsWith("installing npm:")),
+					["installing npm:context-mode@1.0.0", "installing npm:pi-subagents@1.0.0"],
+				);
 				assert.deepEqual(kitAllow, [
 					"api.github.com",
-					"api.openai.com",
-					"api.x.ai",
 					"archive.ubuntu.com",
-					"chatgpt.com",
 					"codeload.github.com",
 					"github.com",
 					"objects.githubusercontent.com",
-					"openrouter.ai",
 					"ports.ubuntu.com",
-					"raw.githubusercontent.com",
 					"registry.npmjs.org",
 					"security.ubuntu.com",
 				]);
 			} else {
-				assert.deepEqual(execs, [
-					["agent", "pi", "install", "npm:pi-subagents"],
-				]);
-				assert.deepEqual(kitAllow, [
-					"api.github.com",
-					"api.openai.com",
-					"api.x.ai",
-					"chatgpt.com",
-					"github.com",
-					"objects.githubusercontent.com",
-					"openrouter.ai",
-					"raw.githubusercontent.com",
-					"registry.npmjs.org",
-				]);
+				const installs = execs.filter((argv) => argv[1] === "pi");
+				assert.equal(installs.length, 1);
+				assert.match(installs[0]?.[3] ?? "", /^\/tmp\/pi-dsbx-package-/);
+				assert.deepEqual(kitAllow, []);
 				if (mode === "no") assert.ok(events.includes("prompt"));
 				else assert.equal(events.includes("prompt"), false);
 			}
@@ -528,12 +818,15 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 	const settingsPath = join(agent, "settings.json");
 	await writeFile(
 		settingsPath,
-		JSON.stringify({ packages: ["npm:context-mode", "npm:pi-hermes-memory"] }),
+		JSON.stringify({
+			packages: [lockedNpm("context-mode"), lockedNpm("pi-hermes-memory")],
+		}),
 	);
 	const oldHome = process.env.HOME;
 	process.env.HOME = home;
 	try {
 		const installs: string[] = [];
+		const statuses: string[] = [];
 		let newNativeSkillCopied = false;
 		const client = {
 			...launchClient,
@@ -560,25 +853,36 @@ test("native consent installs only the frozen prompt set in snapshot order", asy
 			cwd: root,
 			client,
 			config: { ...launchConfig, syncProfile: "mirror" },
+			onStatus: (status) => statuses.push(status),
 			confirmNativePackages: async (packages) => {
 				assert.deepEqual(packages, [
-					"npm:context-mode",
-					"npm:pi-hermes-memory",
+					"npm:context-mode@1.0.0",
+					"npm:pi-hermes-memory@1.0.0",
 				]);
 				await writeFile(
 					settingsPath,
 					JSON.stringify({
 						packages: [
-							"npm:new-native",
-							"npm:pi-hermes-memory",
-							"npm:context-mode",
+							lockedNpm("new-native"),
+							lockedNpm("pi-hermes-memory"),
+							lockedNpm("context-mode"),
 						],
 					}),
 				);
 				return true;
 			},
 		});
-		assert.deepEqual(installs, ["npm:pi-hermes-memory", "npm:context-mode"]);
+		assert.equal(installs.length, 2);
+		assert.ok(
+			installs.every((value) => value.startsWith("/tmp/pi-dsbx-package-")),
+		);
+		assert.deepEqual(
+			statuses.filter((status) => status.startsWith("installing npm:")),
+			[
+				"installing npm:pi-hermes-memory@1.0.0",
+				"installing npm:context-mode@1.0.0",
+			],
+		);
 		assert.equal(newNativeSkillCopied, true);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -613,10 +917,10 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 		join(agent, "settings.json"),
 		JSON.stringify({
 			packages: [
-				"npm:context-mode",
-				"git:github.com/example/failing-package",
-				"npm:pi-hermes-memory",
-				"npm:pi-subagents",
+				lockedNpm("context-mode"),
+				lockedGit("git:github.com/example/failing-package"),
+				lockedNpm("pi-hermes-memory"),
+				lockedNpm("pi-subagents"),
 			],
 		}),
 	);
@@ -626,14 +930,13 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 		for (const failure of ["compiler", "package"] as const) {
 			let attachedSettings: { packages?: string[] } | undefined;
 			let kitSettingsPath = "";
-			const sandboxSettingsPath = join(
-				home,
-				`sandbox-${failure}-settings.json`,
-			);
+			const sandboxSettingsPath = join(home, `sandbox-${failure}-settings.json`);
 			let skillsPresent = false;
 			const delivered: string[] = [];
 			const execs: string[][] = [];
+			const statuses: string[] = [];
 			const packageExecUsers: Array<string | undefined> = [];
+			let npmInstallIndex = 0;
 			const client = {
 				...launchClient,
 				validateKit: async (directory: string) => {
@@ -678,9 +981,7 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 					);
 				},
 				attach: async () => {
-					attachedSettings = JSON.parse(
-						await readFile(sandboxSettingsPath, "utf8"),
-					);
+					attachedSettings = JSON.parse(await readFile(sandboxSettingsPath, "utf8"));
 					return 0;
 				},
 				exec: async (
@@ -697,9 +998,10 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 					if (argv.includes("install")) {
 						packageExecUsers.push(options?.user);
 						const packageSpec = argv.at(-1)!;
+						const npmTarball = packageSpec.startsWith("/tmp/pi-dsbx-package-");
 						if (
-							packageSpec === "git:github.com/example/failing-package" ||
-							packageSpec === "npm:context-mode"
+							packageSpec === lockedGit("git:github.com/example/failing-package") ||
+							(failure === "package" && npmTarball && npmInstallIndex++ === 0)
 						)
 							return { stdout: "", stderr: "npm ERR secret-value", code: 1 };
 						const settings = JSON.parse(
@@ -720,27 +1022,44 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 				client,
 				config: { ...launchConfig, syncProfile: "mirror" },
 				confirmNativePackages: async () => true,
+				onStatus: (status) => statuses.push(status),
 				onWarning: (warning) => delivered.push(warning),
 			});
-			assert.equal(result.exitCode, 0);
+			assert.equal(result.agentExitCode, 0);
 			assert.equal(skillsPresent, true);
-			assert.deepEqual(
-				attachedSettings?.packages,
-				failure === "compiler"
-					? ["npm:pi-subagents"]
-					: ["npm:pi-hermes-memory", "npm:pi-subagents"],
+			assert.equal(
+				attachedSettings?.packages?.length,
+				failure === "compiler" ? 1 : 2,
+			);
+			assert.ok(
+				attachedSettings?.packages?.every((value) =>
+					value.startsWith("/tmp/pi-dsbx-package-"),
+				),
+			);
+			const packageInstalls = execs
+				.filter((argv) => argv[0] === "pi" && argv[1] === "install")
+				.map((argv) => argv[2]!);
+			assert.equal(packageInstalls.length, failure === "compiler" ? 2 : 4);
+			assert.equal(
+				packageInstalls.filter((value) => value.startsWith("npm:")).length,
+				0,
 			);
 			assert.deepEqual(
-				execs
-					.filter((argv) => argv[0] === "pi" && argv[1] === "install")
-					.map((argv) => argv[2]),
+				statuses.filter(
+					(status) =>
+						status.startsWith("installing npm:") ||
+						status.startsWith("installing git:"),
+				),
 				failure === "compiler"
-					? ["git:github.com/example/failing-package", "npm:pi-subagents"]
+					? [
+							`installing ${lockedGit("git:github.com/example/failing-package")}`,
+							"installing npm:pi-subagents@1.0.0",
+						]
 					: [
-							"npm:context-mode",
-							"git:github.com/example/failing-package",
-							"npm:pi-hermes-memory",
-							"npm:pi-subagents",
+							"installing npm:context-mode@1.0.0",
+							`installing ${lockedGit("git:github.com/example/failing-package")}`,
+							"installing npm:pi-hermes-memory@1.0.0",
+							"installing npm:pi-subagents@1.0.0",
 						],
 			);
 			assert.deepEqual(
@@ -752,11 +1071,11 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 				failure === "compiler"
 					? [
 							"Could not install compiler; native packages were skipped",
-							"Could not install git:github.com/example/failing-package; package was skipped",
+							`Could not install ${lockedGit("git:github.com/example/failing-package")}; package was skipped`,
 						]
 					: [
-							"Could not install npm:context-mode; skills were copied instead",
-							"Could not install git:github.com/example/failing-package; package was skipped",
+							"Could not install npm:context-mode@1.0.0; skills were copied instead",
+							`Could not install ${lockedGit("git:github.com/example/failing-package")}; package was skipped`,
 						],
 			);
 			assert.equal(
@@ -767,6 +1086,86 @@ test("failed native setup drops failed specs and keeps fallback skills", async (
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+	}
+});
+
+test("native compiler and package interruption aborts before ready transition", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-native-timeout-"));
+	const agent = join(home, ".pi", "agent");
+	await mkdir(join(agent, "npm", "node_modules", "context-mode"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(agent, "npm", "node_modules", "context-mode", "package.json"),
+		JSON.stringify({
+			name: "context-mode",
+			dependencies: { "better-sqlite3": "^12.0.0" },
+		}),
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({
+			packages: [lockedNpm("context-mode"), lockedNpm("pi-subagents")],
+		}),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	try {
+		for (const [failure, interruption] of [
+			["compiler", "timeout"],
+			["compiler", "cancel"],
+			["package", "timeout"],
+			["package", "cancel"],
+		] as const) {
+			const root = await committedRepository();
+			let attached = false;
+			let cleaned = false;
+			const cause =
+				interruption === "timeout"
+					? new CommandTimeoutError("sbx", 100)
+					: new CommandCancelledError("sbx");
+			const client = {
+				...launchClient,
+				attach: async () => {
+					attached = true;
+					return 0;
+				},
+				exec: async (_name: string, argv: string[]) => {
+					if (
+						(failure === "compiler" &&
+							argv.some((arg) => arg.includes("build-essential"))) ||
+						(failure === "package" && argv[0] === "pi")
+					)
+						throw cause;
+					return { stdout: "", stderr: "", code: 0 };
+				},
+			} as unknown as SbxClient;
+			await assert.rejects(
+				launch({
+					cwd: root,
+					client,
+					config: { ...launchConfig, syncProfile: "mirror" },
+					confirmNativePackages: async () => true,
+					cleanup: {
+						removeTemp: async (path) => {
+							cleaned = true;
+							await rm(path, { recursive: true, force: true });
+						},
+					},
+				}),
+				(error: unknown) =>
+					error instanceof OperationError && error.cause === cause,
+			);
+			assert.equal(attached, false);
+			assert.equal(cleaned, true);
+			const state = await loadSandboxState(root, sandboxName(root));
+			assert.equal(state.phase, "failed");
+			assert.equal(state.lastOperationError?.category, "create");
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
 	}
 });
 
@@ -804,24 +1203,74 @@ test("reattach does not prompt for or install native packages", async () => {
 			return true;
 		},
 	});
-	assert.equal(result.exitCode, 0);
+	assert.equal(result.agentExitCode, 0);
 	assert.equal(prompts, 0);
 	assert.equal(installs, 0);
 });
 
-test("safe default needs no resource confirmation", async () => {
+test("safe default needs no resource or credential access", async () => {
 	const root = await committedRepository();
-	let confirmations = 0;
+	let resourceConfirmations = 0;
+	let authReads = 0;
+	let secretReads = 0;
+	let secretWrites = 0;
+	const client = {
+		...launchClient,
+		setSecret: async () => {
+			secretWrites++;
+		},
+	} as unknown as SbxClient;
 	await launch({
 		cwd: root,
-		client: launchClient,
+		client,
 		config: launchConfig,
 		confirmResourceCopy: async () => {
-			confirmations++;
+			resourceConfirmations++;
 			return false;
 		},
+		listHostOAuthProviders: async () => {
+			authReads++;
+			return new Set(["openai-codex"]);
+		},
+		printApiKey: async () => {
+			secretReads++;
+			return "opaque-host-secret";
+		},
 	});
-	assert.equal(confirmations, 0);
+	assert.equal(resourceConfirmations, 0);
+	assert.equal(authReads, 0);
+	assert.equal(secretReads, 0);
+	assert.equal(secretWrites, 0);
+});
+
+test("oauth-copy requires sandbox-specific consent even with --yes", async () => {
+	const root = await committedRepository();
+	let authReads = 0;
+	let created = 0;
+	const client = {
+		...launchClient,
+		create: async () => {
+			created++;
+		},
+	} as unknown as SbxClient;
+	await assert.rejects(
+		launch({
+			cwd: root,
+			client,
+			config: {
+				...launchConfig,
+				auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+			},
+			yes: true,
+			listHostOAuthProviders: async () => {
+				authReads++;
+				return new Set(["openai-codex"]);
+			},
+		}),
+		/OAuth credential copy.*not approved/i,
+	);
+	assert.equal(authReads, 0);
+	assert.equal(created, 0);
 });
 
 test("missing proxy credentials are optional and guidance precedes launch", async () => {
@@ -850,14 +1299,15 @@ test("missing proxy credentials are optional and guidance precedes launch", asyn
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["cursor", "openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["cursor", "openai"] },
+		},
 		onWarning: (warning) => events.push(`warning:${warning}`),
 	});
 	const spec = JSON.parse(kit);
 	assert.deepEqual(
-		spec.credentials.map(
-			(credential: { service: string }) => credential.service,
-		),
+		spec.credentials.map((credential: { service: string }) => credential.service),
 		["openai"],
 	);
 	assert.equal(spec.credentials[0].required, false);
@@ -868,8 +1318,7 @@ test("missing proxy credentials are optional and guidance precedes launch", asyn
 			events.indexOf("warning:  sbx secret set openai"),
 	);
 	assert.ok(
-		events.indexOf("warning:  sbx secret set openai") <
-			events.indexOf("create"),
+		events.indexOf("warning:  sbx secret set openai") < events.indexOf("create"),
 	);
 	assert.ok(events.indexOf("create") < events.indexOf("attach"));
 	assert.equal(
@@ -938,8 +1387,14 @@ test("launch does not warn for copied oauth host providers", async () => {
 		const result = await launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, syncProfile: "custom" },
+			config: {
+				...launchConfig,
+				syncProfile: "custom",
+				auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+				sync: { models: true },
+			},
 			listHostProviders: async () => ["openai-codex"],
+			confirmOAuthCopy: async () => true,
 			yes: true,
 		});
 		assert.equal(kitAuth, undefined);
@@ -957,14 +1412,18 @@ test("launch does not warn for copied oauth host providers", async () => {
 		assert.equal(
 			result.warnings.some(
 				(warning) =>
-					warning ===
-					"Host provider openai-codex has no sandbox credential service",
+					warning === "Host provider openai-codex has no sandbox credential service",
 			),
 			false,
 		);
 		assert.equal(
 			result.warnings.some((warning) => warning.includes("openai-codex")),
 			false,
+		);
+		assert.ok(
+			result.warnings.some(
+				(warning) => warning.includes("VM-readable") && warning.includes("persist"),
+			),
 		);
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
@@ -1021,7 +1480,11 @@ test("no-host-auth excludes OAuth credentials from generated Kit files", async (
 		await launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, syncProfile: "custom" },
+			config: {
+				...launchConfig,
+				syncProfile: "custom",
+				auth: { mode: "oauth-copy", providers: ["xai"] },
+			},
 			listHostProviders: async () => ["xai"],
 			noHostAuth: true,
 			yes: true,
@@ -1035,7 +1498,6 @@ test("no-host-auth excludes OAuth credentials from generated Kit files", async (
 });
 
 test("OAuth staging cleanup runs after copy or install failure", async () => {
-	const root = await committedRepository();
 	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-oauth-cleanup-"));
 	await mkdir(join(home, ".pi", "agent"), { recursive: true });
 	await writeFile(
@@ -1052,6 +1514,7 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 	process.env.HOME = home;
 	try {
 		for (const failure of ["copy", "install"] as const) {
+			const root = await committedRepository();
 			const commands: string[][] = [];
 			const client = {
 				...launchClient,
@@ -1069,8 +1532,17 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 				launch({
 					cwd: root,
 					client,
-					config: { ...launchConfig, syncProfile: "custom" },
+					config: {
+						...launchConfig,
+						syncProfile: "custom",
+						auth: {
+							mode: "oauth-copy",
+							providers: ["openai-codex"],
+						},
+						sync: { models: true },
+					},
 					listHostProviders: async () => ["openai-codex"],
+					confirmOAuthCopy: async () => true,
 					yes: true,
 				}),
 				new RegExp(`${failure} failed`),
@@ -1085,11 +1557,9 @@ test("OAuth staging cleanup runs after copy or install failure", async () => {
 	}
 });
 
-test("malformed or ineligible OAuth tokens retain unmatched warnings", async () => {
+test("oauth-copy rejects explicitly requested providers without copyable tokens", async () => {
 	const root = await committedRepository();
-	const home = await mkdtemp(
-		join(tmpdir(), "pi-dsbx-launch-oauth-ineligible-"),
-	);
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-launch-oauth-ineligible-"));
 	const agent = join(home, ".pi", "agent");
 	await mkdir(agent, { recursive: true });
 	const oldHome = process.env.HOME;
@@ -1109,15 +1579,35 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 								},
 				}),
 			);
-			const result = await launch({
+			let created = false;
+			const operation = launch({
 				cwd: root,
-				client: launchClient,
+				client: {
+					...launchClient,
+					create: async () => {
+						created = true;
+					},
+					copyTo: async () => undefined,
+					exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+				} as unknown as SbxClient,
 				config:
 					scenario === "malformed"
-						? { ...launchConfig, syncProfile: "custom" }
+						? {
+								...launchConfig,
+								syncProfile: "custom",
+								auth: {
+									mode: "oauth-copy",
+									providers: ["openai-codex"],
+								},
+								sync: { models: true },
+							}
 						: {
 								...launchConfig,
 								syncProfile: "custom",
+								auth: {
+									mode: "oauth-copy",
+									providers: ["openai-codex"],
+								},
 								sync: {
 									settings: true,
 									models: false,
@@ -1130,17 +1620,72 @@ test("malformed or ineligible OAuth tokens retain unmatched warnings", async () 
 								},
 							},
 				listHostProviders: async () => ["openai-codex"],
+				confirmOAuthCopy: async () => true,
 				yes: true,
 			});
-			assert.ok(
-				result.warnings.includes(
-					"Host provider openai-codex has no sandbox credential service",
-				),
-			);
+			if (scenario === "malformed") {
+				await assert.rejects(
+					operation,
+					/No copyable OAuth credential.*sign in on the host/i,
+				);
+				assert.equal(created, false);
+			} else {
+				const result = await operation;
+				assert.equal(result.agentExitCode, 0);
+			}
 		}
 	} finally {
 		if (oldHome === undefined) delete process.env.HOME;
 		else process.env.HOME = oldHome;
+	}
+});
+
+test("oauth-copy asks for consent again for every sandbox", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pi-dsbx-oauth-repeat-home-"));
+	const agent = join(home, ".pi", "agent");
+	await mkdir(agent, { recursive: true });
+	await writeFile(
+		join(agent, "auth.json"),
+		JSON.stringify({
+			"openai-codex": {
+				type: "oauth",
+				access: "host-oauth-access",
+				refresh: "host-oauth-refresh",
+			},
+		}),
+	);
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	const questions: string[] = [];
+	try {
+		for (let index = 0; index < 2; index++) {
+			const root = await committedRepository();
+			await launch({
+				cwd: root,
+				client: {
+					...launchClient,
+					copyTo: async () => undefined,
+					exec: async () => ({ stdout: "", stderr: "", code: 0 }),
+				} as unknown as SbxClient,
+				config: {
+					...launchConfig,
+					auth: { mode: "oauth-copy", providers: ["openai-codex"] },
+				},
+				yes: true,
+				confirmOAuthCopy: async (question) => {
+					questions.push(question);
+					return true;
+				},
+			});
+		}
+		assert.equal(questions.length, 2);
+		assert.notEqual(questions[0], questions[1]);
+		assert.ok(
+			questions.every((question) => /VM-readable.*persist/i.test(question)),
+		);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
 	}
 });
 
@@ -1158,7 +1703,10 @@ test("configured requested proxy credential suppresses no-credential guidance ca
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai", "cursor"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai", "cursor"] },
+		},
 		onWarning: (warning) => delivered.push(warning),
 	});
 	assert.equal(
@@ -1193,7 +1741,10 @@ test("launch copies a missing host API key into sbx before guidance", async () =
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai"] },
+		},
 		printApiKey: async () => "host-api-key-value",
 	});
 	assert.deepEqual(stored, [{ id: "openai", key: "host-api-key-value" }]);
@@ -1223,7 +1774,10 @@ test("image preflight failure does not persist host credentials", async () => {
 		launch({
 			cwd: root,
 			client,
-			config: { ...launchConfig, providers: ["openai"] },
+			config: {
+				...launchConfig,
+				auth: { mode: "proxy", providers: ["openai"] },
+			},
 			printApiKey: async () => "host-api-key-value",
 			resolveImage: async () => {
 				throw new Error("image unavailable");
@@ -1249,7 +1803,10 @@ test("credential presence discovery failures do not guess that credentials are m
 	const result = await launch({
 		cwd: root,
 		client,
-		config: { ...launchConfig, providers: ["openai"] },
+		config: {
+			...launchConfig,
+			auth: { mode: "proxy", providers: ["openai"] },
+		},
 	});
 	assert.ok(
 		result.warnings.includes(
@@ -1286,6 +1843,37 @@ test("unborn repository rejection does not create a commit", async () => {
 	assert.equal(await git(root, "ls-files", "--stage"), stagedBefore);
 });
 
+test("concurrent unborn run cannot create an initial commit before its lease", async () => {
+	const root = await unbornRepository();
+	const canonical = await realpath(root);
+	const held = await acquireSandboxLease(
+		canonical,
+		sandboxName(canonical),
+		"destroy",
+	);
+	try {
+		await assert.rejects(
+			launch({
+				cwd: root,
+				client: launchClient,
+				config: launchConfig,
+				yes: true,
+			}),
+			/busy.*destroy/i,
+		);
+		await assert.rejects(() => git(root, "rev-parse", "--verify", "HEAD"));
+	} finally {
+		await held.release();
+	}
+	await launch({
+		cwd: root,
+		client: launchClient,
+		config: launchConfig,
+		yes: true,
+	});
+	assert.equal(await git(root, "rev-list", "--count", "HEAD"), "1");
+});
+
 test("callback approval creates exactly one empty initial commit", async () => {
 	const root = await unbornRepository();
 	let approvals = 0;
@@ -1315,7 +1903,7 @@ test("--yes creates exactly one empty initial commit", async () => {
 	assert.equal(await git(root, "show", "--format=", "--name-only", "HEAD"), "");
 });
 
-test("state persists immediately after create before repository reinspection", async () => {
+test("creating intent persists before create and repository reinspection", async () => {
 	for (const mode of [
 		"success",
 		"launch-failure",
@@ -1335,22 +1923,15 @@ test("state persists immediately after create before repository reinspection", a
 			},
 			create: async () => {
 				calls.push("create");
-				assert.equal(await exists(path), false);
-				if (mode === "launch-failure")
-					throw new Error("injected launch failure");
+				assert.equal(await exists(path), true);
+				if (mode === "launch-failure") throw new Error("injected launch failure");
 				if (mode === "head-drift") {
 					await writeFile(join(root, "drift.txt"), "drift\n");
 					await git(root, "add", "drift.txt");
 					await git(root, "commit", "-m", "drift");
 				}
 				if (mode === "identity-drift")
-					await git(
-						root,
-						"remote",
-						"add",
-						"origin",
-						"https://example.invalid/repo",
-					);
+					await git(root, "remote", "add", "origin", "https://example.invalid/repo");
 			},
 			inspect: async () => {
 				calls.push("inspect");
@@ -1378,10 +1959,7 @@ test("state persists immediately after create before repository reinspection", a
 					? ["validate", "create", "inspect", "attach"]
 					: ["validate", "create"],
 		);
-		assert.equal(
-			await exists(path),
-			mode === "success" || mode === "head-drift" || mode === "identity-drift",
-		);
+		assert.equal(await exists(path), true);
 	}
 });
 
@@ -1411,10 +1989,7 @@ test("capability and existence failures are phased and redact sbx stderr", async
 					(error as { detail?: string }).detail?.includes(secret),
 					false,
 				);
-				assert.match(
-					(error as { detail?: string }).detail ?? "",
-					/\[redacted\]/,
-				);
+				assert.match((error as { detail?: string }).detail ?? "", /\[redacted\]/);
 				assert.ok((error as { recovery?: readonly string[] }).recovery?.length);
 				return true;
 			},
@@ -1552,7 +2127,7 @@ test("launch passes the exact sanitized environment to create and attach request
 			create: async (request: { env?: NodeJS.ProcessEnv }) => {
 				requests.push(request);
 			},
-			inspect: async () => ({ image: launchConfig.sandbox.image }),
+			inspect: async () => ({ image: launchImage }),
 			attach: async (request: { env?: NodeJS.ProcessEnv }) => {
 				requests.push(request);
 				return 0;
@@ -1633,11 +2208,7 @@ test("re-exec maps sandbox flags and preserves inner Pi argv", () => {
 		"hello world",
 	]);
 	assert.ok(parsed);
-	assert.deepEqual(parsed.innerPiArgs, [
-		"--model",
-		"openai/gpt",
-		"hello world",
-	]);
+	assert.deepEqual(parsed.innerPiArgs, ["--model", "openai/gpt", "hello world"]);
 	assert.deepEqual(parsed.launcherArgs.slice(-4), [
 		"--",
 		"--model",
@@ -1769,6 +2340,11 @@ test("CLI parser requires explicit options and keeps Pi args after separator", (
 	assert.deepEqual(parsed.piArgs, ["--help"]);
 	assert.throws(() => parseRunArgs(["--direct"]), /Unknown run option/);
 	assert.throws(() => parseRunArgs(["--share-skills"]), /Unknown run option/);
+	assert.throws(
+		() =>
+			parseRunArgs(["--image", `example.invalid/pi@sha256:${"a".repeat(64)}`]),
+		/Unknown run option: --image/,
+	);
 	assert.throws(() => parseRunArgs(["--no-sync-back"]), /Unknown run option/);
 	assert.throws(() => parseRunArgs(["--wat"]), /Unknown run option/);
 });

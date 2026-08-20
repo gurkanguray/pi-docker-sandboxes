@@ -2,9 +2,11 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parseConfig, type ConfigOverride } from "./config.ts";
-import { assertDigestReference } from "./image-lock.ts";
-import { assertLocalTemplateAttestation } from "./local-template.ts";
-import type { SandboxImageAttestation, SandboxState } from "./workspace.ts";
+import {
+	parseSandboxState,
+	parseSandboxStateV2,
+	type SandboxStateV2,
+} from "./state-schema.ts";
 
 export interface Migration<T> {
 	value: T;
@@ -18,7 +20,7 @@ export function migrateConfig(
 	source: string,
 ): Migration<ConfigOverride> {
 	const parsed = parseConfig(value, source);
-	const sourceVersion = parsed.version ?? 1;
+	const sourceVersion = parsed.version ?? 2;
 	return {
 		value: structuredClone(parsed),
 		warnings: [],
@@ -27,107 +29,84 @@ export function migrateConfig(
 	};
 }
 
-function record(value: unknown, path: string): Record<string, unknown> {
-	if (!value || typeof value !== "object" || Array.isArray(value))
-		throw new TypeError(`${path} must contain a state object`);
-	return value as Record<string, unknown>;
-}
-
-function requiredString(value: unknown, field: string): string {
-	if (typeof value !== "string" || value.length === 0)
-		throw new TypeError(`${field} must be a non-empty string`);
-	return value;
+export interface SandboxMigrationEvidence {
+	exists: true;
+	inspectedImage: string;
+	expectedImage: string;
+	runtimeSchema: number;
+	packageVersion: string;
+	templateStoreId?: string;
+	migratedAt?: string;
 }
 
 export function migrateSandboxState(
 	value: unknown,
 	path: string,
-): Migration<SandboxState> {
-	const input = record(value, path);
-	const allowed = new Set([
-		"version",
-		"name",
-		"hostBaseCommit",
-		"hostBranch",
-		"hostRepoIdentity",
-		"hostRoot",
-		"workspaceMode",
-		"createdAt",
-		"imageAttestation",
-	]);
+	evidence?: SandboxMigrationEvidence,
+): Migration<SandboxStateV2> {
 	const preserve = `preserve ${path} before recovery`;
-	if (input.version !== 1)
+	let parsed;
+	try {
+		parsed = parseSandboxState(value, path);
+	} catch (cause) {
 		throw new TypeError(
-			`${path} has unsupported state version ${String(input.version)}; ${preserve}`,
+			`${cause instanceof Error ? cause.message : String(cause)}; ${preserve}`,
+			{ cause },
 		);
-	const unknown = Object.keys(input).find((key) => !allowed.has(key));
-	if (unknown)
-		throw new TypeError(
-			`${path} has unknown state field ${unknown}; ${preserve}`,
-		);
-	const workspaceMode = requiredString(
-		input.workspaceMode,
-		`${path}.workspaceMode`,
-	);
-	if (workspaceMode !== "clone")
-		throw new TypeError(`${path}.workspaceMode is unsupported; ${preserve}`);
-	let imageAttestation: SandboxImageAttestation | undefined;
-	if (input.imageAttestation !== undefined) {
-		const attestation = record(
-			input.imageAttestation,
-			`${path}.imageAttestation`,
-		);
-		const nestedAllowed = new Set(["status", "image", "templateStoreId"]);
-		const nestedUnknown = Object.keys(attestation).find(
-			(key) => !nestedAllowed.has(key),
-		);
-		if (nestedUnknown)
-			throw new TypeError(
-				`${path}.imageAttestation has unknown field ${nestedUnknown}; ${preserve}`,
-			);
-		if (attestation.status !== "pending" && attestation.status !== "verified")
-			throw new TypeError(`${path}.imageAttestation.status is unsupported`);
-		const image = requiredString(
-			attestation.image,
-			`${path}.imageAttestation.image`,
-		);
-		const templateStoreId = attestation.templateStoreId;
-		if (templateStoreId === undefined)
-			assertDigestReference(image, `${path}.imageAttestation.image`);
-		else {
-			requiredString(
-				templateStoreId,
-				`${path}.imageAttestation.templateStoreId`,
-			);
-			assertLocalTemplateAttestation(image, templateStoreId);
-		}
-		imageAttestation = {
-			status: attestation.status,
-			image,
-			...(typeof templateStoreId === "string" ? { templateStoreId } : {}),
-		};
 	}
-	return {
-		value: {
-			version: 1,
-			name: requiredString(input.name, `${path}.name`),
-			hostBaseCommit: requiredString(
-				input.hostBaseCommit,
-				`${path}.hostBaseCommit`,
-			),
-			hostBranch: requiredString(input.hostBranch, `${path}.hostBranch`),
-			hostRepoIdentity: requiredString(
-				input.hostRepoIdentity,
-				`${path}.hostRepoIdentity`,
-			),
-			hostRoot: requiredString(input.hostRoot, `${path}.hostRoot`),
-			workspaceMode,
-			createdAt: requiredString(input.createdAt, `${path}.createdAt`),
-			...(imageAttestation ? { imageAttestation } : {}),
+	if (parsed.version === 2)
+		return {
+			value: parsed,
+			warnings: [],
+			sourceVersion: 2,
+			migrated: false,
+		};
+	if (
+		!evidence ||
+		evidence.inspectedImage !== evidence.expectedImage ||
+		(parsed.imageAttestation &&
+			parsed.imageAttestation.image !== evidence.expectedImage)
+	)
+		throw new TypeError(
+			`${path} version 1 requires matching daemon and image evidence; ${preserve}`,
+		);
+	const migratedAt = evidence.migratedAt ?? new Date().toISOString();
+	const migrated = parseSandboxStateV2(
+		{
+			version: 2,
+			phase: "ready",
+			name: parsed.name,
+			hostBaseCommit: parsed.hostBaseCommit,
+			hostBranch: parsed.hostBranch,
+			hostRepoIdentity: parsed.hostRepoIdentity,
+			hostWorktreeIdentity: parsed.hostRoot,
+			hostRoot: parsed.hostRoot,
+			workspaceMode: "clone",
+			createdAt: parsed.createdAt,
+			updatedAt: migratedAt,
+			runtimeImage: evidence.expectedImage,
+			runtimeSchema: evidence.runtimeSchema,
+			packageVersion: evidence.packageVersion,
+			imageAttestation: {
+				status: "verified",
+				image: evidence.expectedImage,
+				...(evidence.templateStoreId
+					? { templateStoreId: evidence.templateStoreId }
+					: {}),
+			},
+			...(evidence.templateStoreId
+				? { templateStoreId: evidence.templateStoreId }
+				: {}),
 		},
-		warnings: [],
+		path,
+	);
+	return {
+		value: migrated,
+		warnings: [
+			"Migrated sandbox lifecycle state from version 1 after daemon and image reconciliation",
+		],
 		sourceVersion: 1,
-		migrated: false,
+		migrated: true,
 	};
 }
 
@@ -174,6 +153,7 @@ export async function writeJsonAtomic(
 	options: {
 		directoryPrepared?: boolean;
 		validateDirectory?: () => Promise<void>;
+		beforeRename?: () => Promise<void>;
 	} = {},
 ): Promise<void> {
 	const flags = atomicWriteFlags();
@@ -206,9 +186,12 @@ export async function writeJsonAtomic(
 		await file.close();
 		file = undefined;
 		await validateDirectory();
+		await options.beforeRename?.();
+		await validateDirectory();
 		await rename(temporary, path);
 		created = false;
 		await validateDirectory();
+		await directoryHandle.sync();
 	} catch (error) {
 		await file?.close().catch(() => undefined);
 		if (created && identity) {

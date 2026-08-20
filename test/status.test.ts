@@ -4,10 +4,28 @@ import {
 	attestSandbox,
 	formatDoctor,
 	isSandboxAttested,
+	lifecycleStatus,
 	runDoctor,
 	sandboxStatus,
 } from "../src/status.ts";
 import type { SbxClient } from "../src/sbx/client.ts";
+
+const lifecycleState = {
+	version: 2 as const,
+	phase: "exporting" as const,
+	name: "pi-status",
+	hostBaseCommit: "base",
+	hostBranch: "main",
+	hostRepoIdentity: "repository",
+	hostWorktreeIdentity: "/repo",
+	hostRoot: "/repo",
+	workspaceMode: "clone" as const,
+	createdAt: "2026-08-18T00:00:00.000Z",
+	updatedAt: "2026-08-18T00:00:00.000Z",
+	runtimeImage: `example.invalid/runtime@sha256:${"a".repeat(64)}`,
+	runtimeSchema: 1,
+	packageVersion: "1.0.0",
+};
 
 const readOnlySourceMount =
 	"42 35 0:39 / /run/sandbox/source ro,nosuid,nodev - virtiofs source rw\n";
@@ -45,6 +63,17 @@ test("status uses attestation rather than the sentinel", () => {
 	};
 	assert.equal(sandboxStatus(false, spoofed), "Docker SBX: host");
 	assert.equal(sandboxStatus(true, spoofed), "SBX: clone · hardened");
+});
+
+test("status reports interrupted lifecycle custody without mutating it", () => {
+	assert.deepEqual(
+		lifecycleStatus(lifecycleState, { exists: true, imageMatches: true }),
+		{
+			level: "warning",
+			message:
+				"sandbox lifecycle: exporting; reconciliation preserve (interrupted export)",
+		},
+	);
 });
 
 test("sandbox doctor reports the clone-only workspace mode", async () => {
@@ -113,8 +142,11 @@ test("doctor reports discovered proxy credential services", async () => {
 
 test("doctor reports configured requested credentials and unsupported requests separately", async () => {
 	const config = await import("../src/config.ts");
-	const original = config.DEFAULT_CONFIG.providers;
-	config.DEFAULT_CONFIG.providers = ["openai", "cursor"];
+	const original = config.DEFAULT_CONFIG.auth;
+	config.DEFAULT_CONFIG.auth = {
+		mode: "proxy",
+		providers: ["openai", "cursor"],
+	};
 	try {
 		const client = {
 			version: async () => ({ version: "0.38.0" }),
@@ -148,7 +180,7 @@ test("doctor reports configured requested credentials and unsupported requests s
 			),
 		);
 	} finally {
-		config.DEFAULT_CONFIG.providers = original;
+		config.DEFAULT_CONFIG.auth = original;
 	}
 });
 

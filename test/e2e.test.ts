@@ -11,19 +11,73 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { launch } from "../src/launch.ts";
-import { SbxClient } from "../src/sbx/client.ts";
-import { runInherited } from "../src/sbx/inherited-runner.mjs";
-import { applyPatch, exportPatch } from "../src/workspace.ts";
+import { npmCommand } from "../scripts/npm-command.mjs";
+import { importControllerModule } from "./e2e-controller-modules.ts";
 
 const enabled = process.env.PI_DOCKER_SANDBOX_E2E === "1";
+const installedPackageRoot =
+	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT ??
+	fileURLToPath(new URL("..", import.meta.url));
+const runtimeReceiptPath = process.env.PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT;
+if (enabled && !process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT)
+	throw new Error("Real E2E requires the installed candidate package root");
+if (enabled && !runtimeReceiptPath)
+	throw new Error("Real E2E requires a sandbox runtime receipt path");
+
+const [launchLoaded, clientLoaded, inheritedLoaded, workspaceLoaded] =
+	await Promise.all([
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/launch.js" : "src/launch.ts",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/sbx/client.js" : "src/sbx/client.ts",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled
+				? "dist/sbx/inherited-runner.mjs"
+				: "src/sbx/inherited-runner.mjs",
+		),
+		importControllerModule(
+			installedPackageRoot,
+			enabled ? "dist/workspace.js" : "src/workspace.ts",
+		),
+	]);
+const { launch } = launchLoaded.module as typeof import("../src/launch.ts");
+const { SbxClient } =
+	clientLoaded.module as typeof import("../src/sbx/client.ts");
+const { runInherited } =
+	inheritedLoaded.module as typeof import("../src/sbx/inherited-runner.mjs");
+const { applyPatch, exportPatch } =
+	workspaceLoaded.module as typeof import("../src/workspace.ts");
+for (const loaded of [
+	launchLoaded,
+	clientLoaded,
+	inheritedLoaded,
+	workspaceLoaded,
+])
+	console.log(`E2E_CONTROLLER_MODULE_PATH=${loaded.modulePath}`);
+
 const selectedImage = process.env.PI_DOCKER_SANDBOX_E2E_IMAGE;
 const selectedTemplateStoreId =
 	process.env.PI_DOCKER_SANDBOX_E2E_TEMPLATE_STORE_ID;
-const expectedPackageVersion =
-	process.env.PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION ?? "0.1.0";
 const exec = promisify(execFile);
+const SANDBOX_RUNTIME_EXTENSION =
+	"/home/agent/.pi/agent/runtime/pi-docker-sandboxes.mjs";
+const CONTROLLER_PACKAGE_DIRECTORY =
+	"/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes";
+
+async function assertControllerPackageAbsent(
+	execSandbox: (name: string, argv: readonly string[]) => Promise<unknown>,
+	name: string,
+): Promise<void> {
+	await execSandbox(name, ["test", "!", "-e", CONTROLLER_PACKAGE_DIRECTORY]);
+}
+
 async function recordSandbox(name: string): Promise<void> {
 	const path = process.env.PI_DOCKER_SANDBOX_E2E_NAMES;
 	if (path) await appendFile(path, `${name}\n`);
@@ -53,6 +107,24 @@ const e2eLaunch: typeof launch = async (options) => {
 			: options.resolveImage,
 	});
 };
+test("E2E runtime gate fails closed when the controller package is present", async () => {
+	const presenceFailure = new Error("controller package present");
+	const calls: Array<{ name: string; argv: readonly string[] }> = [];
+	await assert.rejects(
+		assertControllerPackageAbsent(async (name, argv) => {
+			calls.push({ name, argv });
+			throw presenceFailure;
+		}, "sandbox-fixture"),
+		(error) => error === presenceFailure,
+	);
+	assert.deepEqual(calls, [
+		{
+			name: "sandbox-fixture",
+			argv: ["test", "!", "-e", CONTROLLER_PACKAGE_DIRECTORY],
+		},
+	]);
+});
+
 async function host(
 	command: string,
 	args: string[],
@@ -93,12 +165,12 @@ sandboxTest(
 				projectTrusted: false,
 				config: {
 					syncProfile: "clean",
-					providers: ["openai"],
+					auth: { mode: "proxy", providers: ["openai"] },
 					sandbox: { name, keep: true },
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
+			assert.equal(launched.agentExitCode, 0);
 			assert.ok(launched.state);
 			const stagingProbe = join(root, "host-staging-probe");
 			const cleanupProbe = await e2eLaunch({
@@ -114,29 +186,48 @@ sandboxTest(
 				},
 				config: {
 					syncProfile: "clean",
-					providers: ["openai"],
+					auth: { mode: "proxy", providers: ["openai"] },
 					sandbox: { name, keep: true },
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(cleanupProbe.exitCode, 0);
+			assert.equal(cleanupProbe.agentExitCode, 0);
 			const stagingPath = await readFile(stagingProbe, "utf8");
 			await assert.rejects(() => lstat(stagingPath));
 			await rm(stagingProbe);
 
+			await assertControllerPackageAbsent(
+				(sandbox, argv) => client.exec(sandbox, argv),
+				name,
+			);
+			await client.exec(name, ["test", "-f", SANDBOX_RUNTIME_EXTENSION]);
 			const runtime = await client.exec(name, [
 				"sh",
 				"-c",
-				"env; printf '\\nPI_VERSION='; pi --version; npm list -g pi-docker-sandboxes --depth=0",
+				"set -eu; env; printf '\\nPI_VERSION='; pi --version; printf '\\nRUNTIME_EXTENSION=kit\\n'",
 			]);
 			assert.match(runtime.stdout, /PI_DOCKER_SANDBOX_ACTIVE=1/);
-			assert.match(runtime.stdout, /PI_VERSION=0\.84\.1/);
-			assert.match(
-				runtime.stdout,
-				new RegExp(
-					`pi-docker-sandboxes@${expectedPackageVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+			const piVersion = runtime.stdout.match(
+				/^PI_VERSION=(?:\S+\s+)?(\d+\.\d+\.\d+)\s*$/m,
+			)?.[1];
+			assert.ok(piVersion, "sandbox runtime must report its Pi version");
+			const imageLock = JSON.parse(
+				await readFile(
+					join(installedPackageRoot, "docker/image-lock.json"),
+					"utf8",
 				),
+			) as { piVersion?: string };
+			assert.equal(imageLock.piVersion, "0.84.1");
+			assert.equal(piVersion, imageLock.piVersion);
+			await writeFile(
+				runtimeReceiptPath!,
+				`${JSON.stringify(
+					{ piVersion, imageLockPiVersion: imageLock.piVersion },
+					null,
+					2,
+				)}\n`,
 			);
+			assert.match(runtime.stdout, /RUNTIME_EXTENSION=kit/);
 			for (const key of [
 				"OPENAI_API_KEY",
 				"ANTHROPIC_API_KEY",
@@ -156,16 +247,22 @@ sandboxTest(
 					assert.notEqual(githubProxy, process.env.GH_TOKEN);
 			}
 
-			const doctorScript =
-				"import {attestSandbox,runDoctor,formatDoctor} from '/usr/local/share/npm-global/lib/node_modules/pi-docker-sandboxes/src/status.ts'; console.log(formatDoctor(await runDoctor(await attestSandbox())))";
 			const doctor = await client.exec(name, [
-				"sh",
-				"-c",
-				`node --experimental-strip-types --input-type=module -e ${JSON.stringify(
-					doctorScript,
-				)} 2>&1 || true`,
+				"pi",
+				"-e",
+				SANDBOX_RUNTIME_EXTENSION,
+				"--print",
+				"--no-session",
+				"/docker-sandbox doctor",
 			]);
-			assert.doesNotMatch(doctor.stdout, /^✗/m);
+			assert.equal(doctor.code, 0);
+			const diagnosticOutput = `${doctor.stdout}\n${doctor.stderr}`;
+			assert.match(diagnosticOutput, /sandbox attestation verified/i);
+			assert.match(diagnosticOutput, /host source mount is read-only/i);
+			assert.doesNotMatch(
+				diagnosticOutput,
+				/no model selected|api key|authentication failed/i,
+			);
 			const boundary = await client.exec(name, [
 				"sh",
 				"-c",
@@ -182,36 +279,12 @@ sandboxTest(
 			);
 			await assert.rejects(() => readFile(join(root, "escape.txt")));
 
-			const hostDockerId = await host("docker", [
-				"info",
-				"--format",
-				"{{.ID}}",
-			]);
-			const sandboxDockerId = (
-				await client.exec(name, ["docker", "info", "--format", "{{.ID}}"])
-			).stdout.trim();
-			assert.notEqual(sandboxDockerId, hostDockerId);
+			await assert.rejects(() => client.exec(name, ["docker", "info"]));
 			await client.exec(name, [
 				"sh",
 				"-c",
-				"mkdir -p /tmp/rootfs; echo x >/tmp/rootfs/x; tar -C /tmp/rootfs -cf /tmp/rootfs.tar .; docker import /tmp/rootfs.tar pi-dsbx-empty:test >/dev/null; docker create --name pi-dsbx-private-test pi-dsbx-empty:test true >/dev/null",
+				"test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
 			]);
-			assert.match(
-				(
-					await client.exec(name, [
-						"docker",
-						"ps",
-						"-a",
-						"--format",
-						"{{.Names}}",
-					])
-				).stdout,
-				/pi-dsbx-private-test/,
-			);
-			assert.doesNotMatch(
-				await host("docker", ["ps", "-a", "--format", "{{.Names}}"]),
-				/pi-dsbx-private-test/,
-			);
 
 			assert.equal(
 				(await client.policyCheckNetwork("example.com", name)).allowed,
@@ -224,8 +297,7 @@ sandboxTest(
 						"-c",
 						"curl --connect-timeout 5 --max-time 10 -fsS https://example.com/",
 					]),
-				(error: Error) =>
-					/denied|blocked|policy|curl|exit/i.test(error.message),
+				(error: Error) => /denied|blocked|policy|curl|exit/i.test(error.message),
 			);
 
 			await client.exec(
@@ -237,10 +309,7 @@ sandboxTest(
 				],
 				{ workdir: launched.state!.hostRoot },
 			);
-			assert.equal(
-				await readFile(join(root, "tracked.txt"), "utf8"),
-				"before\n",
-			);
+			assert.equal(await readFile(join(root, "tracked.txt"), "utf8"), "before\n");
 			const patch = await exportPatch(
 				client,
 				launched.state!,
@@ -248,23 +317,14 @@ sandboxTest(
 			);
 			assert.ok(patch.bytes > 0);
 			await applyPatch(launched.state!, patch.path);
-			assert.equal(
-				await readFile(join(root, "tracked.txt"), "utf8"),
-				"after\n",
-			);
+			assert.equal(await readFile(join(root, "tracked.txt"), "utf8"), "after\n");
 			await assert.rejects(() => readFile(join(root, "deleted.txt")));
 			assert.deepEqual(
 				await readFile(join(root, "binary.dat")),
 				Buffer.from([0, 1, 255]),
 			);
-			assert.equal(
-				(await lstat(join(root, "link.txt"))).isSymbolicLink(),
-				true,
-			);
-			assert.equal(
-				(await lstat(join(root, "executable.sh"))).mode & 0o111,
-				0o111,
-			);
+			assert.equal((await lstat(join(root, "link.txt"))).isSymbolicLink(), true);
+			assert.equal((await lstat(join(root, "executable.sh"))).mode & 0o111, 0o111);
 		} finally {
 			if (await client.exists(name)) await client.remove(name, true);
 			await rm(root, { recursive: true, force: true });
@@ -395,8 +455,7 @@ sandboxTest(
 		} finally {
 			for (const name of Object.values(names))
 				if (await client.exists(name)) await client.remove(name, true);
-			for (const root of roots)
-				await rm(root, { recursive: true, force: true });
+			for (const root of roots) await rm(root, { recursive: true, force: true });
 		}
 	},
 );
@@ -439,11 +498,8 @@ sandboxTest(
 				config: { syncProfile: "clean", sandbox: { name, keep: true } },
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
-			assert.equal(
-				await host("git", ["rev-list", "--count", "HEAD"], root),
-				"1",
-			);
+			assert.equal(launched.agentExitCode, 0);
+			assert.equal(await host("git", ["rev-list", "--count", "HEAD"], root), "1");
 			assert.equal(
 				await host("git", ["show", "--format=", "--name-only", "HEAD"], root),
 				"",
@@ -485,18 +541,14 @@ sandboxTest(
 			let installSource = packageSource;
 			if (packageSource.endsWith(".tgz")) {
 				const packagePrefix = join(root, "package");
-				await run("npm", [
+				await run(npmCommand, [
 					"install",
 					"--ignore-scripts",
 					"--prefix",
 					packagePrefix,
 					packageSource,
 				]);
-				installSource = join(
-					packagePrefix,
-					"node_modules",
-					"pi-docker-sandboxes",
-				);
+				installSource = join(packagePrefix, "node_modules", "pi-docker-sandboxes");
 			}
 			await run("pi", ["install", installSource]);
 			await run("git", ["init", "-b", "main"], repository);
@@ -519,10 +571,7 @@ sandboxTest(
 				repository,
 			);
 			assert.equal(await client.exists(name), true);
-			assert.equal(
-				await readFile(join(repository, "host.txt"), "utf8"),
-				"host\n",
-			);
+			assert.equal(await readFile(join(repository, "host.txt"), "utf8"), "host\n");
 		} finally {
 			if (await client.exists(name)) await client.remove(name, true);
 			await rm(root, { recursive: true, force: true });
@@ -576,7 +625,7 @@ sandboxTest(
 				},
 				piArgs: ["--help"],
 			});
-			assert.equal(launched.exitCode, 0);
+			assert.equal(launched.agentExitCode, 0);
 			const environment = (
 				await client.exec(name, ["sh", "-c", 'printf %s "$PI_PROXY_E2E_KEY"'])
 			).stdout;

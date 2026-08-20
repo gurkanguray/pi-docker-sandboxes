@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { assertDigestReference } from "./image-lock.ts";
 
 export type SecurityProfile = "hardened" | "development";
 export type SyncProfile = "clean" | "mirror" | "custom";
+export type AuthMode = "none" | "proxy" | "oauth-copy";
 export interface SyncOptions {
 	settings: boolean;
 	models: boolean;
@@ -23,31 +23,37 @@ export interface CredentialService {
 	valueFormat: string;
 }
 
+export interface SessionRetention {
+	maxCount: number;
+	maxAgeDays: number;
+	maxBytes: number;
+}
+
 export interface DockerSandboxConfig {
-	version: 1;
+	version: 2;
 	enabled: boolean;
 	profile: SecurityProfile;
 	syncProfile: SyncProfile;
 	sync: SyncOptions;
+	auth: { mode: AuthMode; providers: string[] };
+	retention: SessionRetention;
 	sandbox: {
 		name?: string;
 		keep: boolean;
 		dockerEngine: boolean;
-		image?: string;
 	};
-	providers: string[];
 	network: { allow: string[]; deny: string[] };
 	export: { onExit: "prompt" | "always" | "never"; directory: string };
 }
 
 export const DEFAULT_CONFIG: DockerSandboxConfig = {
-	version: 1,
+	version: 2,
 	enabled: true,
-	profile: "development",
+	profile: "hardened",
 	syncProfile: "custom",
 	sync: {
-		settings: true,
-		models: true,
+		settings: false,
+		models: false,
 		packages: false,
 		skills: false,
 		prompts: false,
@@ -55,8 +61,9 @@ export const DEFAULT_CONFIG: DockerSandboxConfig = {
 		extensions: false,
 		sessions: "managed",
 	},
-	sandbox: { keep: false, dockerEngine: true },
-	providers: [],
+	auth: { mode: "none", providers: [] },
+	retention: { maxCount: 10, maxAgeDays: 30, maxBytes: 1024 * 1024 * 1024 },
+	sandbox: { keep: false, dockerEngine: false },
 	network: { allow: [], deny: [] },
 	export: { onExit: "prompt", directory: ".git/pi-docker-sandbox/patches" },
 };
@@ -67,12 +74,13 @@ const ROOT_KEYS = new Set([
 	"profile",
 	"syncProfile",
 	"sync",
+	"auth",
+	"retention",
 	"sandbox",
-	"providers",
 	"network",
 	"export",
 ]);
-const SANDBOX_KEYS = new Set(["name", "keep", "dockerEngine", "image"]);
+const SANDBOX_KEYS = new Set(["name", "keep", "dockerEngine"]);
 const NETWORK_KEYS = new Set(["allow", "deny"]);
 const SYNC_KEYS = new Set([
 	"settings",
@@ -85,6 +93,10 @@ const SYNC_KEYS = new Set([
 	"sessions",
 ]);
 const EXPORT_KEYS = new Set(["onExit", "directory"]);
+const AUTH_KEYS = new Set(["mode", "providers"]);
+const RETENTION_KEYS = new Set(["maxCount", "maxAgeDays", "maxBytes"]);
+const AUTH_MODES = new Set<AuthMode>(["none", "proxy", "oauth-copy"]);
+const AUTH_PROVIDER = /^[a-z0-9][a-z0-9-]*$/;
 const PROFILES = new Set<SecurityProfile>(["hardened", "development"]);
 const SYNC_PROFILES = new Set<SyncProfile>(["clean", "mirror", "custom"]);
 
@@ -115,6 +127,12 @@ function string(value: unknown, path: string): string {
 	if (value.includes("\0") || value.includes("\n") || value.includes("\r"))
 		throw new TypeError(`${path} contains forbidden control characters`);
 	return value;
+}
+
+function nonNegativeInteger(value: unknown, path: string): number {
+	if (!Number.isSafeInteger(value) || (value as number) < 0)
+		throw new TypeError(`${path} must be a non-negative safe integer`);
+	return value as number;
 }
 
 function strings(value: unknown, path: string): string[] {
@@ -161,8 +179,13 @@ export function validateDomain(domain: string, allowWildcard = true): string {
 }
 
 export type ConfigOverride = Partial<
-	Omit<DockerSandboxConfig, "sandbox" | "sync" | "network" | "export">
+	Omit<
+		DockerSandboxConfig,
+		"auth" | "retention" | "sandbox" | "sync" | "network" | "export"
+	>
 > & {
+	auth?: Partial<DockerSandboxConfig["auth"]>;
+	retention?: Partial<DockerSandboxConfig["retention"]>;
 	sandbox?: Partial<DockerSandboxConfig["sandbox"]>;
 	sync?: Partial<DockerSandboxConfig["sync"]>;
 	network?: Partial<DockerSandboxConfig["network"]>;
@@ -174,8 +197,8 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 	rejectUnknown(input, ROOT_KEYS, `${source}.`);
 	const output: ConfigOverride = {};
 	if (input.version !== undefined) {
-		if (input.version !== 1) throw new TypeError(`${source}.version must be 1`);
-		output.version = 1;
+		if (input.version !== 2) throw new TypeError(`${source}.version must be 2`);
+		output.version = 2;
 	}
 	if (input.enabled !== undefined)
 		output.enabled = boolean(input.enabled, `${source}.enabled`);
@@ -217,8 +240,38 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.sync.sessions = value;
 		}
 	}
-	if (input.providers !== undefined)
-		output.providers = strings(input.providers, `${source}.providers`);
+	if (input.auth !== undefined) {
+		const auth = object(input.auth, `${source}.auth`);
+		rejectUnknown(auth, AUTH_KEYS, `${source}.auth.`);
+		output.auth = {};
+		if (auth.mode !== undefined) {
+			const value = string(auth.mode, `${source}.auth.mode`) as AuthMode;
+			if (!AUTH_MODES.has(value))
+				throw new TypeError(`${source}.auth.mode is unsupported`);
+			output.auth.mode = value;
+		}
+		if (auth.providers !== undefined)
+			output.auth.providers = strings(
+				auth.providers,
+				`${source}.auth.providers`,
+			).map((provider) => {
+				if (!AUTH_PROVIDER.test(provider))
+					throw new TypeError(`${source}.auth.providers contains an invalid id`);
+				return provider;
+			});
+	}
+	if (input.retention !== undefined) {
+		const retention = object(input.retention, `${source}.retention`);
+		rejectUnknown(retention, RETENTION_KEYS, `${source}.retention.`);
+		output.retention = {};
+		for (const key of RETENTION_KEYS) {
+			if (retention[key] !== undefined)
+				output.retention[key as keyof SessionRetention] = nonNegativeInteger(
+					retention[key],
+					`${source}.retention.${key}`,
+				);
+		}
+	}
 	if (input.sandbox !== undefined) {
 		const sandbox = object(input.sandbox, `${source}.sandbox`);
 		rejectUnknown(sandbox, SANDBOX_KEYS, `${source}.sandbox.`);
@@ -234,21 +287,15 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 				sandbox.dockerEngine,
 				`${source}.sandbox.dockerEngine`,
 			);
-		if (sandbox.image !== undefined)
-			output.sandbox.image = assertDigestReference(
-				string(sandbox.image, `${source}.sandbox.image`),
-				`${source}.sandbox.image`,
-			);
 	}
 	if (input.network !== undefined) {
 		const network = object(input.network, `${source}.network`);
 		rejectUnknown(network, NETWORK_KEYS, `${source}.network.`);
 		output.network = {};
 		if (network.allow !== undefined)
-			output.network.allow = strings(
-				network.allow,
-				`${source}.network.allow`,
-			).map((domain) => validateDomain(domain));
+			output.network.allow = strings(network.allow, `${source}.network.allow`).map(
+				(domain) => validateDomain(domain),
+			);
 		if (network.deny !== undefined)
 			output.network.deny = strings(network.deny, `${source}.network.deny`).map(
 				(domain) => validateDomain(domain),
@@ -265,10 +312,7 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 			output.export.onExit = value;
 		}
 		if (exportConfig.directory !== undefined) {
-			const value = string(
-				exportConfig.directory,
-				`${source}.export.directory`,
-			);
+			const value = string(exportConfig.directory, `${source}.export.directory`);
 			if (value.split(/[\\/]/).includes(".."))
 				throw new TypeError(
 					`${source}.export.directory may not traverse parent directories`,
@@ -280,10 +324,12 @@ export function parseConfig(value: unknown, source = "config"): ConfigOverride {
 }
 
 export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
-	return values.reduce<DockerSandboxConfig>(
+	const config = values.reduce<DockerSandboxConfig>(
 		(result, value) => ({
 			...result,
 			...value,
+			auth: { ...result.auth, ...value.auth },
+			retention: { ...result.retention, ...value.retention },
 			sandbox: { ...result.sandbox, ...value.sandbox },
 			sync: { ...result.sync, ...value.sync },
 			network: { ...result.network, ...value.network },
@@ -291,6 +337,13 @@ export function mergeConfig(...values: ConfigOverride[]): DockerSandboxConfig {
 		}),
 		structuredClone(DEFAULT_CONFIG),
 	);
+	if (config.auth.mode === "none" && config.auth.providers.length > 0)
+		throw new TypeError("auth.mode none cannot list providers");
+	if (config.auth.mode !== "none" && config.auth.providers.length === 0)
+		throw new TypeError(
+			`auth.mode ${config.auth.mode} requires at least one explicit provider`,
+		);
+	return config;
 }
 
 export interface LoadedConfig {
@@ -302,12 +355,10 @@ async function readConfig(
 	path: string,
 ): Promise<{ value: ConfigOverride; warnings: string[] }> {
 	try {
-		const { migrateConfig } = await import("./migration.ts");
-		const migrated = migrateConfig(
-			JSON.parse(await readFile(path, "utf8")),
-			path,
-		);
-		return { value: migrated.value, warnings: migrated.warnings };
+		return {
+			value: parseConfig(JSON.parse(await readFile(path, "utf8")), path),
+			warnings: [],
+		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT")
 			return { value: {}, warnings: [] };

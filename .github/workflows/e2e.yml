@@ -10,8 +10,12 @@ on:
         description: Artifact containing the verified npm tarball and receipt
         required: true
         type: string
-      image_artifact:
-        description: Artifact containing the exact OCI candidate archive
+      runtime_artifact:
+        description: Artifact containing verified production runtime receipts
+        required: true
+        type: string
+      runtime_reference:
+        description: Exact public standard runtime digest reference
         required: true
         type: string
       image_digest:
@@ -28,8 +32,12 @@ on:
         description: Artifact name, normally npm-package-<source_sha>
         required: true
         type: string
-      image_artifact:
-        description: Artifact containing the exact OCI candidate archive
+      runtime_artifact:
+        description: Artifact containing verified production runtime receipts
+        required: true
+        type: string
+      runtime_reference:
+        description: Exact public standard runtime digest reference
         required: true
         type: string
       image_digest:
@@ -44,44 +52,64 @@ permissions:
   actions: read
   contents: read
 jobs:
-  macos-arm64:
-    runs-on: [self-hosted, macOS, ARM64, docker-sandboxes]
+  hardware-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner:
+              - self-hosted
+              - macOS
+              - ARM64
+              - docker-sandboxes
+              - ephemeral
+            platform: linux/arm64
+            host-platform: darwin
+            host-arch: arm64
+            requires-kvm: false
+          - name: ubuntu-amd64-kvm
+            runner:
+              - self-hosted
+              - Linux
+              - X64
+              - docker-sandboxes
+              - kvm
+              - ephemeral
+            platform: linux/amd64
+            host-platform: linux
+            host-arch: x64
+            requires-kvm: true
+          - name: ubuntu-arm64-kvm
+            runner:
+              - self-hosted
+              - Linux
+              - ARM64
+              - docker-sandboxes
+              - kvm
+              - ephemeral
+            platform: linux/arm64
+            host-platform: linux
+            host-arch: arm64
+            requires-kvm: true
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      HOME: >-
+        /tmp/pi-dsbx-${{ github.run_id }}-${{ strategy.job-index }}-home
+      PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH: "1"
+      OPENAI_API_KEY: task10-synthetic-not-a-provider-credential
     steps:
-      - name: Initialize fallback E2E evidence
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          IMAGE_DIGEST: ${{ inputs.image_digest }}
-          E2E_LOG: ${{ runner.temp }}/pi-dsbx-e2e.log
-          E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
-          E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+      - name: Initialize isolated runner state
         run: |
-          mkdir -p "$RUNNER_TEMP"
-          : > "$E2E_LOG"
-          : > "$E2E_NAMES"
-          node --input-type=module <<'NODE'
-          import { writeFile } from "node:fs/promises";
-          const receipt = {
-            sourceSha: process.env.SOURCE_SHA,
-            packageIntegrity: null,
-            imageDigest: process.env.IMAGE_DIGEST,
-            selectedImage: null,
-            platform: process.platform,
-            macosVersion: null,
-            architecture: process.arch,
-            sbxVersion: null,
-            piVersion: null,
-            packageVersion: null,
-            tests: ["E2E setup"],
-            testsCount: 0,
-            status: "failed",
-            passedAt: null,
-          };
-          await writeFile(
-            process.env.E2E_RECEIPT,
-            `${JSON.stringify(receipt, null, 2)}\n`,
-          );
-          NODE
+          set -euo pipefail
+          rm -rf "$HOME"
+          mkdir -m 700 "$HOME"
+          echo "PI_CODING_AGENT_DIR=$HOME/.pi/agent" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/pi-dsbx-e2e.log"
+          : > "$RUNNER_TEMP/e2e-sandboxes.txt"
+          printf '{"status":"failed","removed":[]}\n' \
+            > "$RUNNER_TEMP/cleanup-receipt.json"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.source_sha }}
@@ -105,63 +133,54 @@ jobs:
           path: ${{ runner.temp }}/pi-dsbx-e2e-artifact
           github-token: ${{ github.token }}
           run-id: ${{ inputs.run_id }}
-      - name: Download called-workflow OCI candidate
+      - name: Download called-workflow production runtime evidence
         if: github.event_name != 'workflow_dispatch'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.image_artifact }}
-          path: ${{ runner.temp }}/pi-dsbx-e2e-image
-      - name: Download dispatched OCI candidate
+          name: ${{ inputs.runtime_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-runtime
+      - name: Download dispatched production runtime evidence
         if: github.event_name == 'workflow_dispatch'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.image_artifact }}
-          path: ${{ runner.temp }}/pi-dsbx-e2e-image
+          name: ${{ inputs.runtime_artifact }}
+          path: ${{ runner.temp }}/pi-dsbx-e2e-runtime
           github-token: ${{ github.token }}
           run-id: ${{ inputs.run_id }}
-      - name: Load and bind the exact OCI candidate
+      - name: Pull and bind the exact published standard runtime
         id: image
         env:
           EXPECTED_DIGEST: ${{ inputs.image_digest }}
-          IMAGE_ARTIFACT: ${{ runner.temp }}/pi-dsbx-e2e-image
-          IMAGE_ARTIFACT_NAME: ${{ inputs.image_artifact }}
+          RUNTIME_ARTIFACT_NAME: ${{ inputs.runtime_artifact }}
+          RUNTIME_EVIDENCE: ${{ runner.temp }}/pi-dsbx-e2e-runtime
+          RUNTIME_REFERENCE: ${{ inputs.runtime_reference }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          expected_artifact="oci-candidate-$SOURCE_SHA"
-          test "$IMAGE_ARTIFACT_NAME" = "$expected_artifact"
-          archive="$IMAGE_ARTIFACT/candidate-image.oci.tar"
-          receipt="$IMAGE_ARTIFACT/image-verification.json"
-          test -s "$archive"
+          test "$RUNTIME_ARTIFACT_NAME" = "production-runtime-$SOURCE_SHA"
+          test "$RUNTIME_REFERENCE" = "${RUNTIME_REFERENCE%@*}@$EXPECTED_DIGEST"
+          receipt="$RUNTIME_EVIDENCE/runtime-image-receipt.json"
           test -s "$receipt"
-          mkdir "$IMAGE_ARTIFACT/oci"
-          tar -xf "$archive" -C "$IMAGE_ARTIFACT/oci" index.json
-          actual="$(node -p \
-            'require(process.argv[1]).manifests[0].digest' \
-            "$IMAGE_ARTIFACT/oci/index.json")"
-          test "$actual" = "$EXPECTED_DIGEST"
           node --input-type=module - "$receipt" <<'NODE'
           import { readFile } from "node:fs/promises";
           const receipt = JSON.parse(await readFile(process.argv[2]));
-          if (receipt.sourceSha !== process.env.SOURCE_SHA ||
-              receipt.ociDigest !== process.env.EXPECTED_DIGEST)
-            throw new Error("candidate image receipt mismatch");
+          if (receipt.variant !== "standard" ||
+              receipt.indexDigest !== process.env.EXPECTED_DIGEST ||
+              receipt.candidateReference !== process.env.RUNTIME_REFERENCE)
+            throw new Error("published runtime receipt mismatch");
           NODE
-          skopeo="quay.io/skopeo/stable@sha256:9c68e585103448f7e4abb835132ffe9759d7a962a0fa426035775956e7a1e021"
-          docker run --rm --volume "$IMAGE_ARTIFACT:/candidate:ro" \
-            --volume /var/run/docker.sock:/var/run/docker.sock "$skopeo" copy \
-            oci-archive:/candidate/candidate-image.oci.tar:candidate \
-            "docker-daemon:pi-docker-sandboxes:$SOURCE_SHA"
-          image_id="$(docker image inspect "pi-docker-sandboxes:$SOURCE_SHA" \
+          docker pull --platform "$PLATFORM" "$RUNTIME_REFERENCE"
+          image_id="$(docker image inspect "$RUNTIME_REFERENCE" \
             --format '{{.Id}}')"
           content="${image_id#sha256:}"
           selected="docker.io/pi-docker-sandboxes/pi:local-$content"
           docker tag "$image_id" "$selected"
-          docker save --output "$IMAGE_ARTIFACT/sbx-candidate.tar" "$selected"
-          sbx template load "$IMAGE_ARTIFACT/sbx-candidate.tar"
-          sbx template ls --json > "$IMAGE_ARTIFACT/templates.json"
+          docker save --output "$RUNTIME_EVIDENCE/sbx-runtime.tar" "$selected"
+          sbx template load "$RUNTIME_EVIDENCE/sbx-runtime.tar"
+          sbx template ls --json > "$RUNTIME_EVIDENCE/templates.json"
           template_store_id="$(node --input-type=module - \
-            "$IMAGE_ARTIFACT/templates.json" "$selected" <<'NODE'
+            "$RUNTIME_EVIDENCE/templates.json" "$selected" <<'NODE'
           import { readFile } from "node:fs/promises";
           const [path, selected] = process.argv.slice(2);
           const separator = selected.lastIndexOf(":");
@@ -177,7 +196,7 @@ jobs:
           NODE
           )"
           {
-            echo "candidate_digest=$actual"
+            echo "candidate_digest=$EXPECTED_DIGEST"
             echo "selected_image=$selected"
             echo "selected_image_id=$image_id"
             echo "template_store_id=$template_store_id"
@@ -210,10 +229,25 @@ jobs:
           console.log(`package_version=${receipt.binVersion}`);
           NODE
           test "${{ steps.image.outputs.candidate_digest }}" = "$IMAGE_DIGEST"
-          installed="$E2E_PREFIX/node_modules/pi-docker-sandboxes/package.json"
+          installed_root="$E2E_PREFIX/node_modules/pi-docker-sandboxes"
+          installed="$installed_root/package.json"
+          node --input-type=module - "$E2E_PREFIX" "$installed_root" <<'NODE'
+          import { realpath } from "node:fs/promises";
+          import { isAbsolute, relative, sep } from "node:path";
+          const prefix = await realpath(process.argv[2]);
+          const root = await realpath(process.argv[3]);
+          const pathFromPrefix = relative(prefix, root);
+          if (pathFromPrefix === ".." ||
+              pathFromPrefix.startsWith(`..${sep}`) ||
+              isAbsolute(pathFromPrefix))
+            throw new Error(
+              "installed package root is outside isolated prefix",
+            );
+          NODE
           {
             printf 'tarball=%s\n' "$tarball"
             printf 'installed_package=%s\n' "$installed"
+            printf 'installed_package_root=%s\n' "$installed_root"
           } >> "$GITHUB_OUTPUT"
       - name: Run complete real E2E
         id: e2e
@@ -230,8 +264,13 @@ jobs:
           PI_DOCKER_SANDBOX_E2E_PACKAGE: ${{ steps.candidate.outputs.tarball }}
           PI_DOCKER_SANDBOX_E2E_PACKAGE_VERSION: >-
             ${{ steps.candidate.outputs.package_version }}
+          PI_DOCKER_SANDBOX_E2E_PACKAGE_ROOT: >-
+            ${{ steps.candidate.outputs.installed_package_root }}
+          PI_DOCKER_SANDBOX_E2E_RUNTIME_RECEIPT: >-
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
         run: |
           export PATH="$E2E_PREFIX/node_modules/.bin:$PATH"
+          test "$PI_DOCKER_SANDBOX_E2E_SYNTHETIC_AUTH" = 1
           npm run test:e2e 2>&1 | tee -a "$E2E_LOG"
       - name: Write artifact-bound E2E receipt
         if: always()
@@ -246,7 +285,10 @@ jobs:
           TARBALL: ${{ steps.candidate.outputs.tarball }}
           INSTALLED_PACKAGE: ${{ steps.candidate.outputs.installed_package }}
           E2E_RECEIPT: ${{ runner.temp }}/e2e-receipt.json
+          RUNTIME_RECEIPT: >-
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
           E2E_OUTCOME: ${{ steps.e2e.outcome }}
+          KVM_REQUIRED: ${{ matrix.requires-kvm }}
         run: |
           count="$(grep -c 'E2E_TEST_PASSED=1' \
             "$RUNNER_TEMP/pi-dsbx-e2e.log" || true)"
@@ -255,8 +297,35 @@ jobs:
           else
             status=failed
           fi
+          docker_version="$(docker version \
+            --format '{{.Server.Version}}' || true)"
           sbx_version="$(sbx --version | awk '{print $NF}' || true)"
-          pi_version="$(pi --version | awk '{print $NF}' || true)"
+          sbx_version="${sbx_version#v}"
+          pi_version=""
+          image_lock_pi_version=""
+          if test -s "$RUNTIME_RECEIPT" && test -n "$INSTALLED_PACKAGE"; then
+            installed_root="$(dirname "$INSTALLED_PACKAGE")"
+            pi_version="$(node -p \
+              'require(process.argv[1]).piVersion' \
+              "$RUNTIME_RECEIPT" 2>/dev/null || true)"
+            image_lock_pi_version="$(node -p \
+              'require(process.argv[1]).piVersion' \
+              "$installed_root/docker/image-lock.json" 2>/dev/null || true)"
+            runtime_lock_pi_version="$(node -p \
+              'require(process.argv[1]).imageLockPiVersion' \
+              "$RUNTIME_RECEIPT" 2>/dev/null || true)"
+            if test "$runtime_lock_pi_version" != "$image_lock_pi_version"; then
+              image_lock_pi_version=""
+            fi
+          fi
+          if test "${{ matrix.host-platform }}" = darwin; then
+            host_os_name="$(sw_vers -productName)"
+            host_os_version="$(sw_vers -productVersion)"
+          else
+            test -r /etc/os-release
+            host_os_name="$(. /etc/os-release; printf '%s' "$ID")"
+            host_os_version="$(. /etc/os-release; printf '%s' "$VERSION_ID")"
+          fi
           set +e
           node scripts/e2e-receipt.mjs \
             --source-sha "$SOURCE_SHA" \
@@ -269,13 +338,17 @@ jobs:
             --selected-image-id "$SELECTED_IMAGE_ID" \
             --status "$status" \
             --tests-count "$count" \
-            --platform "$(uname -s | tr '[:upper:]' '[:lower:]')" \
-            --macos-version "$(sw_vers -productVersion)" \
-            --architecture "$(uname -m)" \
+            --expected-platform "${{ matrix.host-platform }}" \
+            --os-name "$host_os_name" \
+            --os-version "$host_os_version" \
+            --expected-architecture "${{ matrix.host-arch }}" \
+            --require-kvm "${{ matrix.requires-kvm }}" \
+            --docker-version "$docker_version" \
             --sbx-version "$sbx_version" \
             --pi-version "$pi_version" \
+            --image-lock-pi-version "$image_lock_pi_version" \
             --receipt "$E2E_RECEIPT" \
-            --test "clone boundary, daemon isolation, network denial" \
+            --test "Pi diagnostics, clone, daemon, and network boundaries" \
             --test "binary patch round trip and host staging cleanup" \
             --test "preserve, export, discard, and signal recovery" \
             --test "empty Git onboarding" \
@@ -302,10 +375,20 @@ jobs:
             imageDigest: process.env.IMAGE_DIGEST,
             selectedImage: process.env.SELECTED_IMAGE || null,
             platform: process.platform,
-            macosVersion: null,
+            osName: null,
+            osVersion: null,
             architecture: process.arch,
+            kvm: {
+              required: process.env.KVM_REQUIRED === "true",
+              path: process.env.KVM_REQUIRED === "true" ? "/dev/kvm" : null,
+              characterDevice: false,
+              opened: false,
+              openMode: process.env.KVM_REQUIRED === "true" ? "r+" : null,
+            },
+            dockerVersion: null,
             sbxVersion: null,
             piVersion: null,
+            imageLockPiVersion: null,
             packageVersion: process.env.PACKAGE_VERSION || null,
             tests: ["E2E receipt generation"],
             testsCount: 0,
@@ -319,37 +402,59 @@ jobs:
           NODE
           fi
           exit "$receipt_status"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: macos-e2e-${{ inputs.source_sha }}
-          path: |
-            ${{ runner.temp }}/pi-dsbx-e2e.log
-            ${{ runner.temp }}/e2e-receipt.json
-          if-no-files-found: error
-          retention-days: 14
       - name: Clean only sandboxes recorded by this run
         if: always()
         env:
           E2E_NAMES: ${{ runner.temp }}/e2e-sandboxes.txt
+          CLEANUP_RECEIPT: ${{ runner.temp }}/cleanup-receipt.json
         run: |
           failures="$RUNNER_TEMP/e2e-cleanup-failures"
+          removed="$RUNNER_TEMP/e2e-cleanup-removed"
           : > "$failures"
+          : > "$removed"
           sort -u "$E2E_NAMES" | while IFS= read -r name; do
+            test -n "$name" || continue
             case "$name" in
               pi-dsbx-e2e-*|pi-dsbx-reexec-*|pi-dsbx-proxy-*)
-                if ! sbx rm --force "$name"; then
+                if sbx rm --force "$name"; then
+                  printf '%s\n' "$name" >> "$removed"
+                else
                   printf '%s\n' "$name" >> "$failures"
                 fi
                 ;;
               *)
                 echo "refusing to clean unrecognized sandbox: $name" >&2
-                exit 1
+                printf '%s\n' "$name" >> "$failures"
                 ;;
             esac
           done
+          rm -rf "$HOME"
+          HOME_REMOVED=1 REMOVED="$removed" FAILURES="$failures" \
+            RECEIPT="$CLEANUP_RECEIPT" node --input-type=module <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const lines = async (path) => (await readFile(path, "utf8"))
+            .split("\n").filter(Boolean);
+          const failures = await lines(process.env.FAILURES);
+          await writeFile(process.env.RECEIPT, `${JSON.stringify({
+            status: failures.length ? "failed" : "passed",
+            removed: await lines(process.env.REMOVED),
+            homeRemoved: process.env.HOME_REMOVED === "1",
+            failures,
+          }, null, 2)}\n`);
+          NODE
           if test -s "$failures"; then
-            echo "failed to remove recorded E2E sandboxes:" >&2
+            echo "E2E cleanup failed:" >&2
             cat "$failures" >&2
             exit 1
           fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ${{ matrix.name }}-e2e-${{ inputs.source_sha }}
+          path: |
+            ${{ runner.temp }}/pi-dsbx-e2e.log
+            ${{ runner.temp }}/e2e-receipt.json
+            ${{ runner.temp }}/sandbox-runtime-receipt.json
+            ${{ runner.temp }}/cleanup-receipt.json
+          if-no-files-found: error
+          retention-days: 14

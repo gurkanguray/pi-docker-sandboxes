@@ -7,14 +7,12 @@ import {
 	assertDigestReference,
 	loadImageLock,
 	parseImageLock,
+	selectRuntimeImage,
 } from "../src/image-lock.ts";
 
 const packageJson = JSON.parse(
 	await readFile(new URL("../package.json", import.meta.url), "utf8"),
-) as {
-	version: string;
-	devDependencies: Record<string, string>;
-};
+) as { version: string; devDependencies: Record<string, string> };
 const packageLock = JSON.parse(
 	await readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
 ) as {
@@ -25,15 +23,38 @@ const packageLock = JSON.parse(
 };
 const digest = "a".repeat(64);
 const validLock = {
-	packageVersion: "0.1.0",
+	version: 2,
+	runtimeSchema: 1,
 	piVersion: "0.84.1",
-	platform: "linux/arm64",
-	baseImage: `docker/sandbox-templates@sha256:${digest}`,
-	localImage: "docker.io/pi-docker-sandboxes/pi:0.1.0",
-	tools: {
-		fdDebianVersion: "10.3.0-2ubuntu1",
-		rgDebianVersion: "15.1.0-1ubuntu1",
-		gitDebianVersion: "1:2.53.0-1ubuntu1",
+	images: {
+		standard: {
+			status: "published",
+			reference: `ghcr.io/gurkanguray/pi-docker-sandboxes/runtime-standard@sha256:${digest}`,
+			platforms: ["linux/amd64", "linux/arm64"],
+			privileged: false,
+		},
+		docker: {
+			status: "published",
+			reference: `ghcr.io/gurkanguray/pi-docker-sandboxes/runtime-docker@sha256:${"b".repeat(64)}`,
+			platforms: ["linux/amd64", "linux/arm64"],
+			privileged: true,
+		},
+	},
+};
+
+const unpublishedLock = {
+	...validLock,
+	images: {
+		standard: {
+			status: "unpublished",
+			platforms: ["linux/amd64", "linux/arm64"],
+			privileged: false,
+		},
+		docker: {
+			status: "unpublished",
+			platforms: ["linux/amd64", "linux/arm64"],
+			privileged: true,
+		},
 	},
 };
 
@@ -46,85 +67,88 @@ test("validates digest-pinned image references", () => {
 		true,
 	);
 	assert.throws(
-		() => assertDigestReference("docker/sandbox-templates:shell", "baseImage"),
+		() => assertDigestReference("ghcr.io/example/runtime:latest", "reference"),
 		/digest/,
 	);
 });
 
-test("strictly requires every lock field", () => {
-	assert.deepEqual(parseImageLock(validLock), validLock);
-	for (const field of [
-		"packageVersion",
-		"piVersion",
-		"platform",
-		"baseImage",
-		"localImage",
-		"tools",
-	] as const) {
-		const lock: Record<string, unknown> = structuredClone(validLock);
-		delete lock[field];
-		assert.throws(() => parseImageLock(lock), new RegExp(field), field);
-	}
-	for (const field of [
-		"fdDebianVersion",
-		"rgDebianVersion",
-		"gitDebianVersion",
-	] as const) {
-		const lock = structuredClone(validLock);
-		delete lock.tools[field];
-		assert.throws(
-			() => parseImageLock(lock),
-			new RegExp(`tools\\.${field}`),
-			field,
-		);
-	}
+test("parses both exact runtime variants", () => {
+	const parsed = parseImageLock(validLock);
+	assert.deepEqual(Object.keys(parsed.images).sort(), ["docker", "standard"]);
+	assert.deepEqual(parsed.images.standard.platforms, [
+		"linux/amd64",
+		"linux/arm64",
+	]);
+	assert.equal(parsed.images.standard.privileged, false);
+	assert.equal(parsed.images.docker.privileged, true);
 });
 
-test("strictly rejects invalid and unknown lock fields", () => {
+test("rejects mutable, malformed, and unknown lock values", () => {
+	assert.throws(
+		() =>
+			parseImageLock({
+				...validLock,
+				images: {
+					...validLock.images,
+					standard: {
+						...validLock.images.standard,
+						reference: "ghcr.io/x/runtime:latest",
+					},
+				},
+			}),
+		/digest/i,
+	);
 	assert.throws(() => parseImageLock({ ...validLock, extra: true }), /unknown/);
 	assert.throws(
 		() =>
 			parseImageLock({
 				...validLock,
-				tools: { ...validLock.tools, extra: true },
+				images: {
+					...validLock.images,
+					standard: {
+						...validLock.images.standard,
+						platforms: ["linux/arm64", "linux/amd64"],
+					},
+				},
 			}),
-		/tools has unknown field extra/,
-	);
-	assert.throws(
-		() => parseImageLock({ ...validLock, platform: "linux/amd64" }),
-		/linux\/arm64/,
-	);
-	assert.throws(
-		() => parseImageLock({ ...validLock, packageVersion: "latest" }),
-		/packageVersion/,
-	);
-	assert.throws(
-		() => parseImageLock({ ...validLock, piVersion: "latest" }),
-		/piVersion/,
+		/platforms/,
 	);
 	assert.throws(
 		() =>
 			parseImageLock({
 				...validLock,
-				tools: { ...validLock.tools, fdDebianVersion: "" },
+				images: {
+					...validLock.images,
+					standard: { ...validLock.images.standard, privileged: true },
+				},
 			}),
-		/fdDebianVersion/,
+		/privileged/,
+	);
+});
+
+test("unpublished runtime variants parse but selection fails closed", () => {
+	const parsed = parseImageLock(unpublishedLock);
+	assert.equal(parsed.images.standard.status, "unpublished");
+	assert.equal("reference" in parsed.images.standard, false);
+	assert.throws(
+		() => selectRuntimeImage(parsed, false, "linux/amd64"),
+		/production runtime image standard is unpublished/,
 	);
 	assert.throws(
-		() =>
-			parseImageLock({
-				...validLock,
-				tools: { ...validLock.tools, rgDebianVersion: "latest" },
-			}),
-		/exact Debian package version/,
+		() => selectRuntimeImage(parsed, true, "linux/arm64"),
+		/private Docker engine is unavailable in production 1\.0/,
+	);
+});
+
+test("selects standard and rejects Docker even when a Docker image is published", () => {
+	const parsed = parseImageLock(validLock);
+	assert.equal(
+		selectRuntimeImage(parsed, false, "linux/amd64").reference,
+		validLock.images.standard.reference,
 	);
 	assert.throws(
-		() => parseImageLock({ ...validLock, publishedImage: "repo:latest" }),
-		/unknown field publishedImage/,
-	);
-	assert.throws(
-		() => parseImageLock({ ...validLock, localImage: `repo@sha256:${digest}` }),
-		/localImage.*build tag/,
+		() => selectRuntimeImage(parsed, true, "linux/arm64"),
+		/private Docker engine is unavailable in production 1\.0/,
 	);
 });
 
@@ -135,36 +159,33 @@ test("loads a strict lock fixture", async () => {
 	assert.deepEqual(await loadImageLock(path), validLock);
 });
 
-test("checked-in lock matches every reviewed immutable value", async () => {
+test("checked-in lock selects the verified production standard runtime", async () => {
 	const lock = await loadImageLock();
-	assert.equal(lock.packageVersion, "0.1.0");
-	assert.equal(packageJson.version, "0.1.0");
+	assert.equal(packageJson.version, "1.0.0");
+	assert.equal(packageLock.packages[""]?.version, "1.0.0");
+	assert.equal(lock.version, 2);
+	assert.equal(lock.runtimeSchema, 1);
 	assert.equal(lock.piVersion, "0.84.1");
+	assert.deepEqual(lock.images.standard, {
+		status: "published",
+		reference:
+			"ghcr.io/gurkanguray/pi-docker-sandboxes-runtime-standard@sha256:43433061a13ba16ca6e2d327d245844199acd231b9a4087aa26773e5f2d6714b",
+		platforms: ["linux/amd64", "linux/arm64"],
+		privileged: false,
+	});
+	assert.deepEqual(lock.images.docker, {
+		status: "unpublished",
+		platforms: ["linux/amd64", "linux/arm64"],
+		privileged: true,
+	});
 	assert.equal(
 		packageJson.devDependencies["@earendil-works/pi-coding-agent"],
-		"0.84.1",
+		"0.84.2",
 	);
 	assert.equal(
 		packageLock.packages[""]?.devDependencies?.[
 			"@earendil-works/pi-coding-agent"
 		],
-		"0.84.1",
+		"0.84.2",
 	);
-	assert.equal(
-		packageLock.packages["node_modules/@earendil-works/pi-coding-agent"]
-			?.version,
-		"0.84.1",
-	);
-	assert.equal(
-		lock.baseImage,
-		"docker/sandbox-templates@sha256:d86a6cdc105a1b299667a20c40bcf8d0584e56f21d44490a0737bb1baeb44299",
-	);
-	assert.equal(lock.platform, "linux/arm64");
-	assert.equal(
-		lock.localImage,
-		"docker.io/pi-docker-sandboxes/pi:0.1.0",
-	);
-	assert.equal(lock.tools.fdDebianVersion, "10.3.0-2ubuntu1");
-	assert.equal(lock.tools.rgDebianVersion, "15.1.0-1ubuntu1");
-	assert.equal(lock.tools.gitDebianVersion, "1:2.53.0-1ubuntu1");
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rename, rm } from "node:fs/promises";
+import { mkdir, realpath, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -15,38 +15,61 @@ import {
 	sanitizeDetail,
 	type OperationPhase,
 } from "./errors.ts";
+import { LauncherExitCode } from "./exit-codes.ts";
+import { IMAGE_LOCK } from "./image-lock.ts";
 import {
 	buildKitSpec,
+	PACKAGE_VERSION,
 	resolveKitImage,
 	type KitImageResolver,
 	writeKitDirectory,
 } from "./kit.ts";
+import { withSandboxLease } from "./lease.ts";
+import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import {
 	createPersonalizationSnapshot,
+	fetchVerifiedNpmPackage,
 	listNativePackageSpecs,
 	syncOptions,
+	type ImmutablePackageLock,
 	type ResourceManifestEntry,
 } from "./personalization.ts";
 import {
 	classifyHostProviders,
 	listHostOAuthProviderIds,
-	listHostProviderIds,
 	syncHostProviderSecrets,
 } from "./host-auth.ts";
-import { providerSetupGuidance } from "./preflight.ts";
+import { certifyHostPlatform, type SupportedHost } from "./platform.ts";
+import {
+	preflightLinuxKvm,
+	providerSetupGuidance,
+	type KvmPreflightOptions,
+} from "./preflight.ts";
 import { resolveAvailableServices } from "./providers.ts";
-import { SbxClient, SbxCommandError } from "./sbx/client.ts";
-import { backupSessions, restoreSessions } from "./sessions.ts";
+import {
+	CommandCancelledError,
+	CommandTimeoutError,
+	SbxClient,
+	SbxCommandError,
+} from "./sbx/client.ts";
+import {
+	backupSessions,
+	reconcileSessionStaging,
+	restoreSessions,
+} from "./sessions.ts";
 import {
 	createEmptyInitialCommit,
+	createOwnedHostStaging,
 	exportPatch,
 	inspectRepository,
 	loadSandboxStateResult,
 	removeSandboxState,
+	reconcileOwnedHostStaging,
 	sandboxName,
 	saveSandboxState,
 	statePath,
-	type SandboxState,
+	sandboxStateExists,
+	type SandboxStateV2,
 	UnbornHeadError,
 } from "./workspace.ts";
 
@@ -100,6 +123,19 @@ export interface LaunchStateCleanup {
 	removeState(path: string): Promise<void>;
 }
 
+export type LaunchCrashPoint =
+	| "before-create"
+	| "after-create"
+	| "before-image-inspection"
+	| "after-image-inspection"
+	| "before-ready-transition"
+	| "after-ready-transition"
+	| "before-export-publication"
+	| "after-export-publication"
+	| "after-removing-state-persistence"
+	| "before-removal-confirmation"
+	| "after-removal-confirmation";
+
 export interface LaunchOptions {
 	cwd: string;
 	config?: ConfigOverride;
@@ -116,18 +152,32 @@ export interface LaunchOptions {
 	confirmInitialCommit?: (root: string) => Promise<boolean>;
 	confirmResourceCopy?: (summary: string) => Promise<boolean>;
 	confirmNativePackages?: (packages: readonly string[]) => Promise<boolean>;
+	confirmOAuthCopy?: (question: string) => Promise<boolean>;
 	onStatus?: (line: string) => void;
 	onWarning?: (warning: string) => void;
 	/** @internal Test-only image resolver injection. */
 	resolveImage?: KitImageResolver;
+	/** @internal Test-only host certification injection. */
+	certifyPlatform?: () => Promise<SupportedHost>;
+	/** @internal Test-only Linux KVM preflight boundary. */
+	kvmPreflight?: KvmPreflightOptions;
 	/** @internal Test-only state persistence injection. */
 	saveState?: typeof saveSandboxState;
 	/** @internal Test-only repository inspection injection. */
 	inspectRepository?: typeof inspectRepository;
 	/** @internal Test-only host API-key printer. */
 	printApiKey?: (id: string) => Promise<string | undefined>;
+	/** @internal Test-only host OAuth-provider listing. */
+	listHostOAuthProviders?: (ids: readonly string[]) => Promise<Set<string>>;
+	/** @internal Test-only exact npm artifact fetch. */
+	fetchNpmPackage?: (
+		lock: ImmutablePackageLock,
+		destination: string,
+	) => Promise<string>;
 	/** @internal Test-only host provider listing. */
 	listHostProviders?: () => Promise<string[]>;
+	/** @internal Deterministic process-crash hook. */
+	onCrashPoint?: (point: LaunchCrashPoint) => Promise<void>;
 }
 
 const HOST_ENV_ALLOWLIST = [
@@ -148,8 +198,7 @@ export function sanitizedHostEnvironment(
 	const output: NodeJS.ProcessEnv = {};
 	const add = (key: string): void => {
 		const value = env[key];
-		if (value && !/[\u0000-\u001f\u007f-\u009f]/.test(value))
-			output[key] = value;
+		if (value && !/[\u0000-\u001f\u007f-\u009f]/.test(value)) output[key] = value;
 	};
 	for (const key of HOST_ENV_ALLOWLIST) add(key);
 	for (const key of Object.keys(env)) if (LOCALE_ENV_NAME.test(key)) add(key);
@@ -166,10 +215,14 @@ export interface LaunchLifecycle {
 	cleanupWarnings: string[];
 }
 
+export type CustodyOutcome = "preserved" | "released" | "uncertain";
+
 export interface LaunchResult {
-	exitCode: number;
+	agentExitCode: number;
+	launcherExitCode: LauncherExitCode;
+	custody: CustodyOutcome;
 	name: string;
-	state?: SandboxState;
+	state?: SandboxStateV2;
 	warnings: string[];
 	lifecycle: LaunchLifecycle;
 }
@@ -321,11 +374,34 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	const config = mergeConfig(loadedConfig.value, override);
 	if (options.fresh && config.sandbox.name)
 		throw new Error("--fresh cannot be combined with sandbox.name");
-	const sync = syncOptions(config.syncProfile, config.sync);
 	if (!config.enabled)
-		throw new Error(
-			"Docker Sandboxes integration is disabled by configuration",
-		);
+		throw new Error("Docker Sandboxes integration is disabled by configuration");
+	let resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
+	try {
+		resolvedImage = await (options.resolveImage ?? resolveKitImage)(config);
+	} catch (cause) {
+		if (cause instanceof OperationError) throw cause;
+		throw new OperationError({
+			phase: "preflight",
+			operation: "resolve immutable sandbox image",
+			detail: errorDetail(cause),
+			recovery: ["wait for a published production runtime image"],
+			cause,
+		});
+	}
+	try {
+		const host = await (options.certifyPlatform ?? certifyHostPlatform)();
+		await preflightLinuxKvm(host, options.kvmPreflight);
+	} catch (cause) {
+		throw new OperationError({
+			phase: "preflight",
+			operation: "certify host platform and virtualization",
+			detail: errorDetail(cause),
+			recovery: ["pi-dsbx doctor"],
+			cause,
+		});
+	}
+	const sync = syncOptions(config.syncProfile, config.sync);
 	let capabilities: Awaited<ReturnType<SbxClient["capabilities"]>>;
 	try {
 		capabilities = await client.capabilities();
@@ -361,6 +437,16 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		});
 
 	const inspectHostRepository = options.inspectRepository ?? inspectRepository;
+	const prepared = {
+		options,
+		client,
+		loadedConfig,
+		config,
+		resolvedImage,
+		sync,
+		capabilities,
+		inspectHostRepository,
+	};
 	let repository: Awaited<ReturnType<typeof inspectRepository>>;
 	try {
 		repository = await inspectHostRepository(cwd);
@@ -370,13 +456,59 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			options.yes === true ||
 			(await options.confirmInitialCommit?.(error.root)) === true;
 		if (!accepted) throw error;
-		await createEmptyInitialCommit(error.root);
-		repository = await inspectHostRepository(cwd);
+		const root = error.root;
+		const name = config.sandbox.name ?? sandboxName(root, options.fresh);
+		return withSandboxLease(root, name, "run", async () => {
+			try {
+				repository = await inspectHostRepository(cwd);
+			} catch (current) {
+				if (!(current instanceof UnbornHeadError)) throw current;
+				if (current.root !== root)
+					throw new Error("Git repository identity changed before initialization");
+				await createEmptyInitialCommit(root);
+				repository = await inspectHostRepository(cwd);
+			}
+			return launchWithLease({
+				...prepared,
+				repository,
+				root,
+				name,
+			});
+		});
 	}
-	if (!repository.mainWorktree)
-		throw new Error("Clone mode does not support secondary Git worktrees");
 	const root = repository.root;
 	const name = config.sandbox.name ?? sandboxName(root, options.fresh);
+	return withSandboxLease(root, name, "run", () =>
+		launchWithLease({ ...prepared, repository, root, name }),
+	);
+}
+
+async function launchWithLease(context: {
+	options: LaunchOptions;
+	client: SbxClient;
+	loadedConfig: Awaited<ReturnType<typeof loadConfigResult>>;
+	config: ReturnType<typeof mergeConfig>;
+	resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
+	sync: ReturnType<typeof syncOptions>;
+	capabilities: Awaited<ReturnType<SbxClient["capabilities"]>>;
+	inspectHostRepository: typeof inspectRepository;
+	repository: Awaited<ReturnType<typeof inspectRepository>>;
+	root: string;
+	name: string;
+}): Promise<LaunchResult> {
+	const {
+		options,
+		client,
+		loadedConfig,
+		config,
+		resolvedImage,
+		sync,
+		capabilities,
+		inspectHostRepository,
+		repository,
+		root,
+		name,
+	} = context;
 	let existing: boolean;
 	try {
 		existing = await client.exists(name);
@@ -391,20 +523,88 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	}
 	if (options.fresh && existing)
 		throw new Error("Fresh sandbox name collision; retry the launch");
-	let state: SandboxState | undefined;
-	let stateMigrated = false;
+	let state: SandboxStateV2 | undefined;
 	const warnings = [...loadedConfig.warnings];
-	if (existing) {
-		const loadedState = await loadSandboxStateResult(root, name);
+	const persistedState = await sandboxStateExists(root, name);
+	if (existing && !persistedState)
+		throw new OperationError({
+			phase: "prepare",
+			operation: `reconcile sandbox ${name}`,
+			detail:
+				"Sandbox exists without lifecycle state; automatic adoption and removal are refused",
+			recovery: [`sbx inspect ${shellArg(name)}`],
+		});
+	if (persistedState) {
+		let inspection: Record<string, unknown> | undefined;
+		if (existing) inspection = await client.inspect(name);
+		const loadedState = await loadSandboxStateResult(
+			root,
+			name,
+			existing && inspection
+				? {
+						exists: true,
+						inspectedImage: String(inspection.image ?? ""),
+						expectedImage: resolvedImage.image,
+						runtimeSchema: IMAGE_LOCK.runtimeSchema,
+						packageVersion: PACKAGE_VERSION,
+						...(resolvedImage.templateStoreId
+							? { templateStoreId: resolvedImage.templateStoreId }
+							: {}),
+					}
+				: undefined,
+			{
+				expectedRepositoryIdentity: repository.identity,
+				expectedWorktreeIdentity: repository.worktreeIdentity,
+			},
+		);
 		state = loadedState.value;
-		stateMigrated = loadedState.migrated;
 		warnings.push(...loadedState.warnings);
 		if (state.hostRepoIdentity !== repository.identity)
 			throw new Error("Existing sandbox belongs to another repository");
+		if (state.hostWorktreeIdentity !== repository.worktreeIdentity)
+			throw new Error("Existing sandbox belongs to another worktree");
 		if (state.hostBaseCommit !== repository.head)
 			throw new Error(
 				"Host HEAD changed since sandbox creation; export or destroy the sandbox before continuing",
 			);
+		if (
+			state.runtimeImage !== resolvedImage.image ||
+			state.runtimeSchema !== IMAGE_LOCK.runtimeSchema ||
+			state.packageVersion !== PACKAGE_VERSION
+		) {
+			state.phase = "failed";
+			state.updatedAt = new Date().toISOString();
+			state.lastOperationError = {
+				category: "reconcile",
+				at: state.updatedAt,
+			};
+			await (options.saveState ?? saveSandboxState)(state);
+			throw new Error(
+				"Recorded runtime is incompatible with this controller; sandbox preserved for export and recreation",
+			);
+		}
+		const decision = reconcileSandbox(state, {
+			exists: existing,
+			...(existing
+				? { imageMatches: inspection?.image === state.runtimeImage }
+				: {}),
+		});
+		if (decision.action === "remove-state") {
+			await removeSandboxState(root, name);
+			state = undefined;
+			existing = false;
+		} else if (decision.action === "mark-failed") {
+			state.phase = "failed";
+			state.updatedAt = new Date().toISOString();
+			state.lastOperationError = {
+				category: "image",
+				at: state.updatedAt,
+			};
+			await (options.saveState ?? saveSandboxState)(state);
+			throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+		} else if (state.phase !== "ready") {
+			throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+		}
 	}
 
 	options.onStatus?.("syncing host credentials");
@@ -413,13 +613,30 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		options.onWarning?.(warning);
 	};
 	const hostProviderIds =
-		config.providers.length > 0
-			? config.providers
-			: await (options.listHostProviders ?? listHostProviderIds)();
-	const oauthHostIds =
-		sync.models && !options.noHostAuth
-			? await listHostOAuthProviderIds(hostProviderIds)
-			: new Set<string>();
+		config.auth.mode === "none" ? [] : config.auth.providers;
+	const oauthCopyRequested =
+		config.auth.mode === "oauth-copy" &&
+		!options.noHostAuth &&
+		hostProviderIds.length > 0;
+	if (
+		oauthCopyRequested &&
+		(await options.confirmOAuthCopy?.(
+			`Copy OAuth refresh tokens for ${hostProviderIds.join(", ")} into sandbox ${name}? They become VM-readable and persist until the sandbox is removed.`,
+		)) !== true
+	)
+		throw new Error("OAuth credential copy was not approved for this sandbox");
+	const oauthHostIds = oauthCopyRequested
+		? await (options.listHostOAuthProviders ?? listHostOAuthProviderIds)(
+				hostProviderIds,
+			)
+		: new Set<string>();
+	if (oauthCopyRequested) {
+		const missing = hostProviderIds.filter((id) => !oauthHostIds.has(id));
+		if (missing.length > 0)
+			throw new Error(
+				`No copyable OAuth credential found for ${missing.join(", ")}; sign in on the host or choose proxy mode`,
+			);
+	}
 	const mapped = classifyHostProviders(
 		hostProviderIds,
 		capabilities.credentialServices,
@@ -427,18 +644,17 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	);
 	const resolvedProviders = resolveAvailableServices(
 		capabilities.credentialServices,
-		mapped.requested,
+		config.auth.mode === "proxy" ? mapped.requested : [],
 	);
 	for (const id of mapped.unmatched)
-		pushProviderWarning(
-			`Host provider ${id} has no sandbox credential service`,
-		);
+		pushProviderWarning(`Host provider ${id} has no sandbox credential service`);
 	for (const id of resolvedProviders.unsupported)
 		pushProviderWarning(
 			`Requested credential service ${id} is not both audited and proxy-supported`,
 		);
 	if (
-		config.providers.length > 0 &&
+		config.auth.mode === "proxy" &&
+		config.auth.providers.length > 0 &&
 		capabilities.credentialServices.length === 0
 	)
 		pushProviderWarning(
@@ -467,8 +683,12 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		preserved: existing,
 		cleanupWarnings: [],
 	};
-	const temp = await mkdtemp(join(tmpdir(), "pi-docker-sandboxes-"));
-	let exitCode: number | undefined;
+	const hostStagingParent = await realpath(tmpdir());
+	await reconcileOwnedHostStaging(hostStagingParent);
+	const temp = await createOwnedHostStaging(hostStagingParent);
+	let agentExitCode: number | undefined;
+	let launcherExitCode: LauncherExitCode = LauncherExitCode.Success;
+	let custodyOverride: CustodyOutcome | undefined;
 	let result: LaunchResult | undefined;
 	let primaryError: unknown;
 	let stagingCleaned = false;
@@ -495,6 +715,52 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			: phase === "remove-or-keep"
 				? [`sbx inspect ${shellArg(name)}`]
 				: [`sbx exec ${shellArg(name)} git status --porcelain=v1`];
+	const stateMarkFailures: unknown[] = [];
+	const interrupted = (cause: unknown): boolean =>
+		cause instanceof CommandTimeoutError ||
+		cause instanceof CommandCancelledError;
+	const persistFailedState = async (
+		category: "create" | "image" | "export" | "remove" | "reconcile",
+	): Promise<unknown | undefined> => {
+		if (!state || (state.phase === "failed" && state.lastOperationError))
+			return undefined;
+		state.phase = "failed";
+		state.updatedAt = new Date().toISOString();
+		state.lastOperationError = { category, at: state.updatedAt };
+		try {
+			await (options.saveState ?? saveSandboxState)(state);
+			return undefined;
+		} catch (cause) {
+			stateMarkFailures.push(cause);
+			return cause;
+		}
+	};
+	const markInterruptedState = async (
+		cause: unknown,
+		phase: OperationPhase,
+	): Promise<unknown | undefined> => {
+		if (!interrupted(cause)) return undefined;
+		const category =
+			phase === "create"
+				? "create"
+				: phase === "export-or-preserve"
+					? "export"
+					: phase === "remove-or-keep"
+						? "remove"
+						: "reconcile";
+		return persistFailedState(category);
+	};
+	const stateMarkWarning = (cause: unknown): string =>
+		`Interrupted operation state persistence failed: ${errorDetail(cause)}`;
+	const makeResult = (): LaunchResult => ({
+		agentExitCode: agentExitCode!,
+		launcherExitCode,
+		custody: custodyOverride ?? (lifecycle.preserved ? "preserved" : "released"),
+		name,
+		state,
+		warnings,
+		lifecycle,
+	});
 	const finalize = async (
 		phase: OperationPhase,
 		operation: string,
@@ -505,8 +771,18 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			await action();
 			return true;
 		} catch (cause) {
+			const stateMarkFailure = await markInterruptedState(cause, phase);
+			if (stateMarkFailure && agentExitCode !== undefined)
+				warnings.push(stateMarkWarning(stateMarkFailure));
+			if (agentExitCode !== undefined) {
+				launcherExitCode = LauncherExitCode.CustodyFailure;
+				if (phase === "inspect-exit" && operation.includes("existence"))
+					custodyOverride = "uncertain";
+				if (phase === "remove-or-keep" && lifecycle.preserved)
+					custodyOverride = "uncertain";
+			}
 			if (cause instanceof OperationError && cause.phase === phase) {
-				if (exitCode !== undefined) {
+				if (agentExitCode !== undefined) {
 					warnings.push(formatError(cause));
 					return false;
 				}
@@ -520,7 +796,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				errorDetail(cause),
 				operationRecovery,
 			);
-			if (exitCode !== undefined) {
+			if (agentExitCode !== undefined) {
 				warnings.push(formatError(error));
 				return false;
 			}
@@ -530,6 +806,8 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 	try {
 		const profileDirectory = join(temp, "profile");
 		const agentDir = join(homedir(), ".pi", "agent");
+		if (state)
+			await reconcileSessionStaging(agentDir, state.hostRepoIdentity, name);
 		const nativePackages = existing
 			? []
 			: await listNativePackageSpecs(agentDir, config.syncProfile, config.sync);
@@ -547,9 +825,12 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			{
 				availableProviders: new Set([
 					...configuredServices,
-					...(options.noHostAuth ? [] : hostProviderIds),
+					...(config.auth.mode === "proxy"
+						? resolvedProviders.services.map((service) => service.id)
+						: []),
+					...oauthHostIds,
 				]),
-				copyOAuth: !options.noHostAuth,
+				copyOAuth: oauthCopyRequested,
 				deferAllPackages: !existing,
 			},
 		);
@@ -562,11 +843,38 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			oauthAuthPath = undefined;
 		}
+		if (oauthAuthPath)
+			pushProviderWarning(
+				`OAuth refresh tokens copied into sandbox ${name} are VM-readable and persist until the sandbox is removed`,
+			);
 		const nativePackagesToInstall = allowNativePackages
 			? snapshot.nativePackages.filter((packageSpec) =>
 					consentedNativePackages.has(packageSpec),
 				)
 			: [];
+		const nativePackagesToInstallSet = new Set(nativePackagesToInstall);
+		const verifiedNpmPackages = new Map<string, string>();
+		if (!existing) {
+			let npmIndex = 0;
+			for (const lock of snapshot.packageLocks) {
+				if (
+					lock.kind !== "npm" ||
+					(snapshot.nativePackages.includes(lock.source) &&
+						!nativePackagesToInstallSet.has(lock.source))
+				)
+					continue;
+				const destination = join(temp, `npm-package-${npmIndex++}`);
+				await mkdir(destination, { mode: 0o700 });
+				options.onStatus?.(`verifying ${lock.source}`);
+				verifiedNpmPackages.set(
+					lock.source,
+					await (options.fetchNpmPackage ?? fetchVerifiedNpmPackage)(
+						lock,
+						destination,
+					),
+				);
+			}
+		}
 		if (
 			snapshot.manifest.length > 0 &&
 			config.syncProfile !== "mirror" &&
@@ -582,28 +890,13 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			warnings.push(
 				"launcher does not pass host SSH_AUTH_SOCK; Docker Sandboxes may independently provide a proxy socket",
 			);
-		let resolvedImage: Awaited<ReturnType<typeof resolveKitImage>>;
-		try {
-			resolvedImage = await (options.resolveImage ?? resolveKitImage)(config);
-		} catch (cause) {
-			if (cause instanceof OperationError) throw cause;
-			throw new OperationError({
-				phase: "preflight",
-				operation: "resolve immutable sandbox image",
-				detail: errorDetail(cause),
-				recovery: ["pi-dsbx image build"],
-				cause,
-			});
-		}
 		const spec = buildKitSpec({
 			config,
 			services: resolvedProviders.services,
 			image: resolvedImage.image,
 			sandboxName: name,
 			extraAllow:
-				nativePackagesToInstall.length > 0
-					? NATIVE_INSTALL_ALLOW_HOSTS
-					: undefined,
+				nativePackagesToInstall.length > 0 ? NATIVE_INSTALL_ALLOW_HOSTS : undefined,
 		});
 		const kitDirectory = join(temp, "kit");
 		await writeKitDirectory(kitDirectory, spec, {
@@ -614,6 +907,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		if (resolvedProviders.services.length > 0) {
 			if (typeof client.setSecret === "function") {
 				const synced = await syncHostProviderSecrets({
+					mode: config.auth.mode,
 					services: resolvedProviders.services,
 					hostProviderIds,
 					configured: configuredServices,
@@ -640,11 +934,70 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		};
 		if (!existing) {
 			primaryPhase = "create";
+			const now = new Date().toISOString();
+			state = {
+				version: 2,
+				phase: "creating",
+				name,
+				hostBaseCommit: repository.head,
+				hostBranch: repository.branch,
+				hostRepoIdentity: repository.identity,
+				hostWorktreeIdentity: repository.worktreeIdentity,
+				hostRoot: repository.root,
+				workspaceMode: "clone",
+				createdAt: now,
+				updatedAt: now,
+				runtimeImage: resolvedImage.image,
+				runtimeSchema: IMAGE_LOCK.runtimeSchema,
+				packageVersion: PACKAGE_VERSION,
+				...(resolvedImage.templateStoreId
+					? { templateStoreId: resolvedImage.templateStoreId }
+					: {}),
+				imageAttestation: {
+					status: "pending",
+					image: resolvedImage.image,
+					...(resolvedImage.templateStoreId
+						? { templateStoreId: resolvedImage.templateStoreId }
+						: {}),
+				},
+			};
+			primaryOperation = "persist creating sandbox intent";
+			await (options.saveState ?? saveSandboxState)(state);
+			const current = await inspectHostRepository(root);
+			if (
+				current.identity !== state.hostRepoIdentity ||
+				current.head !== state.hostBaseCommit
+			)
+				throw new Error("Host repository changed during sandbox creation");
 			primaryOperation = "create sandbox";
 			options.onStatus?.("creating sandbox");
+			lifecycle.preserved = true;
+			await options.onCrashPoint?.("before-create");
 			await client.create(request);
 			lifecycle.created = true;
-			lifecycle.preserved = true;
+			await options.onCrashPoint?.("after-create");
+			primaryOperation = "reinspect repository after sandbox creation";
+			const createdAgainst = await inspectHostRepository(root);
+			if (
+				createdAgainst.identity !== state.hostRepoIdentity ||
+				createdAgainst.head !== state.hostBaseCommit
+			)
+				throw new Error("Host repository changed during sandbox creation");
+			primaryOperation = "verify created sandbox image";
+			try {
+				await options.onCrashPoint?.("before-image-inspection");
+				const createdInspection = await client.inspect(name);
+				await options.onCrashPoint?.("after-image-inspection");
+				verifyCreatedImage(createdInspection, {
+					image: state.runtimeImage,
+					...(state.templateStoreId
+						? { templateStoreId: state.templateStoreId }
+						: {}),
+				});
+			} catch (cause) {
+				await persistFailedState("image");
+				throw cause;
+			}
 			let compilerInstalled = nativePackagesToInstall.length === 0;
 			if (nativePackagesToInstall.length > 0) {
 				primaryOperation = "install sandbox compiler toolchain";
@@ -662,17 +1015,16 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 								{ user: "root" },
 							)
 						).code === 0;
-				} catch {
+				} catch (cause) {
+					if (interrupted(cause) || !(cause instanceof SbxCommandError)) throw cause;
 					compilerInstalled = false;
 				}
 				if (!compilerInstalled) {
-					const warning =
-						"Could not install compiler; native packages were skipped";
+					const warning = "Could not install compiler; native packages were skipped";
 					warnings.push(warning);
 					options.onWarning?.(warning);
 				}
 			}
-			const nativePackagesToInstallSet = new Set(nativePackagesToInstall);
 			for (const packageSpec of snapshot.packageSpecs) {
 				const native = snapshot.nativePackages.includes(packageSpec);
 				if (
@@ -683,15 +1035,52 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				primaryOperation = `install package ${packageSpec}`;
 				options.onStatus?.(`installing ${packageSpec}`);
 				let installed = false;
-				try {
-					installed =
-						(
-							await client.exec(name, ["pi", "install", packageSpec], {
-								user: "agent",
-							})
-						).code === 0;
-				} catch {
-					installed = false;
+				const verifiedNpm = verifiedNpmPackages.get(packageSpec);
+				if (verifiedNpm) {
+					const staged = `/tmp/pi-dsbx-package-${randomUUID()}.tgz`;
+					let packageError: unknown;
+					try {
+						await client.copyTo(name, verifiedNpm, staged);
+						const owned = await client.exec(name, ["chown", "agent:agent", staged], {
+							user: "root",
+						});
+						if (owned.code !== 0)
+							throw new Error("Could not secure staged npm package ownership");
+						installed =
+							(
+								await client.exec(name, ["pi", "install", staged], {
+									user: "agent",
+								})
+							).code === 0;
+					} catch (cause) {
+						if (interrupted(cause) || !(cause instanceof SbxCommandError))
+							packageError = cause;
+						else installed = false;
+					}
+					try {
+						const removed = await client.exec(name, ["rm", "-f", "--", staged], {
+							user: "root",
+						});
+						if (removed.code !== 0)
+							throw new Error("Could not remove staged npm package");
+					} catch (cause) {
+						if (interrupted(cause)) throw cause;
+						throw new Error("Could not remove staged npm package", { cause });
+					}
+					if (packageError) throw packageError;
+				} else {
+					try {
+						installed =
+							(
+								await client.exec(name, ["pi", "install", packageSpec], {
+									user: "agent",
+								})
+							).code === 0;
+					} catch (cause) {
+						if (interrupted(cause) || !(cause instanceof SbxCommandError))
+							throw cause;
+						installed = false;
+					}
 				}
 				if (!installed) {
 					const warning = native
@@ -700,116 +1089,6 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 					warnings.push(warning);
 					options.onWarning?.(warning);
 				}
-			}
-			if (repository) {
-				state = {
-					version: 1,
-					name,
-					hostBaseCommit: repository.head,
-					hostBranch: repository.branch,
-					hostRepoIdentity: repository.identity,
-					hostRoot: repository.root,
-					workspaceMode: "clone",
-					createdAt: new Date().toISOString(),
-					imageAttestation: {
-						status: "pending",
-						image: resolvedImage.image,
-						...(resolvedImage.templateStoreId
-							? { templateStoreId: resolvedImage.templateStoreId }
-							: {}),
-					},
-				};
-			}
-		}
-
-		if (existing && state && !state.imageAttestation) {
-			state.imageAttestation = {
-				status: "pending",
-				image: resolvedImage.image,
-				...(resolvedImage.templateStoreId
-					? { templateStoreId: resolvedImage.templateStoreId }
-					: {}),
-			};
-			stateMigrated = true;
-		}
-
-		if (state && (!existing || stateMigrated)) {
-			primaryPhase = !existing ? "create" : "prepare";
-			if (!existing) {
-				primaryOperation = "persist pending sandbox state";
-				try {
-					await (options.saveState ?? saveSandboxState)(state);
-				} catch (cause) {
-					throw new LaunchOperationError(
-						"create",
-						primaryOperation,
-						lifecycle,
-						cause,
-						errorDetail(cause),
-						[
-							`sbx inspect ${shellArg(name)}`,
-							`sbx exec ${shellArg(name)} git status --porcelain=v1`,
-							`sbx exec ${shellArg(name)} git diff --binary`,
-							`sbx rm --force ${shellArg(name)}`,
-						],
-						[
-							{
-								label: "data-loss warning",
-								detail: `removing ${shellArg(name)} loses any sandbox-only changes`,
-							},
-						],
-					);
-				}
-				primaryOperation =
-					"reinspect repository after sandbox state persistence";
-				try {
-					const current = await inspectHostRepository(root);
-					if (
-						current.identity !== state.hostRepoIdentity ||
-						current.head !== state.hostBaseCommit
-					)
-						throw new Error("Host repository changed during sandbox creation");
-				} catch (cause) {
-					throw new LaunchOperationError(
-						"create",
-						primaryOperation,
-						lifecycle,
-						cause,
-						errorDetail(cause),
-						custodyCommands(),
-					);
-				}
-			} else {
-				primaryOperation = "persist migrated sandbox state";
-				const current = await inspectHostRepository(root);
-				if (
-					current.identity !== state.hostRepoIdentity ||
-					current.head !== state.hostBaseCommit
-				)
-					throw new Error("Host repository changed during sandbox preparation");
-				await (options.saveState ?? saveSandboxState)(state);
-			}
-		}
-		const attestation = state?.imageAttestation;
-		if (attestation) {
-			primaryOperation = existing
-				? "verify resumed sandbox image"
-				: "verify created sandbox image";
-			try {
-				verifyCreatedImage(await client.inspect(name), attestation);
-				if (attestation.status === "pending") {
-					attestation.status = "verified";
-					await (options.saveState ?? saveSandboxState)(state!);
-				}
-			} catch (cause) {
-				throw new LaunchOperationError(
-					existing ? "prepare" : "create",
-					primaryOperation,
-					lifecycle,
-					cause,
-					errorDetail(cause),
-					custodyCommands(),
-				);
 			}
 		}
 
@@ -840,11 +1119,9 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				credentialError = cause;
 			}
 			try {
-				const removed = await client.exec(
-					name,
-					["rm", "-f", "--", temporaryAuth],
-					{ user: "root" },
-				);
+				const removed = await client.exec(name, ["rm", "-f", "--", temporaryAuth], {
+					user: "root",
+				});
 				if (removed.code !== 0)
 					throw new Error("Could not remove staged OAuth credentials");
 			} catch (cause) {
@@ -853,21 +1130,34 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			if (credentialError) throw credentialError;
 		}
 
-		if (
-			!existing &&
-			!options.fresh &&
-			state &&
-			sync.sessions === "managed"
-		) {
+		if (!existing && !options.fresh && state && sync.sessions === "managed") {
 			primaryPhase = "create";
 			primaryOperation = "restore managed sessions";
-			await restoreSessions(client, agentDir, state.hostRepoIdentity, name);
+			const restored = await restoreSessions(
+				client,
+				agentDir,
+				state.hostRepoIdentity,
+				name,
+			);
+			for (const warning of restored?.warnings ?? []) {
+				warnings.push(warning);
+				options.onWarning?.(warning);
+			}
+		}
+
+		if (!existing && state) {
+			primaryPhase = "create";
+			primaryOperation = "persist ready sandbox state";
+			await options.onCrashPoint?.("before-ready-transition");
+			markSandboxReady(state);
+			await (options.saveState ?? saveSandboxState)(state);
+			await options.onCrashPoint?.("after-ready-transition");
 		}
 
 		primaryPhase = "run";
 		primaryOperation = "attach to sandbox";
 		options.onStatus?.("starting Pi");
-		exitCode = await client.attach(request);
+		agentExitCode = await client.attach(request);
 		lifecycle.preserved = true;
 
 		let present = false;
@@ -882,7 +1172,7 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			lifecycle.changed = "unknown";
 			lifecycle.preserved = true;
 			warnCustody();
-			result = { exitCode, name, state, warnings, lifecycle };
+			result = makeResult();
 			throw finalizationStopped;
 		}
 		if (!present) lifecycle.preserved = false;
@@ -894,8 +1184,14 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 					join(homedir(), ".pi", "agent"),
 					state.hostRepoIdentity,
 					name,
+					config.retention,
 				);
 			} catch (cause) {
+				const stateMarkFailure = await markInterruptedState(
+					cause,
+					"export-or-preserve",
+				);
+				if (stateMarkFailure) warnings.push(stateMarkWarning(stateMarkFailure));
 				lifecycle.preserved = true;
 				const error = new LaunchOperationError(
 					"export-or-preserve",
@@ -907,14 +1203,14 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 					[
 						{
 							label: "managed session backup guidance",
-							detail:
-								"sandbox and state preserved; relaunch to retry managed backup",
+							detail: "sandbox and state preserved; relaunch to retry managed backup",
 						},
 					],
 				);
 				warnings.push(formatError(error));
+				launcherExitCode = LauncherExitCode.CustodyFailure;
 				warnCustody();
-				result = { exitCode, name, state, warnings, lifecycle };
+				result = makeResult();
 				throw finalizationStopped;
 			}
 		}
@@ -937,26 +1233,25 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 
 			let exportRequested = false;
 			let exportSucceeded = false;
-			if (
-				inspected &&
-				changes === "changed" &&
-				!config.sandbox.keep &&
-				state
-			) {
+			if (inspected && changes === "changed" && !config.sandbox.keep && state) {
 				exportRequested =
 					config.export.onExit === "always" ||
 					(config.export.onExit === "prompt" &&
-						(await options.confirm?.(
-							"Export sandbox changes as a patch?",
-						)) === true);
+						(await options.confirm?.("Export sandbox changes as a patch?")) === true);
 				if (exportRequested)
 					exportSucceeded = await finalize(
 						"export-or-preserve",
 						"export sandbox changes",
-						() =>
-							exportPatch(client, state!, config.export.directory).then(
-								() => {},
-							),
+						async () => {
+							state!.phase = "exporting";
+							state!.updatedAt = new Date().toISOString();
+							await (options.saveState ?? saveSandboxState)(state!);
+							await options.onCrashPoint?.("before-export-publication");
+							await exportPatch(client, state!, config.export.directory);
+							await options.onCrashPoint?.("after-export-publication");
+							markSandboxReady(state!);
+							await (options.saveState ?? saveSandboxState)(state!);
+						},
 					);
 			}
 			lifecycle.exported = exportSucceeded;
@@ -975,16 +1270,32 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				if (!cleanup.ok) {
 					lifecycle.cleanupWarnings.push(cleanup.detail);
 					warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
+					launcherExitCode = LauncherExitCode.CustodyFailure;
 					warnCustody();
-					result = { exitCode, name, state, warnings, lifecycle };
+					result = makeResult();
 					throw finalizationStopped;
 				}
-				const removed = await finalize("remove-or-keep", "remove sandbox", () =>
-					client.remove(name, true),
+				const removed = await finalize(
+					"remove-or-keep",
+					"remove sandbox",
+					async () => {
+						if (!state)
+							throw new Error("Sandbox removal requires durable lifecycle state");
+						state.phase = "removing";
+						state.updatedAt = new Date().toISOString();
+						await (options.saveState ?? saveSandboxState)(state);
+						await options.onCrashPoint?.("after-removing-state-persistence");
+						await client.remove(name, true);
+						await options.onCrashPoint?.("before-removal-confirmation");
+						const removalConfirmed = !(await client.exists(name));
+						await options.onCrashPoint?.("after-removal-confirmation");
+						if (!removalConfirmed)
+							throw new Error("Sandbox removal was not confirmed by the daemon");
+					},
 				);
 				if (!removed) {
 					warnCustody();
-					result = { exitCode, name, state, warnings, lifecycle };
+					result = makeResult();
 					throw finalizationStopped;
 				}
 				lifecycle.preserved = false;
@@ -1006,20 +1317,29 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				}
 			}
 		}
-		result = { exitCode, name, state, warnings, lifecycle };
+		result = makeResult();
 	} catch (error) {
-		if (error !== finalizationStopped)
-			primaryError =
-				error instanceof OperationError
-					? error
-					: new LaunchOperationError(
-							primaryPhase,
-							primaryOperation,
-							lifecycle,
-							error,
-							errorDetail(error),
-							recovery(primaryPhase),
-						);
+		if (error !== finalizationStopped) {
+			await markInterruptedState(error, primaryPhase);
+			const operationError = error instanceof OperationError ? error : undefined;
+			if (operationError && stateMarkFailures.length === 0)
+				primaryError = operationError;
+			else {
+				const cause = operationError?.cause ?? error;
+				primaryError = new LaunchOperationError(
+					operationError?.phase ?? primaryPhase,
+					operationError?.operation ?? primaryOperation,
+					lifecycle,
+					cause,
+					errorDetail(cause),
+					operationError?.recovery ?? recovery(primaryPhase),
+					stateMarkFailures.map((failure) => ({
+						label: "interrupted state persistence warning",
+						detail: errorDetail(failure),
+					})),
+				);
+			}
+		}
 	}
 
 	const cleanup = stagingCleaned
@@ -1027,8 +1347,10 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 		: await cleanupHostStaging(temp, options.cleanup);
 	if (!cleanup.ok) {
 		lifecycle.cleanupWarnings.push(cleanup.detail);
-		if (result) warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
-		else if (primaryError) {
+		if (result) {
+			launcherExitCode = LauncherExitCode.CustodyFailure;
+			warnings.push(`Host staging cleanup failed: ${cleanup.detail}`);
+		} else if (primaryError) {
 			const operationError = primaryError as OperationError;
 			primaryError = new LaunchOperationError(
 				operationError.phase,
@@ -1037,7 +1359,13 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 				operationError.cause ?? operationError,
 				errorDetail(operationError.cause ?? operationError),
 				operationError.recovery,
-				[{ label: "host cleanup warning", detail: cleanup.detail }],
+				[
+					...stateMarkFailures.map((failure) => ({
+						label: "interrupted state persistence warning",
+						detail: errorDetail(failure),
+					})),
+					{ label: "host cleanup warning", detail: cleanup.detail },
+				],
 			);
 		} else
 			primaryError = new LaunchOperationError(
@@ -1050,5 +1378,5 @@ export async function launch(options: LaunchOptions): Promise<LaunchResult> {
 			);
 	}
 	if (primaryError) throw primaryError;
-	return result!;
+	return makeResult();
 }

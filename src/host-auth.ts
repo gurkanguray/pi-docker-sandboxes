@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CredentialService } from "./config.ts";
+import type { AuthMode, CredentialService } from "./config.ts";
 import { resolveAvailableServices } from "./providers.ts";
 
 export const SERVICE_ID = /^[a-z0-9][a-z0-9-]*$/;
 
 export interface SyncHostProviderSecretsOptions {
+	mode?: AuthMode;
 	services?: readonly CredentialService[];
 	hostProviderIds?: readonly string[];
 	proxyIds?: readonly string[];
@@ -143,6 +144,8 @@ export async function listHostProviderIds(
 export async function syncHostProviderSecrets(
 	options: SyncHostProviderSecretsOptions,
 ): Promise<SyncHostProviderSecretsResult> {
+	if (options.mode !== "proxy" || options.noHostAuth)
+		return { requested: [], synced: [], warnings: [] };
 	const warnings: string[] = [];
 	const synced: string[] = [];
 	let requested = (options.services ?? []).map((service) => service.id);
@@ -156,16 +159,12 @@ export async function syncHostProviderSecrets(
 		for (const id of classified.unmatched)
 			warnings.push(`Host provider ${id} has no sandbox credential service`);
 	}
-	if (options.noHostAuth) return { requested, synced, warnings };
 	const printApiKey = options.printApiKey ?? printHostApiKey;
 	const setSecret = options.setSecret;
 	if (!setSecret) return { requested, synced, warnings };
 	const services =
 		options.services ??
-		resolveAvailableServices(
-			options.proxyIds ?? requested,
-			requested,
-		).services;
+		resolveAvailableServices(options.proxyIds ?? requested, requested).services;
 	const byId = new Map(services.map((service) => [service.id, service]));
 	const hostIdsForService = (serviceId: string): string[] => {
 		const ids = (options.hostProviderIds ?? []).filter(
@@ -197,7 +196,9 @@ export async function syncHostProviderSecrets(
 			continue;
 		}
 		try {
-			warnings.push(`Storing host credential for ${id} in sbx`);
+			warnings.push(
+				`Host credential for ${id} persists in SBX secret storage until explicitly removed`,
+			);
 			await setSecret(id, key);
 			synced.push(id);
 		} catch {

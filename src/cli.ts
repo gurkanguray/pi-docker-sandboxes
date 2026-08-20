@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { createInterface } from "node:readline/promises";
 import { stderr, stdin, stdout } from "node:process";
 import {
@@ -11,9 +12,28 @@ import {
 } from "./config.ts";
 import { decideDisposition } from "./disposition.ts";
 import { formatError, OperationError } from "./errors.ts";
-import { buildLocalImage } from "./image.ts";
-import { launch } from "./launch.ts";
+import {
+	buildDoctorReceipt,
+	buildStatusReceipt,
+	diagnosticsExitCode,
+} from "./diagnostics.ts";
+import { LauncherExitCode } from "./exit-codes.ts";
+import { IMAGE_LOCK } from "./image-lock.ts";
+import { PACKAGE_VERSION, resolveKitImage } from "./kit.ts";
+import { launch, type LaunchResult } from "./launch.ts";
+import { certifyHostPlatform } from "./platform.ts";
+import {
+	SandboxLeaseBusyError,
+	unlockSandboxLease,
+	withSandboxLease,
+} from "./lease.ts";
+import { markSandboxReady, reconcileSandbox } from "./reconcile.ts";
 import { SbxClient } from "./sbx/client.ts";
+import {
+	deleteSessionBackup,
+	listSessionBackups,
+	restoreSessions,
+} from "./sessions.ts";
 import {
 	attestSandbox,
 	formatDoctor,
@@ -24,8 +44,9 @@ import {
 	applyPatch,
 	exportPatch,
 	inspectRepository,
-	loadSandboxState,
+	loadSandboxStateResult,
 	removeSandboxState,
+	saveSandboxState,
 	sandboxStateExists,
 	sandboxName,
 	statePath,
@@ -108,13 +129,6 @@ export function parseRunArgs(input: readonly string[]): ParsedRun {
 		}
 		if (flag === "--name") {
 			override.sandbox = { ...override.sandbox, name: take(args, index, flag) };
-			continue;
-		}
-		if (flag === "--image") {
-			override.sandbox = {
-				...override.sandbox,
-				image: take(args, index, flag),
-			};
 			continue;
 		}
 		if (flag === "--cwd") {
@@ -262,7 +276,7 @@ export function createPausedConfirm(
 }
 
 function usage(): string {
-	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status\n  pi-dsbx doctor\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx image build\n\nRun options: --profile NAME --sync NAME --name NAME --image REF --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
+	return `pi-dsbx - run Pi inside Docker Sandboxes\n\nUsage:\n  pi-dsbx run [options] [-- PI_ARGS...]\n  pi-dsbx status [--json]\n  pi-dsbx doctor [--json]\n  pi-dsbx config\n  pi-dsbx export [--name NAME]\n  pi-dsbx apply PATCH [--name NAME] --yes\n  pi-dsbx destroy [--name NAME] [--yes] [--discard-changes]\n  pi-dsbx unlock --name NAME --yes\n  pi-dsbx sessions list [--name NAME]\n  pi-dsbx sessions restore [BACKUP] [--name NAME]\n  pi-dsbx sessions delete BACKUP [--name NAME] --yes\n\nRun options: --profile NAME --sync NAME --name NAME --fresh --keep --discard-changes --no-host-auth --trust-project-config --yes --cwd PATH\nPi session resume: pi-dsbx run [options] -- --session ID\nDestroy options: --yes approves clean clone removal only; --discard-changes explicitly authorizes changed/unknown removal`;
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -271,9 +285,25 @@ function option(args: string[], name: string): string | undefined {
 	return take(args, index, name);
 }
 
+export function launchProcessExitCode(
+	result: Pick<LaunchResult, "agentExitCode" | "launcherExitCode">,
+): number {
+	return result.agentExitCode === 0
+		? result.launcherExitCode
+		: result.agentExitCode;
+}
+
 export async function main(
 	argv = process.argv.slice(2),
-	dependencies: { removeState?: (path: string) => Promise<void> } = {},
+	dependencies: {
+		removeState?: (path: string) => Promise<void>;
+		/** @internal Test-only launch boundary. */
+		launch?: typeof launch;
+		/** @internal Test-only host certification boundary. */
+		certifyHost?: typeof certifyHostPlatform;
+		/** @internal Test-only repository inspection boundary. */
+		inspectRepository?: typeof inspectRepository;
+	} = {},
 ): Promise<number> {
 	const [command = "run", ...args] = argv;
 	if (command === "help" || command === "--help" || command === "-h") {
@@ -282,6 +312,7 @@ export async function main(
 	}
 	if (command === "run") {
 		const parsed = parseRunArgs(args);
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
 		const reporter = createLaunchReporter();
 		const pausedConfirm = createPausedConfirm(reporter, confirm);
 		const checkingConfirm = createPausedConfirm(
@@ -294,8 +325,13 @@ export async function main(
 			confirm,
 			"copying host profile",
 		);
+		const oauthConfirm = createPausedConfirm(
+			reporter,
+			confirm,
+			"syncing host credentials",
+		);
 		try {
-			const result = await launch({
+			const result = await (dependencies.launch ?? launch)({
 				cwd: parsed.cwd,
 				config: parsed.override,
 				fresh: parsed.fresh,
@@ -306,6 +342,7 @@ export async function main(
 				piArgs: parsed.piArgs,
 				confirm: checkingConfirm,
 				confirmResourceCopy: copyingConfirm,
+				confirmOAuthCopy: oauthConfirm,
 				confirmNativePackages: (packages) =>
 					pausedConfirm(
 						`${packages.length} packages need a compiler in this sandbox (${packages.join(", ")}).\nInstall toolchain here? ~1–2 min, not saved.`,
@@ -318,7 +355,7 @@ export async function main(
 					),
 			});
 			reporter.reportRemaining(result.warnings);
-			return result.exitCode;
+			return launchProcessExitCode(result);
 		} finally {
 			reporter.stop();
 		}
@@ -327,12 +364,26 @@ export async function main(
 	const client = new SbxClient();
 	const sandboxAttested = await attestSandbox();
 	if (command === "status") {
+		const json = booleanOption(args, "--json");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (json) {
+			const receipt = await buildStatusReceipt({ cwd, client });
+			console.log(JSON.stringify(receipt, null, 2));
+			return diagnosticsExitCode(receipt);
+		}
 		console.log(sandboxStatus(sandboxAttested));
 		if (!sandboxAttested)
 			console.log(JSON.stringify(await client.list(), null, 2));
 		return 0;
 	}
 	if (command === "doctor") {
+		const json = booleanOption(args, "--json");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (json) {
+			const receipt = await buildDoctorReceipt({ cwd, client });
+			console.log(JSON.stringify(receipt, null, 2));
+			return diagnosticsExitCode(receipt);
+		}
 		const results = await runDoctor(sandboxAttested, client, cwd);
 		console.log(formatDoctor(results));
 		return results.some((result) => result.level === "fail") ? 1 : 0;
@@ -341,17 +392,145 @@ export async function main(
 		console.log(JSON.stringify(await loadConfig(cwd), null, 2));
 		return 0;
 	}
-	if (command === "image" && args[0] === "build") {
-		const result = await buildLocalImage({ keepBuildDirectory: true });
+	if (command === "unlock") {
+		const root = resolve(cwd);
+		const name = option(args, "--name");
+		const yes = booleanOption(args, "--yes");
+		if (!name) throw new TypeError("unlock requires --name NAME");
+		if (!yes) throw new TypeError("unlock requires explicit --yes authority");
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(root);
+		const record = await unlockSandboxLease(repository.root, name, true);
 		console.log(
-			`Built and verified ${result.verifiedImage}\nLoaded ${result.image}\nArtifacts: ${result.buildDirectory}`,
+			`Unlocked abandoned ${record.operation} lease for sandbox ${record.sandbox}`,
 		);
 		return 0;
 	}
+	if (command === "sessions") {
+		const action = args.shift();
+		if (action !== "list" && action !== "restore" && action !== "delete")
+			throw new TypeError("sessions requires list, restore, or delete");
+		const requestedName = option(args, "--name");
+		const yes = booleanOption(args, "--yes");
+		const backupId = args.shift();
+		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
+		if (action === "list" && (backupId || yes))
+			throw new TypeError("sessions list accepts only --name NAME");
+		if (action === "restore" && yes)
+			throw new TypeError("--yes is not valid for sessions restore");
+		if (action === "delete" && !backupId)
+			throw new TypeError("sessions delete requires BACKUP");
+		if (action === "delete" && !yes)
+			throw new TypeError("sessions delete requires explicit --yes authority");
+		if (action !== "list")
+			await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(resolve(cwd));
+		const config = await loadConfig(cwd);
+		const name =
+			requestedName ?? config.sandbox.name ?? sandboxName(repository.root);
+		const agentDir = join(homedir(), ".pi", "agent");
+		if (action === "list") {
+			console.log(
+				JSON.stringify(
+					await listSessionBackups(agentDir, repository.identity, name),
+					null,
+					2,
+				),
+			);
+			return 0;
+		}
+		if (action === "restore") {
+			return withSandboxLease(
+				repository.root,
+				name,
+				"sessions-restore",
+				async () => {
+					if (!(await sandboxStateExists(repository.root, name)))
+						throw new Error(`No clone state for sandbox ${name}`);
+					if (!(await client.exists(name)))
+						throw new Error(`Sandbox ${name} does not exist`);
+					const [resolved, inspection] = await Promise.all([
+						resolveKitImage(config),
+						client.inspect(name),
+					]);
+					const state = (
+						await loadSandboxStateResult(
+							repository.root,
+							name,
+							{
+								exists: true,
+								inspectedImage: String(inspection.image ?? ""),
+								expectedImage: resolved.image,
+								runtimeSchema: IMAGE_LOCK.runtimeSchema,
+								packageVersion: PACKAGE_VERSION,
+								...(resolved.templateStoreId
+									? { templateStoreId: resolved.templateStoreId }
+									: {}),
+							},
+							{
+								expectedRepositoryIdentity: repository.identity,
+								expectedWorktreeIdentity: repository.worktreeIdentity,
+							},
+						)
+					).value;
+					if (
+						state.hostRepoIdentity !== repository.identity ||
+						state.hostWorktreeIdentity !== repository.worktreeIdentity
+					)
+						throw new Error("Sandbox state belongs to another worktree");
+					if (
+						state.runtimeImage !== resolved.image ||
+						state.runtimeSchema !== IMAGE_LOCK.runtimeSchema ||
+						state.packageVersion !== PACKAGE_VERSION
+					)
+						throw new Error("Sandbox runtime is incompatible with session restore");
+					const decision = reconcileSandbox(state, {
+						exists: true,
+						imageMatches: inspection.image === state.runtimeImage,
+					});
+					if (
+						state.phase !== "ready" ||
+						decision.action !== "preserve" ||
+						state.imageAttestation?.status !== "verified" ||
+						state.imageAttestation.image !== state.runtimeImage
+					)
+						throw new Error(
+							`Sandbox is not ready for exact session restore: ${decision.action}`,
+						);
+					const restored = await restoreSessions(
+						client,
+						agentDir,
+						repository.identity,
+						name,
+						backupId,
+					);
+					if (!restored) throw new Error("No managed session backup exists");
+					for (const warning of restored.warnings)
+						console.warn(`pi-dsbx: warning: ${warning}`);
+					console.log(`Restored ${restored.backupDirectory}`);
+					return 0;
+				},
+			);
+		}
+		return withSandboxLease(
+			repository.root,
+			name,
+			"sessions-delete",
+			async () => {
+				await deleteSessionBackup(agentDir, repository.identity, name, backupId!);
+				console.log(`Deleted session backup ${backupId}`);
+				return 0;
+			},
+		);
+	}
 	if (command === "export" || command === "apply" || command === "destroy") {
 		const root = resolve(cwd);
-		const repository = await inspectRepository(root);
-		const name = option(args, "--name") ?? sandboxName(repository.root);
+		const requestedName = option(args, "--name");
 		const yes = booleanOption(args, "--yes");
 		const discardChanges = booleanOption(args, "--discard-changes");
 		if (discardChanges && command !== "destroy")
@@ -360,90 +539,180 @@ export async function main(
 		if (command === "apply" && !patch)
 			throw new TypeError("apply requires a patch path");
 		if (args.length > 0) throw new TypeError(`Unexpected argument: ${args[0]}`);
-		const hasState = await sandboxStateExists(repository.root, name);
-		const state = hasState
-			? await loadSandboxState(repository.root, name)
-			: undefined;
-		if (command === "export") {
-			if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
-			const config = await loadConfig(cwd);
-			const result = await exportPatch(client, state!, config.export.directory);
-			console.log(`${result.path}\n${result.summary.join("\n")}`);
-			return 0;
-		}
-		if (command === "apply") {
-			if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
-			const patchPath = patch!;
-			if (
-				!yes &&
-				!(await confirm(`Apply ${patchPath} to the host working tree?`))
-			)
-				throw new Error("Patch apply cancelled");
-			await applyPatch(state, resolve(patchPath));
-			console.log(`Applied ${patchPath}`);
-			return 0;
-		}
-		const dirty = !state
-			? undefined
-			: (
-					await client.exec(name, ["git", "status", "--porcelain=v1"], {
-						workdir: state.hostRoot,
-					})
-				).stdout.trim().length > 0;
-		let discardAuthorized = discardChanges;
-		if ((!state || dirty) && !discardAuthorized)
-			discardAuthorized = await confirm(
-				!state
-					? "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state."
-					: "Sandbox has unexported changes. Destroy and discard them permanently?",
-			);
-		if (
-			dirty === false &&
-			!yes &&
-			!(await confirm("Destroy sandbox permanently?"))
-		)
-			throw new Error("Destroy cancelled");
-		const disposition = decideDisposition({
-			keep: false,
-			changes: !state ? "unknown" : dirty ? "changed" : "clean",
-			exportRequested: false,
-			exportSucceeded: false,
-			discardAuthorized,
-		});
-		if (disposition !== "remove")
-			throw new Error(
-				"Destroy cancelled; use --discard-changes to authorize noninteractive dirty removal",
-			);
-		await client.remove(name, true);
-		try {
-			await removeSandboxState(repository.root, name, dependencies.removeState);
-		} catch (cause) {
-			throw new OperationError({
-				phase: "remove-or-keep",
-				operation: "remove stale sandbox state",
-				detail: `Sandbox ${name} is gone but stale state requires inspection; automatic removal was refused`,
-				recovery: [
-					`Inspect ${statePath(repository.root, name)} and its parent directory manually`,
-				],
-				cause,
+		await (dependencies.certifyHost ?? certifyHostPlatform)();
+		const repository = await (
+			dependencies.inspectRepository ?? inspectRepository
+		)(root);
+		const name = requestedName ?? sandboxName(repository.root);
+		return withSandboxLease(repository.root, name, command, async () => {
+			const hasState = await sandboxStateExists(repository.root, name);
+			const state = hasState
+				? (
+						await loadSandboxStateResult(
+							repository.root,
+							name,
+							async () => {
+								const config = await loadConfig(cwd);
+								const resolved = await resolveKitImage(config);
+								const inspection = await client.inspect(name);
+								return {
+									exists: true,
+									inspectedImage: String(inspection.image ?? ""),
+									expectedImage: resolved.image,
+									runtimeSchema: IMAGE_LOCK.runtimeSchema,
+									packageVersion: PACKAGE_VERSION,
+									...(resolved.templateStoreId
+										? { templateStoreId: resolved.templateStoreId }
+										: {}),
+								};
+							},
+							{
+								expectedRepositoryIdentity: repository.identity,
+								expectedWorktreeIdentity: repository.worktreeIdentity,
+							},
+						)
+					).value
+				: undefined;
+			const daemonExists = await client.exists(name);
+			if (!state)
+				throw new Error(
+					daemonExists
+						? "Sandbox exists without durable lifecycle state; automatic mutation is refused"
+						: `No clone state for sandbox ${name}`,
+				);
+			const inspection = daemonExists ? await client.inspect(name) : undefined;
+			const decision = reconcileSandbox(state, {
+				exists: daemonExists,
+				...(inspection
+					? { imageMatches: inspection.image === state.runtimeImage }
+					: {}),
 			});
-		}
-		console.log(`Destroyed ${name}`);
-		return 0;
+			if (decision.action === "mark-failed") {
+				state.phase = "failed";
+				state.updatedAt = new Date().toISOString();
+				state.lastOperationError = {
+					category: "image",
+					at: state.updatedAt,
+				};
+				await saveSandboxState(state);
+				throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+			}
+			if (decision.action === "remove-state") {
+				if (command !== "destroy")
+					throw new Error("Sandbox is absent; lifecycle state preserved");
+				await removeSandboxState(repository.root, name, dependencies.removeState);
+				console.log(`Sandbox ${name} was already absent; removed stale state`);
+				return 0;
+			}
+			if (state.phase !== "ready" || decision.reason !== "sandbox is ready")
+				throw new Error(`${decision.reason}; sandbox preserved for recovery`);
+			if (
+				state.imageAttestation?.status !== "verified" ||
+				state.imageAttestation.image !== state.runtimeImage
+			)
+				throw new Error(
+					"Ready lifecycle state lacks verified runtime image attestation; sandbox preserved",
+				);
+			if (command === "export") {
+				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
+				const config = await loadConfig(cwd);
+				state.phase = "exporting";
+				state.updatedAt = new Date().toISOString();
+				await saveSandboxState(state);
+				const result = await exportPatch(client, state, config.export.directory);
+				markSandboxReady(state);
+				await saveSandboxState(state);
+				console.log(`${result.path}\n${result.summary.join("\n")}`);
+				return 0;
+			}
+			if (command === "apply") {
+				if (!state) throw new TypeError(`No clone state for sandbox ${name}`);
+				const patchPath = patch!;
+				if (
+					!yes &&
+					!(await confirm(`Apply ${patchPath} to the host working tree?`))
+				)
+					throw new Error("Patch apply cancelled");
+				await applyPatch(state, resolve(patchPath));
+				console.log(`Applied ${patchPath}`);
+				return 0;
+			}
+			const dirty = state
+				? (
+						await client.exec(name, ["git", "status", "--porcelain=v1"], {
+							workdir: state.hostRoot,
+						})
+					).stdout.trim().length > 0
+				: undefined;
+			let discardAuthorized = discardChanges;
+			if ((!state || dirty) && !discardAuthorized)
+				discardAuthorized = await confirm(
+					state
+						? "Sandbox has unexported changes. Destroy and discard them permanently?"
+						: "Destroy this sandbox permanently? Unexported work cannot be inspected without clone state.",
+				);
+			if (
+				dirty === false &&
+				!yes &&
+				!(await confirm("Destroy sandbox permanently?"))
+			)
+				throw new Error("Destroy cancelled");
+			const disposition = decideDisposition({
+				keep: false,
+				changes: state ? (dirty ? "changed" : "clean") : "unknown",
+				exportRequested: false,
+				exportSucceeded: false,
+				discardAuthorized,
+			});
+			if (disposition !== "remove")
+				throw new Error(
+					"Destroy cancelled; use --discard-changes to authorize noninteractive dirty removal",
+				);
+			if (!state)
+				throw new Error("Sandbox removal requires durable lifecycle state");
+			state.phase = "removing";
+			state.updatedAt = new Date().toISOString();
+			await saveSandboxState(state);
+			await client.remove(name, true);
+			if (await client.exists(name))
+				throw new Error("Sandbox removal was not confirmed by the daemon");
+			try {
+				await removeSandboxState(repository.root, name, dependencies.removeState);
+			} catch (cause) {
+				throw new OperationError({
+					phase: "remove-or-keep",
+					operation: "remove stale sandbox state",
+					detail: `Sandbox ${name} is gone but stale state requires inspection; automatic removal was refused`,
+					recovery: [
+						`Inspect ${statePath(repository.root, name)} and its parent directory manually`,
+					],
+					cause,
+				});
+			}
+			console.log(`Destroyed ${name}`);
+			return 0;
+		});
 	}
 	throw new TypeError(`Unknown command: ${command}\n${usage()}`);
+}
+
+export async function run(
+	argv = process.argv.slice(2),
+	dependencies: Parameters<typeof main>[1] = {},
+): Promise<number> {
+	try {
+		return await main(argv, dependencies);
+	} catch (error) {
+		console.error(`Error: ${formatError(error)}`);
+		return error instanceof SandboxLeaseBusyError
+			? LauncherExitCode.Busy
+			: LauncherExitCode.Failure;
+	}
 }
 
 if (
 	process.argv[1] &&
 	import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
-	main()
-		.then((code) => {
-			process.exitCode = code;
-		})
-		.catch((error: unknown) => {
-			console.error(`Error: ${formatError(error)}`);
-			process.exitCode = 1;
-		});
+	process.exitCode = await run();
 }

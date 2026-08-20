@@ -21,10 +21,13 @@ import {
 	resolve,
 	sep,
 } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { SyncOptions, SyncProfile } from "./config.ts";
 import { scanSecretCategories } from "./errors.ts";
 import { isCopyEligibleOAuthEntry } from "./host-auth.ts";
+import { superviseCommand } from "./sbx/supervisor.ts";
+import { inspectRepository } from "./workspace.ts";
 
 const SAFE_SETTINGS = new Set([
 	"theme",
@@ -79,7 +82,7 @@ export function sanitizeSettings(
 			warnings.push(`settings.${key}: absolute host path not imported`);
 			continue;
 		}
-		const sanitized = sanitizeModelValue(
+		const sanitized = sanitizeSettingValue(
 			entry,
 			`settings.${key}`,
 			key,
@@ -110,7 +113,11 @@ export function sanitizeSettings(
 
 const PACKAGE_CONTROLS = /\p{C}/u;
 const NPM_PACKAGE =
+	/^npm:((?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)@((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/i;
+const NPM_PACKAGE_LEGACY =
 	/^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[a-z0-9*^~<>=|.+_-]+)?$/i;
+const NPM_INTEGRITY = /^sha512-[A-Za-z0-9+/]{86}==$/;
+const GIT_COMMIT = /^[0-9a-f]{40}$/i;
 const GIT_HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const GIT_PATH_SEGMENT = /^[A-Za-z0-9._-]+$/;
 const GIT_REF_SEGMENT = /^[a-z0-9._-]+$/i;
@@ -146,7 +153,7 @@ function safeGitPath(
 	return { path, ref };
 }
 
-function safeRemotePackage(source: string): boolean {
+function safeRemotePackage(source: string, immutable = true): boolean {
 	if (
 		PACKAGE_CONTROLS.test(source) ||
 		/\s/u.test(source) ||
@@ -155,7 +162,8 @@ function safeRemotePackage(source: string): boolean {
 		source.includes("\\")
 	)
 		return false;
-	if (source.startsWith("npm:") && NPM_PACKAGE.test(source)) return true;
+	if (source.startsWith("npm:"))
+		return (immutable ? NPM_PACKAGE : NPM_PACKAGE_LEGACY).test(source);
 	if (!source.startsWith("git:") || source.includes("%")) return false;
 	const spec = source.slice(4);
 	const protocol = /^(https?|git|ssh):\/\//.exec(spec);
@@ -164,7 +172,13 @@ function safeRemotePackage(source: string): boolean {
 		const slash = remainder.indexOf("/");
 		const rawHost = remainder.slice(0, slash);
 		const rawPath = safeGitPath(remainder.slice(slash + 1));
-		if (slash <= 0 || !safeGitHost(rawHost) || !rawPath) return false;
+		if (
+			slash <= 0 ||
+			!safeGitHost(rawHost) ||
+			!rawPath ||
+			(immutable && !GIT_COMMIT.test(rawPath.ref ?? ""))
+		)
+			return false;
 		try {
 			const parsed = new URL(spec);
 			const parsedPath = safeGitPath(parsed.pathname.replace(/^\/+/, ""));
@@ -186,18 +200,309 @@ function safeRemotePackage(source: string): boolean {
 	}
 	if (spec.startsWith("git@")) {
 		const colon = spec.indexOf(":", 4);
+		const path = safeGitPath(spec.slice(colon + 1));
 		return (
 			colon > 4 &&
 			safeGitHost(spec.slice(4, colon)) &&
-			Boolean(safeGitPath(spec.slice(colon + 1)))
+			Boolean(path) &&
+			(!immutable || GIT_COMMIT.test(path?.ref ?? ""))
 		);
 	}
 	const slash = spec.indexOf("/");
+	const path = safeGitPath(spec.slice(slash + 1));
 	return (
 		slash > 0 &&
 		safeGitHost(spec.slice(0, slash)) &&
-		Boolean(safeGitPath(spec.slice(slash + 1)))
+		Boolean(path) &&
+		(!immutable || GIT_COMMIT.test(path?.ref ?? ""))
 	);
+}
+
+export interface ImmutablePackageLock {
+	source: string;
+	kind: "npm" | "git";
+	integrity?: string;
+	commit?: string;
+}
+
+export type NpmPackCommand = (
+	command: string,
+	args: readonly string[],
+	options: {
+		policy: { timeoutMs: number; killGraceMs: number };
+		maxBuffer?: number;
+	},
+) => Promise<{ stdout: Buffer; stderr: Buffer; code: number }>;
+
+export async function fetchVerifiedNpmPackage(
+	lock: ImmutablePackageLock,
+	destination: string,
+	run: NpmPackCommand = superviseCommand,
+): Promise<string> {
+	const parsed = NPM_PACKAGE.exec(lock.source);
+	if (lock.kind !== "npm" || !parsed || !lock.integrity)
+		throw new TypeError("exact npm lock with sha512 integrity required");
+	const result = await run(
+		"npm",
+		[
+			"pack",
+			`${parsed[1]}@${parsed[2]}`,
+			"--pack-destination",
+			destination,
+			"--json",
+			"--ignore-scripts",
+		],
+		{
+			policy: { timeoutMs: 120_000, killGraceMs: 5_000 },
+			maxBuffer: 1024 * 1024,
+		},
+	);
+	if (result.code !== 0) throw new Error("npm package fetch failed");
+	let filename: unknown;
+	try {
+		filename = (JSON.parse(result.stdout.toString("utf8")) as unknown[])[0];
+		filename = plainObject(filename) ? filename.filename : undefined;
+	} catch {
+		throw new Error("npm package fetch returned an invalid response");
+	}
+	if (
+		typeof filename !== "string" ||
+		basename(filename) !== filename ||
+		!filename.endsWith(".tgz")
+	)
+		throw new Error("npm package fetch returned an invalid response");
+	const path = join(destination, filename);
+	const [root, resolved, before] = await Promise.all([
+		realpath(destination),
+		realpath(path),
+		lstat(path),
+	]);
+	if (
+		resolved !== join(root, filename) ||
+		!before.isFile() ||
+		before.isSymbolicLink() ||
+		before.nlink !== 1 ||
+		before.size > 64 * 1024 * 1024
+	)
+		throw new Error("npm package fetch returned an unsafe artifact");
+	const bytes = await readFile(path);
+	const after = await lstat(path);
+	if (
+		after.dev !== before.dev ||
+		after.ino !== before.ino ||
+		after.size !== before.size
+	)
+		throw new Error("npm package artifact changed during verification");
+	const declared = Buffer.from(
+		lock.integrity.slice("sha512-".length),
+		"base64",
+	);
+	const actual = createHash("sha512").update(bytes).digest();
+	if (declared.length !== actual.length || !timingSafeEqual(declared, actual))
+		throw new Error("npm package integrity verification failed");
+	return path;
+}
+
+export function resolvePackageLocks(
+	value: unknown,
+): Sanitized<ImmutablePackageLock[]> {
+	if (value === undefined) return { value: [], warnings: [] };
+	if (!Array.isArray(value))
+		throw new TypeError("settings.packages must be an array");
+	const locks = new Map<string, ImmutablePackageLock>();
+	const warnings: string[] = [];
+	for (const [index, entry] of value.entries()) {
+		const source =
+			typeof entry === "string"
+				? entry
+				: plainObject(entry) && typeof entry.source === "string"
+					? entry.source
+					: undefined;
+		if (!source || !/^(?:npm|git):/.test(source)) {
+			warnings.push(
+				`settings.packages[${index}]: host path package specs are not imported`,
+			);
+			continue;
+		}
+		if (!safeRemotePackage(source)) {
+			if (safeRemotePackage(source, false))
+				throw new TypeError(
+					`settings.packages[${index}]: immutable package source required`,
+				);
+			warnings.push(
+				`settings.packages[${index}]: unsafe remote package spec not imported`,
+			);
+			continue;
+		}
+		if (source.startsWith("npm:")) {
+			const integrity = plainObject(entry) ? entry.integrity : undefined;
+			if (typeof integrity !== "string" || !NPM_INTEGRITY.test(integrity))
+				throw new TypeError(
+					`settings.packages[${index}]: exact npm package requires sha512 integrity`,
+				);
+			const existing = locks.get(source);
+			if (existing?.integrity && existing.integrity !== integrity)
+				throw new TypeError(
+					`settings.packages[${index}]: conflicting integrity receipts`,
+				);
+			locks.set(source, { source, kind: "npm", integrity });
+			continue;
+		}
+		const commit = source.match(/@([0-9a-f]{40})$/i)?.[1];
+		locks.set(source, { source, kind: "git", commit });
+	}
+	return { value: [...locks.values()], warnings };
+}
+
+function installedGitPackage(
+	agentDir: string,
+	source: string,
+): { checkout: string; immutableBase: string } | undefined {
+	const spec = source.slice("git:".length);
+	let host: string;
+	let parsedPath: ReturnType<typeof safeGitPath>;
+	const protocol = /^(?:https?|git|ssh):\/\//.exec(spec);
+	if (protocol) {
+		let url: URL;
+		try {
+			url = new URL(spec);
+		} catch {
+			return undefined;
+		}
+		host = url.hostname;
+		parsedPath = safeGitPath(url.pathname.replace(/^\/+/, ""));
+	} else if (spec.startsWith("git@")) {
+		const colon = spec.indexOf(":", 4);
+		host = spec.slice(4, colon);
+		parsedPath = safeGitPath(spec.slice(colon + 1));
+	} else {
+		const slash = spec.indexOf("/");
+		host = spec.slice(0, slash);
+		parsedPath = safeGitPath(spec.slice(slash + 1));
+	}
+	if (!parsedPath) return undefined;
+	const immutableBase = parsedPath.ref
+		? source.slice(0, -(parsedPath.ref.length + 1))
+		: source;
+	return {
+		checkout: join(agentDir, "git", host, ...parsedPath.path.split("/")),
+		immutableBase,
+	};
+}
+
+async function resolveInstalledPackageLocks(
+	agentDir: string,
+	value: unknown,
+	options: PersonalizationSnapshotOptions,
+): Promise<Sanitized<ImmutablePackageLock[]>> {
+	if (value === undefined) return { value: [], warnings: [] };
+	if (!Array.isArray(value))
+		throw new TypeError("settings.packages must be an array");
+	let npmLockfile: unknown;
+	const resolved: unknown[] = [];
+	for (const [index, entry] of value.entries()) {
+		let source: string | undefined;
+		if (typeof entry === "string") source = entry;
+		else if (plainObject(entry) && typeof entry.source === "string")
+			source = entry.source;
+		if (!source || !safeRemotePackage(source, false)) {
+			resolved.push(entry);
+			continue;
+		}
+		if (source.startsWith("npm:")) {
+			const suppliedIntegrity = plainObject(entry) ? entry.integrity : undefined;
+			if (
+				safeRemotePackage(source) &&
+				typeof suppliedIntegrity === "string" &&
+				NPM_INTEGRITY.test(suppliedIntegrity)
+			) {
+				resolved.push(entry);
+				continue;
+			}
+			npmLockfile ??= await readJson(
+				agentDir,
+				"npm/package-lock.json",
+				options,
+			);
+			const name = npmPackageName(source);
+			const packages = plainObject(npmLockfile)
+				? npmLockfile.packages
+				: undefined;
+			const receipt =
+				name && plainObject(packages)
+					? packages[`node_modules/${name}`]
+					: undefined;
+			if (!name || !plainObject(receipt))
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm lock receipt missing`,
+				);
+			const exactSource = `npm:${name}@${String(receipt.version)}`;
+			if (
+				!NPM_PACKAGE.test(exactSource) ||
+				typeof receipt.integrity !== "string" ||
+				!NPM_INTEGRITY.test(receipt.integrity)
+			)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm lock receipt invalid`,
+				);
+			const requested = NPM_PACKAGE.exec(source);
+			if (requested && requested[2] !== receipt.version)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm version mismatch`,
+				);
+			const installed = await readJson(
+				agentDir,
+				`npm/node_modules/${name}/package.json`,
+				options,
+			);
+			if (
+				!plainObject(installed) ||
+				installed.name !== name ||
+				installed.version !== receipt.version
+			)
+				throw new TypeError(
+					`settings.packages[${index}]: installed npm package mismatch`,
+				);
+			resolved.push({ source: exactSource, integrity: receipt.integrity });
+			continue;
+		}
+		if (safeRemotePackage(source)) {
+			resolved.push(entry);
+			continue;
+		}
+		const installed = installedGitPackage(agentDir, source);
+		if (!installed)
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git package path invalid`,
+			);
+		let checkout: string;
+		try {
+			const gitRoot = await realpath(join(agentDir, "git"));
+			checkout = await realpath(installed.checkout);
+			const withinGitRoot = relative(gitRoot, checkout);
+			const checkoutStat = await lstat(installed.checkout);
+			if (
+				checkoutStat.isSymbolicLink() ||
+				!checkoutStat.isDirectory() ||
+				withinGitRoot === "" ||
+				withinGitRoot === ".." ||
+				withinGitRoot.startsWith(`..${sep}`)
+			)
+				throw new Error("unsafe checkout");
+		} catch (cause) {
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git checkout invalid`,
+				{ cause },
+			);
+		}
+		const repository = await inspectRepository(checkout);
+		if (repository.root !== checkout || !GIT_COMMIT.test(repository.head))
+			throw new TypeError(
+				`settings.packages[${index}]: installed Git checkout invalid`,
+			);
+		resolved.push(`${installed.immutableBase}@${repository.head}`);
+	}
+	return resolvePackageLocks(resolved);
 }
 
 export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
@@ -213,7 +518,7 @@ export function resolvePackageSpecs(value: unknown): Sanitized<string[]> {
 				: plainObject(entry) && typeof entry.source === "string"
 					? entry.source
 					: undefined;
-		if (!source || !safeRemotePackage(source)) {
+		if (!source || !safeRemotePackage(source, false)) {
 			warnings.push(
 				source && /^(?:npm|git):/i.test(source)
 					? `settings.packages[${index}]: unsafe remote package spec not imported`
@@ -331,7 +636,7 @@ function credentialKey(key: string): boolean {
 	);
 }
 
-function sanitizeModelValue(
+function sanitizeSettingValue(
 	value: unknown,
 	path: string,
 	key: string,
@@ -382,7 +687,7 @@ function sanitizeModelValue(
 	if (Array.isArray(value)) {
 		return value
 			.map((entry, index) =>
-				sanitizeModelValue(
+				sanitizeSettingValue(
 					entry,
 					`${path}[${index}]`,
 					key,
@@ -395,7 +700,7 @@ function sanitizeModelValue(
 	if (plainObject(value)) {
 		const output: Record<string, unknown> = {};
 		for (const [childKey, child] of Object.entries(value)) {
-			const sanitized = sanitizeModelValue(
+			const sanitized = sanitizeSettingValue(
 				child,
 				`${path}.${childKey}`,
 				childKey,
@@ -409,18 +714,263 @@ function sanitizeModelValue(
 	return value;
 }
 
+export type SanitizedModelMetadata = Record<string, unknown>;
+
+const MODEL_STRING_KEYS = new Set(["id", "name", "api"]);
+const MODEL_NUMBER_KEYS = new Set(["contextWindow", "maxTokens"]);
+const MODEL_ENTRY_KEYS = new Set([
+	...MODEL_STRING_KEYS,
+	...MODEL_NUMBER_KEYS,
+	"reasoning",
+	"baseUrl",
+	"input",
+	"thinkingLevelMap",
+	"cost",
+]);
+const PROVIDER_KEYS = new Set([
+	...MODEL_ENTRY_KEYS,
+	"models",
+	"modelOverrides",
+]);
+const THINKING_LEVEL_KEYS = new Set([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+]);
+const COST_KEYS = new Set([
+	"input",
+	"output",
+	"cacheRead",
+	"cacheWrite",
+	"inputTokensAbove",
+]);
+
+const DANGEROUS_METADATA_KEYS = new Set([
+	"__proto__",
+	"prototype",
+	"constructor",
+]);
+const DYNAMIC_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,255}$/;
+
+function validateDynamicMetadataKey(key: string): string {
+	if (DANGEROUS_METADATA_KEYS.has(key) || !DYNAMIC_METADATA_KEY.test(key))
+		throw new TypeError("unsafe dynamic model metadata key");
+	return key;
+}
+
+function safeMetadataUrl(value: unknown): string | undefined {
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		/[^\x21-\x7e]/.test(value) ||
+		value.includes("\\") ||
+		/%(?:0[0-9a-f]|1[0-9a-f]|20|7f)/i.test(value)
+	)
+		return undefined;
+	try {
+		const url = new URL(value);
+		const hostname = url.hostname.replace(/^\[|\]$/g, "");
+		const labels = hostname.split(".");
+		if (
+			url.protocol !== "https:" ||
+			url.username ||
+			url.password ||
+			url.search ||
+			url.hash ||
+			url.port ||
+			isIP(hostname) !== 0 ||
+			labels.length < 2 ||
+			labels.some(
+				(label) =>
+					label.startsWith("xn--") ||
+					!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label),
+			) ||
+			/\.(?:internal|local|localhost)$/i.test(hostname)
+		)
+			return undefined;
+		return url.href;
+	} catch {
+		return undefined;
+	}
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+function sanitizeCostTier(value: unknown): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output: Record<string, unknown> = {};
+	for (const key of COST_KEYS) {
+		const number = finiteNumber(value[key]);
+		if (number !== undefined) output[key] = number;
+	}
+	return output;
+}
+
+function sanitizeCost(value: unknown): Record<string, unknown> | undefined {
+	const output = sanitizeCostTier(value);
+	if (!output || !plainObject(value)) return output;
+	if (Array.isArray(value.tiers))
+		output.tiers = value.tiers.flatMap((tier) => {
+			const sanitized = sanitizeCostTier(tier);
+			return sanitized ? [sanitized] : [];
+		});
+	return output;
+}
+
+function sanitizeModelEntry(
+	value: unknown,
+): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output: Record<string, unknown> = {};
+	for (const key of MODEL_STRING_KEYS)
+		if (typeof value[key] === "string") output[key] = value[key];
+	for (const key of MODEL_NUMBER_KEYS) {
+		const number = finiteNumber(value[key]);
+		if (number !== undefined) output[key] = number;
+	}
+	if (typeof value.reasoning === "boolean") output.reasoning = value.reasoning;
+	const baseUrl = safeMetadataUrl(value.baseUrl);
+	if (baseUrl) output.baseUrl = baseUrl;
+	if (Array.isArray(value.input)) {
+		const input = value.input.filter(
+			(entry): entry is "text" | "image" =>
+				entry === "text" || entry === "image",
+		);
+		if (input.length > 0) output.input = [...new Set(input)];
+	}
+	if (plainObject(value.thinkingLevelMap)) {
+		const levels: Record<string, unknown> = {};
+		for (const key of THINKING_LEVEL_KEYS) {
+			const level = value.thinkingLevelMap[key];
+			if (typeof level === "string" || level === null) levels[key] = level;
+		}
+		output.thinkingLevelMap = levels;
+	}
+	const cost = sanitizeCost(value.cost);
+	if (cost) output.cost = cost;
+	return output;
+}
+
+function modelEntryHasUnsupportedMetadata(value: unknown): boolean {
+	if (!plainObject(value)) return true;
+	if (Object.keys(value).some((key) => !MODEL_ENTRY_KEYS.has(key))) return true;
+	if (!plainObject(value.cost)) return value.cost !== undefined;
+	if (
+		Object.keys(value.cost).some(
+			(key) => key !== "tiers" && !COST_KEYS.has(key),
+		)
+	)
+		return true;
+	return (
+		Array.isArray(value.cost.tiers) &&
+		value.cost.tiers.some(
+			(tier) =>
+				!plainObject(tier) ||
+				Object.keys(tier).some((key) => !COST_KEYS.has(key)),
+		)
+	);
+}
+
+function providerHasUnsupportedMetadata(value: unknown): boolean {
+	if (!plainObject(value)) return true;
+	if (Object.keys(value).some((key) => !PROVIDER_KEYS.has(key))) return true;
+	if (
+		Array.isArray(value.models) &&
+		value.models.some((model) => modelEntryHasUnsupportedMetadata(model))
+	)
+		return true;
+	return (
+		plainObject(value.modelOverrides) &&
+		Object.values(value.modelOverrides).some((override) =>
+			modelEntryHasUnsupportedMetadata(override),
+		)
+	);
+}
+
+function sanitizeProvider(value: unknown): Record<string, unknown> | undefined {
+	if (!plainObject(value)) return undefined;
+	const output = sanitizeModelEntry(value)!;
+	if (Array.isArray(value.models))
+		output.models = value.models.flatMap((model) => {
+			const sanitized = sanitizeModelEntry(model);
+			return sanitized && typeof sanitized.id === "string" ? [sanitized] : [];
+		});
+	if (plainObject(value.modelOverrides)) {
+		const overrides: Record<string, unknown> = {};
+		for (const [id, override] of Object.entries(value.modelOverrides)) {
+			validateDynamicMetadataKey(id);
+			const sanitized = sanitizeModelEntry(override);
+			if (sanitized) overrides[id] = sanitized;
+		}
+		output.modelOverrides = overrides;
+	}
+	return output;
+}
+
 export function sanitizeModels(
 	value: unknown,
-): Sanitized<Record<string, unknown>> {
+	kind: "models" | "store" = "models",
+): Sanitized<SanitizedModelMetadata> {
 	if (!plainObject(value))
 		throw new TypeError("models.json must contain an object");
-	const warnings: string[] = [];
+	const output: SanitizedModelMetadata = {};
+	let dropped = false;
+	if (kind === "models") {
+		if (plainObject(value.providers)) {
+			const providers: Record<string, unknown> = {};
+			for (const [id, provider] of Object.entries(value.providers)) {
+				validateDynamicMetadataKey(id);
+				if (providerHasUnsupportedMetadata(provider)) dropped = true;
+				const sanitized = sanitizeProvider(provider);
+				if (sanitized) providers[id] = sanitized;
+			}
+			output.providers = providers;
+		}
+		dropped ||= Object.keys(value).some((key) => key !== "providers");
+	} else {
+		for (const [id, provider] of Object.entries(value)) {
+			validateDynamicMetadataKey(id);
+			if (!plainObject(provider)) {
+				dropped = true;
+				continue;
+			}
+			const sanitized: Record<string, unknown> = {};
+			const checkedAt = finiteNumber(provider.checkedAt);
+			if (checkedAt !== undefined) sanitized.checkedAt = checkedAt;
+			if (Array.isArray(provider.models)) {
+				if (
+					provider.models.some((model) =>
+						modelEntryHasUnsupportedMetadata(model),
+					)
+				)
+					dropped = true;
+				sanitized.models = provider.models.flatMap((model) => {
+					const entry = sanitizeModelEntry(model);
+					return entry && typeof entry.id === "string" ? [entry] : [];
+				});
+			}
+			output[id] = sanitized;
+			if (
+				Object.keys(provider).some(
+					(key) => key !== "checkedAt" && key !== "models",
+				)
+			)
+				dropped = true;
+		}
+	}
 	return {
-		value: sanitizeModelValue(value, "models", "models", warnings) as Record<
-			string,
-			unknown
-		>,
-		warnings,
+		value: output,
+		warnings: dropped
+			? ["model metadata outside the production allowlist was not imported"]
+			: [],
 	};
 }
 
@@ -746,7 +1296,8 @@ async function isPiExtensionEntry(
 	} catch {
 		return false;
 	}
-	const pi = plainObject(manifest) && plainObject(manifest.pi) ? manifest.pi : {};
+	const pi =
+		plainObject(manifest) && plainObject(manifest.pi) ? manifest.pi : {};
 	const candidates =
 		Array.isArray(pi.extensions) &&
 		pi.extensions.every(
@@ -865,7 +1416,7 @@ async function copyResourceTree(
 
 async function readJson(
 	agentDir: string,
-	name: "settings.json" | "models.json" | "models-store.json" | "auth.json",
+	name: string,
 	options: PersonalizationSnapshotOptions,
 ): Promise<unknown | undefined> {
 	const source = join(agentDir, name);
@@ -904,6 +1455,7 @@ export interface PersonalizationSnapshot {
 	warnings: string[];
 	directory: string;
 	manifest: ResourceManifestEntry[];
+	packageLocks: ImmutablePackageLock[];
 	packageSpecs: string[];
 	nativePackages: string[];
 }
@@ -993,6 +1545,7 @@ export async function createPersonalizationSnapshot(
 			throw destinationOwnershipChanged();
 		const warnings: string[] = [];
 		const manifest: ResourceManifestEntry[] = [];
+		const packageLocks: ImmutablePackageLock[] = [];
 		const packageSpecs: string[] = [];
 		const nativePackages: string[] = [];
 		let nativeSkillsDestinationCreated = false;
@@ -1005,13 +1558,16 @@ export async function createPersonalizationSnapshot(
 					: { value: {}, warnings: [] };
 				warnings.push(...sanitized.warnings);
 				if (policy.packages) {
-					const packages = resolvePackageSpecs(
+					const packages = await resolveInstalledPackageLocks(
+						agentDir,
 						plainObject(settings) ? settings.packages : undefined,
+						options,
 					);
 					warnings.push(...packages.warnings);
-					packageSpecs.push(...packages.value);
+					packageLocks.push(...packages.value);
+					packageSpecs.push(...packages.value.map((entry) => entry.source));
 					const installable: string[] = [];
-					for (const source of packages.value) {
+					for (const { source } of packages.value) {
 						const installed = await readInstalledNpmPackage(agentDir, source);
 						if (installed && packageHasNativeDeps(installed)) {
 							nativePackages.push(source);
@@ -1151,7 +1707,7 @@ export async function createPersonalizationSnapshot(
 			}
 			const store = await readJson(agentDir, "models-store.json", options);
 			if (store !== undefined && plainObject(store)) {
-				const sanitized = sanitizeModels(store);
+				const sanitized = sanitizeModels(store, "store");
 				warnings.push(...sanitized.warnings);
 				const storePath = join(destination, "models-store.json");
 				await ownedStage(storePath, () =>
@@ -1162,35 +1718,35 @@ export async function createPersonalizationSnapshot(
 					),
 				);
 			}
-			const hostAuth = options.copyOAuth
-				? await readJson(agentDir, "auth.json", options)
-				: undefined;
-			if (hostAuth !== undefined && plainObject(hostAuth)) {
-				const oauthAuth: Record<string, unknown> = {};
-				for (const [id, entry] of Object.entries(hostAuth)) {
-					if (!isCopyEligibleOAuthEntry(entry)) continue;
-					if (options.availableProviders && !options.availableProviders.has(id))
-						continue;
-					oauthAuth[id] = {
-						type: "oauth",
-						access: entry.access,
-						refresh: entry.refresh,
-						...(typeof entry.expires === "number"
-							? { expires: entry.expires }
-							: {}),
-						...(typeof entry.accountId === "string"
-							? { accountId: entry.accountId }
-							: {}),
-					};
-				}
-				if (Object.keys(oauthAuth).length > 0) {
-					const authPath = join(destination, "auth.json");
-					await ownedStage(authPath, () =>
-						writeFile(authPath, `${JSON.stringify(oauthAuth, null, 2)}\n`, {
-							mode: 0o600,
-						}),
-					);
-				}
+		}
+		const hostAuth = options.copyOAuth
+			? await readJson(agentDir, "auth.json", options)
+			: undefined;
+		if (hostAuth !== undefined && plainObject(hostAuth)) {
+			const oauthAuth: Record<string, unknown> = {};
+			for (const [id, entry] of Object.entries(hostAuth)) {
+				if (!isCopyEligibleOAuthEntry(entry)) continue;
+				if (options.availableProviders && !options.availableProviders.has(id))
+					continue;
+				oauthAuth[id] = {
+					type: "oauth",
+					access: entry.access,
+					refresh: entry.refresh,
+					...(typeof entry.expires === "number"
+						? { expires: entry.expires }
+						: {}),
+					...(typeof entry.accountId === "string"
+						? { accountId: entry.accountId }
+						: {}),
+				};
+			}
+			if (Object.keys(oauthAuth).length > 0) {
+				const authPath = join(destination, "auth.json");
+				await ownedStage(authPath, () =>
+					writeFile(authPath, `${JSON.stringify(oauthAuth, null, 2)}\n`, {
+						mode: 0o600,
+					}),
+				);
 			}
 		}
 		const resources = (
@@ -1377,7 +1933,7 @@ export async function createPersonalizationSnapshot(
 		await ownedStage(profilePath, () =>
 			writeFile(
 				profilePath,
-				`${JSON.stringify({ hash, profile, policy, warnings, manifest }, null, 2)}\n`,
+				`${JSON.stringify({ hash, profile, policy, warnings, manifest, packageLocks }, null, 2)}\n`,
 				{ mode: 0o600 },
 			),
 		);
@@ -1386,6 +1942,7 @@ export async function createPersonalizationSnapshot(
 			warnings,
 			directory: destination,
 			manifest,
+			packageLocks,
 			packageSpecs,
 			nativePackages,
 		};

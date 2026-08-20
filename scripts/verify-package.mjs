@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { npmCommand } from "./npm-command.mjs";
 
 const exec = promisify(execFile);
 
@@ -12,8 +13,7 @@ function fail(message) {
 }
 
 function allowed(path, files, hasLicense) {
-	if (path === "package.json" || (hasLicense && path === "LICENSE"))
-		return true;
+	if (path === "package.json" || (hasLicense && path === "LICENSE")) return true;
 	return files.some((entry) => {
 		const normalized = entry.replace(/^\.\//, "");
 		if (normalized.endsWith("/")) return path.startsWith(normalized);
@@ -28,7 +28,7 @@ function allowed(path, files, hasLicense) {
 
 async function npm(args, cwd) {
 	try {
-		return await exec("npm", args, { cwd });
+		return await exec(npmCommand, args, { cwd });
 	} catch (error) {
 		fail(String(error?.stderr ?? error?.message ?? error).trim());
 	}

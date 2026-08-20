@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "runId": 32252505720,
+  "runAttempt": 1,
+  "sourceSha": "996e101d6db389f44ba6c7722a65ba306921e181",
+  "receiptArtifact": "receipt-32252505720-1",
+  "securityArtifacts": [
+    "security-amd64-standard-32252505720-1",
+    "security-arm64-standard-32252505720-1"
+  ]
+}
