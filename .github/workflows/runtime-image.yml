@@ -113,7 +113,7 @@ jobs:
           image: ${{ needs.source.outputs.qemu_image }}
           platforms: amd64,arm64
       - uses: >-
-          docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+          docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
         with:
           version: ${{ needs.source.outputs.buildx_version }}
           driver-opts: image=${{ needs.source.outputs.buildkit_driver }}
