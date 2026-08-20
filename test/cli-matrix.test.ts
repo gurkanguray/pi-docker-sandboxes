@@ -20,6 +20,19 @@ const commands = [
 	"sessions delete",
 ];
 
+const runFlags = [
+	"--profile",
+	"--sync",
+	"--name",
+	"--fresh",
+	"--keep",
+	"--discard-changes",
+	"--no-host-auth",
+	"--trust-project-config",
+	"--yes",
+	"--cwd",
+];
+
 const extensionFlags = [
 	"docker-sandbox",
 	"docker-sandbox-profile",
@@ -46,6 +59,10 @@ test("CLI help exposes every supported command operation", async (t) => {
 			)
 			.filter(Boolean),
 		commands,
+	);
+	assert.deepEqual(
+		/^Run options: (.+)$/m.exec(output)?.[1]?.match(/--[a-z-]+/g),
+		runFlags,
 	);
 });
 

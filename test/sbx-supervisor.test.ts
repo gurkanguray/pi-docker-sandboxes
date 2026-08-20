@@ -25,6 +25,19 @@ async function waitForPid(path: string): Promise<number> {
 	throw new Error("child fixture did not publish its PID");
 }
 
+async function waitForPidExit(pid: number): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+			throw error;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error(`descendant ${pid} was not reaped`);
+}
+
 test("supervisor captures output from a real Node child", async () => {
 	const result = await superviseCommand(
 		process.execPath,
@@ -65,10 +78,7 @@ test("timeout is specific, bounded, and kills a TERM-resistant descendant", {
 		return true;
 	});
 	assert.ok(Date.now() - started < 2_000);
-	assert.throws(
-		() => process.kill(pid, 0),
-		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-	);
+	await waitForPidExit(pid);
 });
 
 test("direct exit clears its deadline while a descendant is reaped", {
@@ -132,10 +142,7 @@ test("AbortSignal cancels a started Python process group after cleanup", {
 	const pid = await waitForPid(pidPath);
 	controller.abort();
 	await assert.rejects(operation, CommandCancelledError);
-	assert.throws(
-		() => process.kill(pid, 0),
-		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
-	);
+	await waitForPidExit(pid);
 	assert.throws(
 		() => process.kill(-pid, 0),
 		(error: NodeJS.ErrnoException) => error.code === "ESRCH",
