@@ -265,7 +265,12 @@ test("mirror pins ordinary installed npm and Git packages", async () => {
 	await writeFile(
 		join(agent, "settings.json"),
 		JSON.stringify({
-			packages: ["npm:example", "git:github.com/owner/repo"],
+			packages: [
+				"npm:example",
+				"git:github.com/owner/repo",
+				"git:https://github.com/owner/repo.git",
+				"git:git@github.com:owner/repo.git",
+			],
 		}),
 	);
 
@@ -288,11 +293,71 @@ test("mirror pins ordinary installed npm and Git packages", async () => {
 			kind: "git",
 			commit,
 		},
+		{
+			source: `git:https://github.com/owner/repo.git@${commit}`,
+			kind: "git",
+			commit,
+		},
+		{
+			source: `git:git@github.com:owner/repo.git@${commit}`,
+			kind: "git",
+			commit,
+		},
 	]);
 	assert.deepEqual(
 		snapshot.packageSpecs,
 		snapshot.packageLocks.map((entry) => entry.source),
 	);
+	await rm(root, { recursive: true, force: true });
+});
+
+test("mirror rejects npm receipts that disagree with requested or installed versions", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-dsbx-mismatched-lock-"));
+	const agent = join(root, "agent");
+	const destination = join(root, "snapshot");
+	await mkdir(join(agent, "npm", "node_modules", "example"), {
+		recursive: true,
+	});
+	await writeFile(
+		join(agent, "npm", "package-lock.json"),
+		JSON.stringify({
+			packages: {
+				"node_modules/example": {
+					version: "1.2.3",
+					integrity: packageIntegrity,
+				},
+			},
+		}),
+	);
+	await writeFile(
+		join(agent, "npm", "node_modules", "example", "package.json"),
+		JSON.stringify({ name: "example", version: "9.9.9" }),
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({ packages: ["npm:example@2.0.0"] }),
+	);
+	await assert.rejects(
+		createPersonalizationSnapshot(
+			agent,
+			join(root, "version-snapshot"),
+			"mirror",
+			undefined,
+			{ deferAllPackages: true },
+		),
+		/installed npm version mismatch/,
+	);
+	await writeFile(
+		join(agent, "settings.json"),
+		JSON.stringify({ packages: ["npm:example"] }),
+	);
+	await assert.rejects(
+		createPersonalizationSnapshot(agent, destination, "mirror", undefined, {
+			deferAllPackages: true,
+		}),
+		/installed npm package mismatch/,
+	);
+	assert.equal(await exists(destination), false);
 	await rm(root, { recursive: true, force: true });
 });
 
