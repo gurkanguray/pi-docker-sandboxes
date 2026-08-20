@@ -39,6 +39,7 @@
     "prepack": "node scripts/prepack.mjs",
     "typecheck": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; tsc --noEmit",
     "test": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/*.test.ts",
+    "test:cli-matrix": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/cli-matrix.test.ts",
     "test:coverage": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node scripts/check-coverage.mjs",
     "test:e2e": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; PI_DOCKER_SANDBOX_E2E=1 node --experimental-strip-types --test test/e2e.test.ts",
     "test:e2e-receipt": "test -f .source-checkout || { echo 'source checkout only' >&2; exit 1; }; node --experimental-strip-types --test test/e2e-receipt.test.ts",
